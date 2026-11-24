@@ -1,0 +1,35 @@
+# Конфігурація Shopify-застосунку (Shopify CLI). Заповнюється на етапі 2:
+# `npm run shopify -- app config link` після створення застосунку в Shopify Dev Dashboard
+# (Custom Distribution, магазин onetunne.com).
+client_id = ""
+name = "ONE TUNNE Logistics"
+application_url = "https://example.com"
+embedded = true
+
+[access_scopes]
+# Мінімальні дозволи. Етап 1 не звертається до Shopify, тому доступи не запитуються.
+# План для етапу 2+ (запитувати поступово, лише потрібні):
+#   read_orders, write_orders            — замовлення, редагування адреси/контактів
+#   read_all_orders                      — імпорт замовлень старших за 60 днів (потребує схвалення)
+#   read_products, read_inventory        — товари, варіанти, фото, залишки
+#   read_merchant_managed_fulfillment_orders, write_merchant_managed_fulfillment_orders — трек-номер після передачі перевізнику
+#   read_shipping, write_shipping        — CarrierService (розрахунок доставки в Checkout, етап 3)
+# Захищені дані клієнтів (ім'я, адреса, телефон, email) — окремий запит у Dev Dashboard.
+scopes = ""
+
+[auth]
+redirect_urls = ["https://example.com/auth/callback"]
+
+[webhooks]
+api_version = "2026-10"
+
+  [[webhooks.subscriptions]]
+  topics = ["app/uninstalled"]
+  uri = "/webhooks/app/uninstalled"
+
+  [[webhooks.subscriptions]]
+  topics = ["app/scopes_update"]
+  uri = "/webhooks/app/scopes_update"
+
+[build]
+automatically_update_urls_on_dev = true

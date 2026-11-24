@@ -1,0 +1,2427 @@
+/*
+ * ONE TUNNE Logistics — глобальні стилі UI-кіту.
+ * Чорно-біла гама; колір — лише для семантичних станів (критично / попередження / успіх).
+ * Теми: світла за замовчуванням; html[data-theme="dark"]; html[data-theme="system"] — за prefers-color-scheme.
+ * Без зовнішніх шрифтів і CDN (працює офлайн). Класи — з префіксом "ot-".
+ * Брейкпоінти: < 768px — мобільний; 768–1023px — планшет; ≥ 1024px — десктоп.
+ */
+
+/* ---------- Токени ---------- */
+
+:root {
+  color-scheme: light;
+
+  --ot-color-bg: #f1f1f1;
+  --ot-color-surface: #ffffff;
+  --ot-color-surface-subdued: #f7f7f7;
+  --ot-color-surface-hover: #f3f3f3;
+  --ot-color-surface-active: #ebebeb;
+  --ot-color-border: #e3e3e3;
+  --ot-color-border-strong: #cccccc;
+  --ot-color-border-input: #8a8a8a;
+  --ot-color-text: #1a1a1a;
+  --ot-color-text-subdued: #616161;
+  --ot-color-text-disabled: #a3a3a3;
+  --ot-color-text-placeholder: #8a8a8a;
+  --ot-color-primary: #1a1a1a;
+  --ot-color-primary-hover: #333333;
+  --ot-color-primary-active: #000000;
+  --ot-color-on-primary: #ffffff;
+  --ot-color-focus: #1a1a1a;
+  --ot-color-overlay: rgba(0, 0, 0, 0.4);
+
+  --ot-color-critical: #b42318;
+  --ot-color-critical-strong: #b42318;
+  --ot-color-critical-strong-hover: #912018;
+  --ot-color-on-critical: #ffffff;
+  --ot-color-critical-bg: #fef3f2;
+  --ot-color-critical-border: #fecdca;
+  --ot-color-warning: #8a5300;
+  --ot-color-warning-icon: #b54708;
+  --ot-color-warning-bg: #fffaeb;
+  --ot-color-warning-border: #fedf89;
+  --ot-color-success: #067647;
+  --ot-color-success-bg: #ecfdf3;
+  --ot-color-success-border: #abefc6;
+  --ot-color-info-bg: #f3f3f3;
+  --ot-color-info-border: #dedede;
+
+  --ot-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --ot-shadow-button: 0 1px 0 rgba(0, 0, 0, 0.05);
+  --ot-shadow-overlay: 0 16px 40px rgba(0, 0, 0, 0.18), 0 2px 6px rgba(0, 0, 0, 0.08);
+
+  --ot-font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --ot-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --ot-font-size: 14px;
+  --ot-line-height: 20px;
+  --ot-font-size-sm: 13px;
+  --ot-font-size-caption: 12px;
+  --ot-font-size-input: 14px;
+
+  --ot-space-0: 0;
+  --ot-space-1: 4px;
+  --ot-space-2: 8px;
+  --ot-space-3: 12px;
+  --ot-space-4: 16px;
+  --ot-space-5: 24px;
+  --ot-space-6: 32px;
+
+  --ot-radius-card: 12px;
+  --ot-radius-control: 8px;
+  --ot-radius-sm: 6px;
+  --ot-radius-pill: 999px;
+
+  --ot-control-height: 32px;
+  --ot-control-height-sm: 28px;
+  --ot-nav-item-height: 32px;
+  --ot-sidebar-width: 240px;
+  --ot-topbar-height: 56px;
+  --ot-page-max-width: 1200px;
+  --ot-gutter: 16px;
+
+  --ot-z-topbar: 20;
+  --ot-z-overlay: 40;
+  --ot-z-drawer: 50;
+  --ot-z-skip: 100;
+
+  --ot-duration: 160ms;
+  --ot-duration-slow: 240ms;
+  --ot-ease: cubic-bezier(0.2, 0, 0, 1);
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+
+  --ot-color-bg: #0c0c0d;
+  --ot-color-surface: #171718;
+  --ot-color-surface-subdued: #1d1d1f;
+  --ot-color-surface-hover: #232325;
+  --ot-color-surface-active: #2b2b2e;
+  --ot-color-border: #2e2e31;
+  --ot-color-border-strong: #46464a;
+  --ot-color-border-input: #6b6b70;
+  --ot-color-text: #ededed;
+  --ot-color-text-subdued: #a5a5aa;
+  --ot-color-text-disabled: #606065;
+  --ot-color-text-placeholder: #7d7d83;
+  --ot-color-primary: #f2f2f2;
+  --ot-color-primary-hover: #d9d9d9;
+  --ot-color-primary-active: #c4c4c4;
+  --ot-color-on-primary: #111111;
+  --ot-color-focus: #f2f2f2;
+  --ot-color-overlay: rgba(0, 0, 0, 0.6);
+
+  --ot-color-critical: #ff9b92;
+  --ot-color-critical-strong: #c4302b;
+  --ot-color-critical-strong-hover: #a82722;
+  --ot-color-on-critical: #ffffff;
+  --ot-color-critical-bg: rgba(240, 68, 56, 0.13);
+  --ot-color-critical-border: rgba(240, 68, 56, 0.4);
+  --ot-color-warning: #f5c76b;
+  --ot-color-warning-icon: #f5c76b;
+  --ot-color-warning-bg: rgba(245, 180, 60, 0.12);
+  --ot-color-warning-border: rgba(245, 180, 60, 0.38);
+  --ot-color-success: #6ed69b;
+  --ot-color-success-bg: rgba(50, 200, 120, 0.12);
+  --ot-color-success-border: rgba(50, 200, 120, 0.38);
+  --ot-color-info-bg: #1f1f21;
+  --ot-color-info-border: #38383c;
+
+  --ot-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --ot-shadow-button: none;
+  --ot-shadow-overlay: 0 16px 40px rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+
+@media (prefers-color-scheme: dark) {
+  html[data-theme="system"] {
+    color-scheme: dark;
+
+    --ot-color-bg: #0c0c0d;
+    --ot-color-surface: #171718;
+    --ot-color-surface-subdued: #1d1d1f;
+    --ot-color-surface-hover: #232325;
+    --ot-color-surface-active: #2b2b2e;
+    --ot-color-border: #2e2e31;
+    --ot-color-border-strong: #46464a;
+    --ot-color-border-input: #6b6b70;
+    --ot-color-text: #ededed;
+    --ot-color-text-subdued: #a5a5aa;
+    --ot-color-text-disabled: #606065;
+    --ot-color-text-placeholder: #7d7d83;
+    --ot-color-primary: #f2f2f2;
+    --ot-color-primary-hover: #d9d9d9;
+    --ot-color-primary-active: #c4c4c4;
+    --ot-color-on-primary: #111111;
+    --ot-color-focus: #f2f2f2;
+    --ot-color-overlay: rgba(0, 0, 0, 0.6);
+
+    --ot-color-critical: #ff9b92;
+    --ot-color-critical-strong: #c4302b;
+    --ot-color-critical-strong-hover: #a82722;
+    --ot-color-on-critical: #ffffff;
+    --ot-color-critical-bg: rgba(240, 68, 56, 0.13);
+    --ot-color-critical-border: rgba(240, 68, 56, 0.4);
+    --ot-color-warning: #f5c76b;
+    --ot-color-warning-icon: #f5c76b;
+    --ot-color-warning-bg: rgba(245, 180, 60, 0.12);
+    --ot-color-warning-border: rgba(245, 180, 60, 0.38);
+    --ot-color-success: #6ed69b;
+    --ot-color-success-bg: rgba(50, 200, 120, 0.12);
+    --ot-color-success-border: rgba(50, 200, 120, 0.38);
+    --ot-color-info-bg: #1f1f21;
+    --ot-color-info-border: #38383c;
+
+    --ot-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --ot-shadow-button: none;
+    --ot-shadow-overlay: 0 16px 40px rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4);
+  }
+}
+
+/* Мобільні/сенсорні: більші цілі для дотику, 16px у полях (iOS не збільшує масштаб). */
+@media (max-width: 1023.98px), (pointer: coarse) {
+  :root {
+    --ot-control-height: 44px;
+    --ot-control-height-sm: 44px;
+    --ot-nav-item-height: 44px;
+    --ot-font-size-input: 16px;
+  }
+}
+
+@media (min-width: 1024px) {
+  :root {
+    --ot-gutter: 24px;
+  }
+}
+
+/* ---------- База ---------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--ot-color-bg);
+  color: var(--ot-color-text);
+  font-family: var(--ot-font-family);
+  font-size: var(--ot-font-size);
+  line-height: var(--ot-line-height);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  overflow-wrap: break-word;
+}
+
+html.ot-scroll-locked,
+html.ot-scroll-locked body {
+  overflow: hidden;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p,
+figure,
+blockquote,
+dl,
+dd {
+  margin: 0;
+}
+
+img,
+svg,
+video {
+  display: block;
+  max-width: 100%;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+}
+
+a {
+  color: var(--ot-color-text);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+a:hover {
+  text-decoration-thickness: 2px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ot-color-focus);
+  outline-offset: 2px;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+::selection {
+  background: var(--ot-color-primary);
+  color: var(--ot-color-on-primary);
+}
+
+.ot-visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+.ot-skip-link {
+  position: fixed;
+  top: max(8px, env(safe-area-inset-top));
+  left: max(8px, env(safe-area-inset-left));
+  z-index: var(--ot-z-skip);
+  padding: 8px 12px;
+  border-radius: var(--ot-radius-control);
+  background: var(--ot-color-primary);
+  color: var(--ot-color-on-primary);
+  font-weight: 600;
+  text-decoration: none;
+  transform: translateY(calc(-100% - 16px - env(safe-area-inset-top)));
+}
+
+.ot-skip-link:focus,
+.ot-skip-link:focus-visible {
+  transform: none;
+}
+
+/* ---------- AppShell ---------- */
+
+.ot-shell {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+.ot-shell__main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  overflow-x: clip;
+}
+
+.ot-shell__content {
+  flex: 1 0 auto;
+  width: 100%;
+  min-width: 0;
+  padding: var(--ot-space-4) max(var(--ot-gutter), env(safe-area-inset-right)) var(--ot-space-6)
+    max(var(--ot-gutter), env(safe-area-inset-left));
+}
+
+.ot-shell__content:focus {
+  outline: none;
+}
+
+.ot-shell__banner {
+  width: 100%;
+  max-width: calc(var(--ot-page-max-width) + 2 * var(--ot-gutter));
+  margin: 0 auto;
+  padding: var(--ot-space-4) max(var(--ot-gutter), env(safe-area-inset-right)) 0
+    max(var(--ot-gutter), env(safe-area-inset-left));
+}
+
+.ot-shell__banner + .ot-shell__content {
+  padding-top: var(--ot-space-4);
+}
+
+.ot-shell__footer {
+  width: 100%;
+  max-width: calc(var(--ot-page-max-width) + 2 * var(--ot-gutter));
+  margin: 0 auto;
+  padding: var(--ot-space-3) max(var(--ot-gutter), env(safe-area-inset-right))
+    calc(var(--ot-space-4) + env(safe-area-inset-bottom)) max(var(--ot-gutter), env(safe-area-inset-left));
+  color: var(--ot-color-text-subdued);
+  font-size: var(--ot-font-size-caption);
+  line-height: 16px;
+}
+
+.ot-shell--embedded .ot-shell__main {
+  min-height: 0;
+}
+
+.ot-shell__topbar {
+  position: sticky;
+  top: 0;
+  z-index: var(--ot-z-topbar);
+  display: flex;
+  align-items: center;
+  gap: var(--ot-space-2);
+  min-height: calc(var(--ot-topbar-height) + env(safe-area-inset-top));
+  padding: env(safe-area-inset-top) max(var(--ot-gutter), env(safe-area-inset-right)) 0
+    max(var(--ot-space-2), env(safe-area-inset-left));
+  background: var(--ot-color-surface);
+  border-bottom: 1px solid var(--ot-color-border);
+}
+
+.ot-shell__topbar-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.ot-shell__topbar-slot {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--ot-space-2);
+  min-width: 0;
+  margin-left: auto;
+}
+
+.ot-shell__icon-button {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--ot-radius-control);
+  background: transparent;
+  color: var(--ot-color-text);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.ot-shell__icon-button:hover {
+  background: var(--ot-color-surface-hover);
+}
+
+.ot-shell__icon-button:active {
+  background: var(--ot-color-surface-active);
+}
+
+.ot-shell__overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--ot-z-overlay);
+  background: var(--ot-color-overlay);
+  animation: ot-fade-in var(--ot-duration) var(--ot-ease);
+}
+
+.ot-shell__sidebar {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: var(--ot-z-drawer);
+  display: flex;
+  flex-direction: column;
+  width: var(--ot-sidebar-width);
+  padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom) env(safe-area-inset-left);
+  background: var(--ot-color-bg);
+  border-right: 1px solid var(--ot-color-border);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.ot-shell__sidebar-header {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ot-space-2);
+  min-height: var(--ot-topbar-height);
+  padding: 0 var(--ot-space-2) 0 var(--ot-space-4);
+}
+
+.ot-shell__brand {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+@media (max-width: 1023.98px) {
+  .ot-shell__sidebar {
+    width: min(304px, 86vw);
+    background: var(--ot-color-surface);
+    border-right: 0;
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition:
+      transform var(--ot-duration-slow) var(--ot-ease),
+      visibility 0s linear var(--ot-duration-slow);
+  }
+
+  .ot-shell__sidebar.is-open {
+    transform: none;
+    visibility: visible;
+    box-shadow: var(--ot-shadow-overlay);
+    transition:
+      transform var(--ot-duration-slow) var(--ot-ease),
+      visibility 0s linear 0s;
+  }
+}
+
+@media (min-width: 1024px) {
+  .ot-shell__main {
+    margin-left: var(--ot-sidebar-width);
+  }
+
+  .ot-shell--embedded .ot-shell__main {
+    margin-left: 0;
+  }
+
+  .ot-shell__menu-button,
+  .ot-shell__close-button,
+  .ot-shell__topbar-name,
+  .ot-shell__overlay {
+    display: none;
+  }
+
+  .ot-shell__topbar--bare {
+    display: none;
+  }
+
+  .ot-shell__topbar {
+    min-height: 52px;
+    padding-left: var(--ot-gutter);
+    background: var(--ot-color-bg);
+    border-bottom-color: transparent;
+  }
+}
+
+/* topBar у висувному меню (< 1024px) та приховування в смузі */
+
+.ot-shell__drawer-extra {
+  display: none;
+}
+
+@media (max-width: 1023.98px) {
+  .ot-shell__topbar--slot-desktop .ot-shell__topbar-slot {
+    display: none;
+  }
+
+  .ot-shell__drawer-extra {
+    display: block;
+    margin-top: auto;
+    padding: var(--ot-space-4);
+    border-top: 1px solid var(--ot-color-border);
+  }
+
+  .ot-shell__drawer-extra .ot-shell-controls {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--ot-space-3);
+  }
+
+  .ot-shell__drawer-extra .ot-pref-form {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--ot-space-1);
+  }
+
+  .ot-shell__drawer-extra .ot-segmented {
+    display: flex;
+  }
+
+  .ot-shell__drawer-extra .ot-segmented__item {
+    flex: 1 1 0;
+  }
+}
+
+/* Перемикачі мови / теми / ролі (app/components/shell-controls.tsx) */
+
+.ot-shell-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ot-space-2) var(--ot-space-4);
+  min-width: 0;
+}
+
+.ot-pref-form {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ot-space-2);
+  min-width: 0;
+  margin: 0;
+}
+
+.ot-pref-label {
+  color: var(--ot-color-text-subdued);
+  font-size: var(--ot-font-size-caption);
+  font-weight: 500;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+/* У компактній верхній смузі підписи лише для екранних читачів (групи мають aria-label). */
+.ot-shell__topbar-slot .ot-pref-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+.ot-segmented {
+  display: inline-flex;
+  gap: 2px;
+  min-width: 0;
+  padding: 2px;
+  border-radius: var(--ot-radius-control);
+  background: var(--ot-color-surface-active);
+}
+
+.ot-segmented__item {
+  min-height: 24px;
+  margin: 0;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--ot-radius-sm);
+  background: transparent;
+  color: var(--ot-color-text-subdued);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+  white-space: nowrap;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  touch-action: manipulation;
+}
+
+.ot-segmented__item:hover {
+  color: var(--ot-color-text);
+}
+
+.ot-segmented__item:focus-visible {
+  outline-offset: 0;
+}
+
+.ot-segmented__item[aria-pressed="true"] {
+  background: var(--ot-color-surface);
+  color: var(--ot-color-text);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+@media (max-width: 1023.98px), (pointer: coarse) {
+  .ot-segmented__item {
+    min-height: 40px;
+    padding: 0 12px;
+    font-size: 14px;
+  }
+}
+
+/* Навігація */
+
+.ot-nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ot-space-4);
+  padding: var(--ot-space-1) var(--ot-space-2) var(--ot-space-5);
+}
+
+.ot-nav__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ot-nav__heading {
+  margin: 0 0 var(--ot-space-1);
+  padding: 0 10px;
+  color: var(--ot-color-text-subdued);
+  font-size: var(--ot-font-size-caption);
+  font-weight: 500;
+  line-height: 16px;
+}
+
+.ot-nav__link {
+  display: flex;
+  align-items: center;
+  gap: var(--ot-space-2);
+  min-height: var(--ot-nav-item-height);
+  padding: 6px 10px;
+  border-radius: var(--ot-radius-control);
+  color: var(--ot-color-text);
+  font-weight: 500;
+  text-decoration: none;
+  transition: background-color var(--ot-duration) var(--ot-ease);
+  touch-action: manipulation;
+}
+
+.ot-nav__link:hover {
+  background: var(--ot-color-surface-hover);
+}
+
+.ot-nav__link:focus-visible {
+  outline-offset: -2px;
+}
+
+.ot-nav__link[aria-current="page"] {
+  background: var(--ot-color-surface);
+  font-weight: 600;
+  box-shadow: 0 0 0 1px var(--ot-color-border), var(--ot-shadow-card);
+}
+
+.ot-nav__link--planned {
+  color: var(--ot-color-text-subdued);
+  font-weight: 400;
+}
+
+.ot-nav__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ot-nav__badge {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: var(--ot-radius-pill);
+  background: var(--ot-color-primary);
+  color: var(--ot-color-on-primary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.ot-nav__planned {
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--ot-color-border-strong);
+  border-radius: var(--ot-radius-pill);
+  color: var(--ot-color-text-subdued);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+@media (max-width: 1023.98px) {
+  .ot-nav__link {
+    font-size: 15px;
+  }
+
+  .ot-nav__link[aria-current="page"] {
+    background: var(--ot-color-surface-active);
+    box-shadow: none;
+  }
+}
+
+/* ---------- Page ---------- */
+
+.ot-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ot-space-4);
+  width: 100%;
+  max-width: var(--ot-page-max-width);
+  min-width: 0;
+  margin: 0 auto;
+}
+
+.ot-page--narrow {
+  max-width: 760px;
+}
+
+.ot-page--full {
+  max-width: none;
+}
+
+.ot-page__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--ot-space-3);
+  min-width: 0;
+}
+
+.ot-page__back {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  margin-top: -2px;
+  border-radius: var(--ot-radius-control);
+  color: var(--ot-color-text);
+  text-decoration: none;
+}
+
+.ot-page__back:hover {
+  background: var(--ot-color-surface-active);
+}
+
+.ot-page__back svg {
+  width: 18px;
+  height: 18px;
+}
+
+.ot-page__heading {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.ot-page__title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ot-space-2);
+  min-width: 0;
+}
+
+.ot-page__title {
+  min-width: 0;
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 28px;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+
+.ot-page__title-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ot-space-1);
+}
+
+.ot-page__subtitle {
+  margin-top: 2px;
+  color: var(--ot-color-text-subdued);
+}
+
+.ot-page__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ot-space-2);
+  margin-left: auto;
+}
+
+.ot-page__secondary,
+.ot-page__primary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ot-space-2);
+}
+
+.ot-page__content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ot-space-4);
+  min-width: 0;
+}
+
+@media (max-width: 1023.98px) {
+  .ot-page__back {
+    width: 44px;
+    height: 44px;
+    margin: -8px 0 -8px -8px;
+  }
+}
+
+@media (max-width: 767.98px) {
+  .ot-page__actions {
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .ot-page__primary {
+    order: -1;
+  }
+
+  .ot-page__secondary,
+  .ot-page__primary {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .ot-page__actions form {
+    display: block;
+    width: 100%;
+  }
+
+  .ot-page__actions .ot-button {
+    width: 100%;
+  }
+}
+
+/* ---------- Card ---------- */
+
+.ot-card {
+  min-width: 0;
+  background: var(--ot-color-surface);
+  border: 1px solid var(--ot-color-border);
+  border-radius: var(--ot-radius-card);
+  box-shadow: var(--ot-shadow-card);
+}
+
+.ot-card--flush {
+  overflow: hidden;
+}
+
+.ot-card__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--ot-space-2) var(--ot-space-3);
+  padding: var(--ot-space-4) var(--ot-space-4) 0;
+}
+
+.ot-card--flush .ot-card__header {
+  padding-bottom: var(--ot-space-3);
+}
+
+.ot-card__heading {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+
+.ot-card__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.ot-card__description {
+  margin-top: 2px;
+  color: var(--ot-color-text-subdued);
+  font-size: var(--ot-font-size-sm);
+  line-height: 18px;
+}
+
+.ot-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ot-space-2);
+}
+
+.ot-card__body {
+  min-width: 0;
+  padding: var(--ot-space-4);
+}
+
+.ot-card__header + .ot-card__body {
+  padding-top: var(--ot-space-3);
+}
+
+.ot-card--flush .ot-card__body,
+.ot-card--flush .ot-card__header + .ot-card__body {
+  padding: 0;
+}
+
+.ot-card--flush .ot-card__header + .ot-card__body {
+  border-top: 1px solid var(--ot-color-border);
+}
+
+/* ---------- Stack / Grid / FormLayout ---------- */
+
+.ot-stack {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ot-stack--horizontal {
+  flex-direction: row;
+  align-items: center;
+}
+
+.ot-stack--wrap {
+  flex-wrap: wrap;
+}
+
+ul.ot-stack,
+ol.ot-stack {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ot-stack--gap-0 { gap: var(--ot-space-0); }
+.ot-stack--gap-1 { gap: var(--ot-space-1); }
+.ot-stack--gap-2 { gap: var(--ot-space-2); }
+.ot-stack--gap-3 { gap: var(--ot-space-3); }
+.ot-stack--gap-4 { gap: var(--ot-space-4); }
+.ot-stack--gap-5 { gap: var(--ot-space-5); }
+.ot-stack--gap-6 { gap: var(--ot-space-6); }
+
+.ot-stack--align-start { align-items: flex-start; }
+.ot-stack--align-center { align-items: center; }
+.ot-stack--align-end { align-items: flex-end; }
+.ot-stack--align-stretch { align-items: stretch; }
+.ot-stack--align-baseline { align-items: baseline; }
+
+.ot-stack--justify-start { justify-content: flex-start; }
+.ot-stack--justify-center { justify-content: center; }
+.ot-stack--justify-end { justify-content: flex-end; }
+.ot-stack--justify-between { justify-content: space-between; }
+
+.ot-grid {
+  display: grid;
+  min-width: 0;
+}
+
+.ot-grid > * {
+  min-width: 0;
+}
+
+.ot-grid--gap-0 { gap: var(--ot-space-0); }
+.ot-grid--gap-1 { gap: var(--ot-space-1); }
+.ot-grid--gap-2 { gap: var(--ot-space-2); }
+.ot-grid--gap-3 { gap: var(--ot-space-3); }
+.ot-grid--gap-4 { gap: var(--ot-space-4); }
+.ot-grid--gap-5 { gap: var(--ot-space-5); }
+.ot-grid--gap-6 { gap: var(--ot-space-6); }
+
+.ot-grid--xs-1 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+.ot-grid--xs-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.ot-grid--xs-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.ot-grid--xs-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.ot-grid--xs-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.ot-grid--xs-6 { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+
+@media (min-width: 768px) {
+  .ot-grid--md-1 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+  .ot-grid--md-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ot-grid--md-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .ot-grid--md-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .ot-grid--md-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .ot-grid--md-6 { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+}
+
+@media (min-width: 1024px) {
+  .ot-grid--lg-1 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+  .ot-grid--lg-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ot-grid--lg-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .ot-grid--lg-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .ot-grid--lg-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .ot-grid--lg-6 { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+}
+
+.ot-form-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--ot-space-4);
+  min-width: 0;
+}
+
+@media (min-width: 768px) {
+  .ot-form-layout--2 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: var(--ot-space-4);
+  }
+
+  .ot-form-layout--2 > .ot-form-layout__full {
+    grid-column: 1 / -1;
+  }
+}
+
+.ot-divider {
+  width: 100%;
+  height: 0;
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--ot-color-border);
+}
+
+/* ---------- Text ---------- */
+
+.ot-text {
+  margin: 0;
+}
+
+.ot-text--heading-lg {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 28px;
+  letter-spacing: -0.01em;
+}
+
+.ot-text--heading-md {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.ot-text--heading-sm {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.ot-text--body {
+  font-size: var(--ot-font-size);
+  line-height: var(--ot-line-height);
+}
+
+.ot-text--body-sm {
+  font-size: var(--ot-font-size-sm);
+  line-height: 18px;
+}
+
+.ot-text--caption {
+  font-size: var(--ot-font-size-caption);
+  line-height: 16px;
+}
+
+.ot-text--mono {
+  font-family: var(--ot-font-mono);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.ot-text--tone-subdued { color: var(--ot-color-text-subdued); }
+.ot-text--tone-critical { color: var(--ot-color-critical); }
+.ot-text--tone-success { color: var(--ot-color-success); }
+.ot-text--tone-warning { color: var(--ot-color-warning); }
+
+.ot-text--weight-regular { font-weight: 400; }
+.ot-text--weight-medium { font-weight: 500; }
+.ot-text--weight-semibold { font-weight: 600; }
+.ot-text--weight-bold { font-weight: 700; }
+
+.ot-text--align-start { text-align: start; }
+.ot-text--align-center { text-align: center; }
+.ot-text--align-end { text-align: end; }
+
+.ot-text--truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ot-text--numeric {
+  font-variant-numeric: tabular-nums;
+}
+
+.ot-inline-code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--ot-color-surface-active);
+  font-family: var(--ot-font-mono);
+  font-size: 0.92em;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- Button ---------- */
+
+.ot-button {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: var(--ot-control-height);
+  margin: 0;
+  padding: 5px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--ot-radius-control);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 20px;
+  text-align: center;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+  appearance: none;
+  -webkit-appearance: none;
+  transition:
+    background-color var(--ot-duration) var(--ot-ease),
+    border-color var(--ot-duration) var(--ot-ease),
+    color var(--ot-duration) var(--ot-ease);
+}
+
+.ot-button svg {
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+
+.ot-button__label {
+  min-width: 0;
+}
+
+.ot-button--sm {
+  min-height: var(--ot-control-height-sm);
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
+.ot-button--full {
+  display: flex;
+  width: 100%;
+}
+
+.ot-button--primary {
+  background: var(--ot-color-primary);
+  color: var(--ot-color-on-primary);
+}
+
+.ot-button--primary:hover {
+  background: var(--ot-color-primary-hover);
+}
+
+.ot-button--primary:active {
+  background: var(--ot-color-primary-active);
+}
+
+.ot-button--secondary {
+  background: var(--ot-color-surface);
+  border-color: var(--ot-color-border-strong);
+  color: var(--ot-color-text);
+  box-shadow: var(--ot-shadow-button);
+}
+
+.ot-button--secondary:hover {
+  background: var(--ot-color-surface-hover);
+}
+
+.ot-button--secondary:active {
+  background: var(--ot-color-surface-active);
+}
+
+.ot-button--plain {
+  padding-right: 8px;
+  padding-left: 8px;
+  background: transparent;
+  color: var(--ot-color-text);
+}
+
+.ot-button--plain:hover {
+  background: var(--ot-color-surface-hover);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.ot-button--critical {
+  background: var(--ot-color-critical-strong);
+  color: var(--ot-color-on-critical);
+}
+
+.ot-button--critical:hover {
+  background: var(--ot-color-critical-strong-hover);
+}
+
+.ot-button:disabled:not(.is-loading),
+.ot-button.is-disabled,
+.ot-button[aria-disabled="true"] {
+  background: var(--ot-color-surface-active);
+  border-color: transparent;
+  color: var(--ot-color-text-disabled);
+  box-shadow: none;
+  text-decoration: none;
+  cursor: not-allowed;
+}
+
+.ot-button--plain:disabled:not(.is-loading),
+.ot-button--plain.is-disabled {
+  background: transparent;
+}
+
+.ot-button.is-loading {
+  cursor: progress;
+  opacity: 0.85;
+}
+
+.ot-button__spinner {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: ot-spin 0.7s linear infinite;
+}
+
+@media (max-width: 767.98px) {
+  .ot-button {
+    white-space: normal;
+  }
+}
+
+@media (max-width: 1023.98px), (pointer: coarse) {
+  .ot-button {
+    font-size: 14px;
+  }
+
+  .ot-button--sm {
+    font-size: 13px;
+  }
+}
+
+/* ---------- Spinner ---------- */
+
+.ot-spinner {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ot-color-text-subdued);
+}
+
+.ot-spinner__ring {
+  display: block;
+  width: 24px;
+  height: 24px;
+  border: 2.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: ot-spin 0.8s linear infinite;
+}
+
+.ot-spinner--sm .ot-spinner__ring {
+  width: 16px;
+  height: 16px;
+  border-width: 2px;
+}
+
+/* ---------- Badge ---------- */
+
+.ot-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 8px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: var(--ot-radius-control);
+  background: var(--ot-color-surface-active);
+  color: var(--ot-color-text);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.ot-badge--sm {
+  padding: 0 6px;
+  border-radius: var(--ot-radius-sm);
+  font-size: 11px;
+}
+
+.ot-badge--strong {
+  background: var(--ot-color-primary);
+  color: var(--ot-color-on-primary);
+}
+
+.ot-badge--outline {
+  background: transparent;
+  border-color: var(--ot-color-border-strong);
+  color: var(--ot-color-text-subdued);
+}
+
+.ot-badge--critical {
+  background: var(--ot-color-critical-bg);
+  border-color: var(--ot-color-critical-border);
+  color: var(--ot-color-critical);
+}
+
+.ot-badge--warning {
+  background: var(--ot-color-warning-bg);
+  border-color: var(--ot-color-warning-border);
+  color: var(--ot-color-warning);
+}
+
+.ot-badge--success {
+  background: var(--ot-color-success-bg);
+  border-color: var(--ot-color-success-border);
+  color: var(--ot-color-success);
+}
+
+.ot-badge--info {
+  background: var(--ot-color-info-bg);
+  border-color: var(--ot-color-info-border);
+  color: var(--ot-color-text);
+}
+
+/* ---------- Banner ---------- */
+
+.ot-banner {
+  --ot-banner-bg: var(--ot-color-info-bg);
+  --ot-banner-border: var(--ot-color-info-border);
+  --ot-banner-icon: var(--ot-color-text-subdued);
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--ot-banner-border);
+  border-radius: var(--ot-radius-card);
+  background: var(--ot-banner-bg);
+  color: var(--ot-color-text);
+}
+
+.ot-banner--success {
+  --ot-banner-bg: var(--ot-color-success-bg);
+  --ot-banner-border: var(--ot-color-success-border);
+  --ot-banner-icon: var(--ot-color-success);
+}
+
+.ot-banner--warning {
+  --ot-banner-bg: var(--ot-color-warning-bg);
+  --ot-banner-border: var(--ot-color-warning-border);
+  --ot-banner-icon: var(--ot-color-warning-icon);
+}
+
+.ot-banner--critical {
+  --ot-banner-bg: var(--ot-color-critical-bg);
+  --ot-banner-border: var(--ot-color-critical-border);
+  --ot-banner-icon: var(--ot-color-critical);
+}
+
+.ot-banner__icon {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  color: var(--ot-banner-icon);
+}
+
+.ot-banner__body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.ot-banner__title {
+  margin: 0;
+  font-weight: 600;
+}
+
+.ot-banner__content {
+  overflow-wrap: anywhere;
+}
+
+.ot-banner__content > p,
+.ot-banner__content > ul {
+  margin: 0;
+}
+
+.ot-banner__content > ul {
+  padding-left: 18px;
+}
+
+.ot-banner__action {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ot-space-2);
+  margin-top: 4px;
+}
+
+/* ---------- Поля форми ---------- */
+
+.ot-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.ot-field__label {
+  color: var(--ot-color-text);
+  font-weight: 500;
+}
+
+.ot-field__required {
+  color: var(--ot-color-critical);
+}
+
+.ot-field__help {
+  color: var(--ot-color-text-subdued);
+  font-size: var(--ot-font-size-sm);
+  line-height: 18px;
+}
+
+.ot-field__error {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  color: var(--ot-color-critical);
+  font-size: var(--ot-font-size-sm);
+  line-height: 18px;
+}
+
+.ot-field__error svg {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+}
+
+.ot-input-wrap {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: var(--ot-control-height);
+  border: 1px solid var(--ot-color-border-input);
+  border-radius: var(--ot-radius-control);
+  background: var(--ot-color-surface);
+  transition:
+    border-color var(--ot-duration) var(--ot-ease),
+    box-shadow var(--ot-duration) var(--ot-ease);
+}
+
+.ot-input-wrap:hover {
+  border-color: var(--ot-color-text-subdued);
+}
+
+.ot-input-wrap:focus-within {
+  border-color: var(--ot-color-focus);
+  box-shadow: 0 0 0 1px var(--ot-color-focus);
+}
+
+.ot-input-wrap--multiline {
+  align-items: stretch;
+}
+
+.ot-input {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  min-height: calc(var(--ot-control-height) - 2px);
+  margin: 0;
+  padding: 5px 10px;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: var(--ot-color-text);
+  font-size: var(--ot-font-size-input);
+  line-height: 20px;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.ot-input:focus,
+.ot-input:focus-visible {
+  outline: none;
+}
+
+.ot-input::placeholder {
+  color: var(--ot-color-text-placeholder);
+  opacity: 1;
+}
+
+.ot-input::-webkit-search-decoration,
+.ot-input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+}
+
+textarea.ot-input {
+  min-height: 80px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  resize: vertical;
+}
+
+.ot-input-affix {
+  flex: none;
+  padding: 0 10px;
+  color: var(--ot-color-text-subdued);
+  white-space: nowrap;
+}
+
+.ot-input-affix--prefix {
+  padding-right: 0;
+}
+
+.ot-input-affix--suffix {
+  padding-left: 0;
+}
+
+.ot-field.is-readonly .ot-input-wrap,
+.ot-field.is-disabled .ot-input-wrap {
+  border-color: var(--ot-color-border);
+  background: var(--ot-color-surface-subdued);
+}
+
+.ot-field.is-disabled .ot-input,
+.ot-field.is-disabled .ot-select__control,
+.ot-field.is-disabled .ot-field__label {
+  color: var(--ot-color-text-disabled);
+  cursor: not-allowed;
+}
+
+.ot-field--invalid .ot-input-wrap,
+.ot-field--invalid .ot-select__control {
+  border-color: var(--ot-color-critical);
+  background: var(--ot-color-critical-bg);
+}
+
+.ot-field--invalid .ot-input-wrap:focus-within,
+.ot-field--invalid .ot-select__control:focus {
+  border-color: var(--ot-color-critical);
+  box-shadow: 0 0 0 1px var(--ot-color-critical);
+}
+
+.ot-select {
+  position: relative;
+  min-width: 0;
+}
+
+.ot-select__control {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  min-height: var(--ot-control-height);
+  margin: 0;
+  padding: 5px 34px 5px 10px;
+  border: 1px solid var(--ot-color-border-input);
+  border-radius: var(--ot-radius-control);
+  background: var(--ot-color-surface);
+  color: var(--ot-color-text);
+  font-size: var(--ot-font-size-input);
+  line-height: 20px;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.ot-select__control:hover {
+  border-color: var(--ot-color-text-subdued);
+}
+
+.ot-select__control:focus,
+.ot-select__control:focus-visible {
+  border-color: var(--ot-color-focus);
+  outline: none;
+  box-shadow: 0 0 0 1px var(--ot-color-focus);
+}
+
+.ot-select__control:disabled {
+  border-color: var(--ot-color-border);
+  background: var(--ot-color-surface-subdued);
+}
+
+.ot-select__chevron {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  width: 16px;
+  height: 16px;
+  color: var(--ot-color-text-subdued);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.ot-checkbox-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ot-checkbox-field .ot-field__help,
+.ot-checkbox-field .ot-field__error {
+  padding-left: 24px;
+}
+
+.ot-checkbox {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.ot-checkbox input,
+.ot-dt__select input {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  accent-color: var(--ot-color-primary);
+  cursor: pointer;
+}
+
+.ot-checkbox__label {
+  min-width: 0;
+}
+
+.ot-checkbox-field.is-disabled .ot-checkbox {
+  color: var(--ot-color-text-disabled);
+  cursor: not-allowed;
+}
+
+@media (max-width: 1023.98px), (pointer: coarse) {
+  .ot-checkbox {
+    align-items: center;
+    min-height: 44px;
+  }
+
+  .ot-checkbox input {
+    width: 20px;
+    height: 20px;
+    margin: 0;
+  }
+
+  .ot-checkbox-field .ot-field__help,
+  .ot-checkbox-field .ot-field__error {
+    padding-left: 28px;
+  }
+}
+
+/* ---------- DataTable ---------- */
+
+.ot-dt {
+  min-width: 0;
+}
+
+.ot-dt__scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.ot-dt__table {
+  width: 100%;
+  border-collapse: collapse;
+  border-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.ot-dt__th {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--ot-color-border);
+  background: var(--ot-color-surface-subdued);
+  color: var(--ot-color-text-subdued);
+  font-size: var(--ot-font-size-caption);
+  font-weight: 500;
+  line-height: 16px;
+  text-align: start;
+  white-space: nowrap;
+}
+
+.ot-dt__cell {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--ot-color-border);
+  font-weight: 400;
+  text-align: start;
+  vertical-align: middle;
+}
+
+.ot-dt__th:first-child,
+.ot-dt__cell:first-child {
+  padding-left: 16px;
+}
+
+.ot-dt__th:last-child,
+.ot-dt__cell:last-child {
+  padding-right: 16px;
+}
+
+.ot-dt__row:last-child > .ot-dt__cell {
+  border-bottom: 0;
+}
+
+.ot-dt__row:hover > .ot-dt__cell {
+  background: var(--ot-color-surface-hover);
+}
+
+.ot-dt__cell--start { text-align: start; }
+.ot-dt__cell--center { text-align: center; }
+.ot-dt__cell--end { text-align: end; }
+
+.ot-dt__cell--primary {
+  font-weight: 600;
+}
+
+.ot-dt__cell--select {
+  width: 1%;
+  padding-right: 0;
+}
+
+.ot-dt__label,
+.ot-dt__toolbar {
+  display: none;
+}
+
+.ot-dt__link {
+  color: inherit;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.ot-dt__link:hover {
+  text-decoration: underline;
+}
+
+.ot-dt__link:focus-visible {
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+
+.ot-dt__select {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 24px;
+  cursor: pointer;
+}
+
+.ot-dt__select input {
+  margin: 0;
+}
+
+.ot-dt__empty {
+  min-width: 0;
+}
+
+@media (max-width: 767.98px) {
+  .ot-dt__scroll {
+    overflow: visible;
+  }
+
+  .ot-dt__table,
+  .ot-dt__table tbody {
+    display: block;
+    width: 100%;
+  }
+
+  .ot-dt__table thead {
+    display: none;
+  }
+
+  /* Рядок → картка */
+  .ot-dt__row {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--ot-color-border);
+  }
+
+  .ot-dt__row:last-child {
+    border-bottom: 0;
+  }
+
+  .ot-dt--selectable .ot-dt__row {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .ot-dt__row:hover > .ot-dt__cell {
+    background: none;
+  }
+
+  .ot-dt__row:has(.ot-dt__link):active {
+    background: var(--ot-color-surface-hover);
+  }
+
+  .ot-dt__cell,
+  .ot-dt__cell:first-child,
+  .ot-dt__cell:last-child {
+    display: flex;
+    grid-column: 1 / -1;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    text-align: end;
+  }
+
+  .ot-dt--selectable .ot-dt__cell:not(.ot-dt__cell--select) {
+    grid-column: 2 / -1;
+  }
+
+  .ot-dt__cell--select,
+  .ot-dt--selectable .ot-dt__cell--select {
+    grid-row: 1;
+    grid-column: 1;
+    align-self: start;
+    width: auto;
+  }
+
+  .ot-dt__row > .ot-dt__cell--primary {
+    display: block;
+    grid-row: 1;
+    grid-column: -2 / -1;
+    font-size: 15px;
+    line-height: 22px;
+    text-align: start;
+    overflow-wrap: anywhere;
+  }
+
+  .ot-dt__cell--hide-mobile {
+    display: none !important;
+  }
+
+  .ot-dt__label {
+    display: block;
+    flex: 0 1 auto;
+    max-width: 50%;
+    color: var(--ot-color-text-subdued);
+    font-size: var(--ot-font-size-sm);
+    text-align: start;
+  }
+
+  .ot-dt__value {
+    flex: 0 1 auto;
+    min-width: 0;
+    text-align: end;
+    overflow-wrap: anywhere;
+  }
+
+  /* Уся картка клікабельна через основне посилання (CSS, без JS). */
+  .ot-dt__link::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+  }
+
+  .ot-dt__cell--select,
+  .ot-dt__cell a:not(.ot-dt__link),
+  .ot-dt__cell button,
+  .ot-dt__cell input,
+  .ot-dt__cell select,
+  .ot-dt__cell label {
+    position: relative;
+    z-index: 1;
+  }
+
+  .ot-dt__select {
+    min-width: 44px;
+    min-height: 44px;
+    margin: -12px 0 -12px -12px;
+  }
+
+  .ot-dt__select input {
+    width: 20px;
+    height: 20px;
+  }
+
+  .ot-dt__toolbar {
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    border-bottom: 1px solid var(--ot-color-border);
+  }
+}
+
+/* ---------- EmptyState ---------- */
+
+.ot-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--ot-space-2);
+  padding: var(--ot-space-6) var(--ot-space-4);
+  text-align: center;
+}
+
+.ot-empty__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.ot-empty__description {
+  max-width: 440px;
+  color: var(--ot-color-text-subdued);
+}
+
+.ot-empty__action {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--ot-space-2);
+  margin-top: var(--ot-space-2);
+}
+
+/* ---------- Tabs ---------- */
+
+.ot-tabs {
+  min-width: 0;
+}
+
+.ot-tabs__list {
+  display: flex;
+  gap: 4px;
+  margin: 0;
+  padding: 2px;
+  overflow-x: auto;
+  list-style: none;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+}
+
+.ot-tabs__list::-webkit-scrollbar {
+  display: none;
+}
+
+.ot-tabs__item {
+  flex: none;
+}
+
+.ot-tabs__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--ot-control-height);
+  padding: 0 12px;
+  border-radius: var(--ot-radius-control);
+  color: var(--ot-color-text-subdued);
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  touch-action: manipulation;
+}
+
+.ot-tabs__link:hover {
+  background: var(--ot-color-surface-hover);
+  color: var(--ot-color-text);
+}
+
+.ot-tabs__link:focus-visible {
+  outline-offset: -2px;
+}
+
+.ot-tabs__link[aria-current="page"] {
+  background: var(--ot-color-surface-active);
+  color: var(--ot-color-text);
+  font-weight: 600;
+}
+
+.ot-tabs__count {
+  color: var(--ot-color-text-subdued);
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- KeyValueList ---------- */
+
+.ot-kv {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  margin: 0;
+}
+
+.ot-kv__row {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--ot-color-border);
+}
+
+.ot-kv__row:first-child {
+  padding-top: 0;
+}
+
+.ot-kv__row:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.ot-kv__label {
+  color: var(--ot-color-text-subdued);
+}
+
+.ot-kv__value {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 359.98px) {
+  .ot-kv__row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+}
+
+/* ---------- Thumbnail ---------- */
+
+.ot-thumb {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid var(--ot-color-border);
+  border-radius: var(--ot-radius-control);
+  background: var(--ot-color-surface-subdued);
+  color: var(--ot-color-text-disabled);
+}
+
+.ot-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.ot-thumb--sm { width: 32px; height: 32px; border-radius: var(--ot-radius-sm); }
+.ot-thumb--md { width: 48px; height: 48px; }
+.ot-thumb--lg { width: 80px; height: 80px; border-radius: var(--ot-radius-card); }
+
+.ot-thumb--placeholder svg {
+  width: 50%;
+  height: 50%;
+}
+
+/* ---------- Pagination ---------- */
+
+.ot-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ot-space-2);
+  padding: var(--ot-space-3) 0;
+}
+
+.ot-pagination__label {
+  color: var(--ot-color-text-subdued);
+  font-size: var(--ot-font-size-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 359.98px) {
+  .ot-pagination__text {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+  }
+}
+
+/* ---------- Dialog (ConfirmSubmitButton) ---------- */
+
+.ot-dialog {
+  width: calc(100% - 32px);
+  max-width: 480px;
+  max-height: calc(100dvh - 32px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+  margin: auto;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  background: transparent;
+  color: var(--ot-color-text);
+}
+
+.ot-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.ot-dialog[open] {
+  animation: ot-dialog-in var(--ot-duration) var(--ot-ease);
+}
+
+.ot-dialog__panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ot-space-3);
+  max-height: inherit;
+  padding: var(--ot-space-5);
+  overflow: auto;
+  border: 1px solid var(--ot-color-border);
+  border-radius: var(--ot-radius-card);
+  background: var(--ot-color-surface);
+  box-shadow: var(--ot-shadow-overlay);
+}
+
+.ot-dialog__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.ot-dialog__message {
+  color: var(--ot-color-text-subdued);
+  overflow-wrap: anywhere;
+}
+
+.ot-dialog__message > p {
+  margin: 0;
+}
+
+.ot-dialog__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--ot-space-2);
+  margin-top: var(--ot-space-2);
+}
+
+@media (max-width: 767.98px) {
+  .ot-dialog {
+    margin-bottom: max(16px, env(safe-area-inset-bottom));
+  }
+
+  .ot-dialog__panel {
+    padding: var(--ot-space-4);
+  }
+
+  .ot-dialog__actions {
+    flex-direction: column-reverse;
+  }
+
+  .ot-dialog__actions .ot-button {
+    width: 100%;
+  }
+}
+
+/* ---------- Timeline ---------- */
+
+.ot-timeline {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ot-timeline__item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 12px;
+  padding-bottom: var(--ot-space-4);
+}
+
+.ot-timeline__item:last-child {
+  padding-bottom: 0;
+}
+
+.ot-timeline__item::before {
+  content: "";
+  position: absolute;
+  top: 18px;
+  bottom: 2px;
+  left: 7px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--ot-color-border);
+}
+
+.ot-timeline__item:last-child::before {
+  display: none;
+}
+
+.ot-timeline__dot {
+  width: 10px;
+  height: 10px;
+  margin: 5px 3px 0;
+  border-radius: 50%;
+  background: var(--ot-color-border-strong);
+  box-shadow: 0 0 0 3px var(--ot-color-surface);
+}
+
+.ot-timeline__item--success .ot-timeline__dot { background: var(--ot-color-success); }
+.ot-timeline__item--warning .ot-timeline__dot { background: var(--ot-color-warning-icon); }
+.ot-timeline__item--critical .ot-timeline__dot { background: var(--ot-color-critical); }
+
+.ot-timeline__body {
+  min-width: 0;
+}
+
+.ot-timeline__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 2px 12px;
+}
+
+.ot-timeline__title {
+  min-width: 0;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.ot-timeline__time {
+  flex: none;
+  color: var(--ot-color-text-subdued);
+  font-size: var(--ot-font-size-caption);
+  font-variant-numeric: tabular-nums;
+}
+
+.ot-timeline__description {
+  margin-top: 2px;
+  color: var(--ot-color-text-subdued);
+  font-size: var(--ot-font-size-sm);
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- Службові сторінки (вхід у демо, помилка) ---------- */
+
+.ot-auth-page {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: max(24px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+    max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+}
+
+.ot-auth-page > .ot-card {
+  width: 100%;
+  max-width: 400px;
+}
+
+.ot-error-page {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ot-space-2);
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: max(24px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+    max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  text-align: center;
+}
+
+.ot-error-page h1 {
+  margin: 0;
+  font-size: 40px;
+  font-weight: 700;
+  line-height: 48px;
+  letter-spacing: -0.02em;
+}
+
+.ot-error-page p {
+  margin: 0;
+  color: var(--ot-color-text-subdued);
+}
+
+/* ---------- Анімації ---------- */
+
+@keyframes ot-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes ot-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes ot-dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* Індикатор завантаження лишається видимо активним, але повільніше. */
+  .ot-spinner__ring,
+  .ot-button__spinner {
+    animation-duration: 1.6s !important;
+    animation-iteration-count: infinite !important;
+  }
+}
+
+/* ---------- Друк ---------- */
+
+@media print {
+  .ot-shell__sidebar,
+  .ot-shell__topbar,
+  .ot-shell__overlay,
+  .ot-skip-link {
+    display: none !important;
+  }
+
+  .ot-shell__main {
+    margin-left: 0 !important;
+  }
+
+  body {
+    background: #ffffff;
+    color: #000000;
+  }
+
+  .ot-card {
+    box-shadow: none;
+    break-inside: avoid;
+  }
+}

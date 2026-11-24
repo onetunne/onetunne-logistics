@@ -1,0 +1,18 @@
+node_modules/
+build/
+.react-router/
+.cache/
+.data/
+.shopify/
+coverage/
+*.log
+.DS_Store
+Thumbs.db
+# Секрети й локальні налаштування
+.env
+.env.*
+!.env.example
+.claude/settings.local.json
+# Тимчасові артефакти тестів/скриншотів
+test-results/
+screenshots/
