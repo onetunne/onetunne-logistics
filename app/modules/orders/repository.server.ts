@@ -230,8 +230,9 @@ export async function listOrders(
       )!,
     );
   }
-  const openIssueCount = sql<number>`(select count(*)::int from ${issues} where ${issues.orderId} = ${orders.id} and ${issues.status} = 'open')`;
-  const openErrorCount = sql<number>`(select count(*)::int from ${issues} where ${issues.orderId} = ${orders.id} and ${issues.status} = 'open' and ${issues.severity} = 'error')`;
+  // Підзапити з явними іменами таблиць: у SELECT Drizzle підставляє колонки без кваліфікатора таблиці.
+  const openIssueCount = sql<number>`(select count(*)::int from "issues" i where i."order_id" = "orders"."id" and i."status" = 'open')`;
+  const openErrorCount = sql<number>`(select count(*)::int from "issues" i where i."order_id" = "orders"."id" and i."status" = 'open' and i."severity" = 'error')`;
   if (filter.withProblems) conditions.push(sql`${openIssueCount} > 0`);
   const where = conditions.length ? and(...conditions) : undefined;
 
@@ -250,12 +251,12 @@ export async function listOrders(
       currency: orders.currency,
       automationPaused: orders.automationPaused,
       source: orders.source,
-      itemCount: sql<number>`(select coalesce(sum(${orderLineItems.quantity}), 0)::int from ${orderLineItems} where ${orderLineItems.orderId} = ${orders.id})`,
+      itemCount: sql<number>`(select coalesce(sum(li."quantity"), 0)::int from "order_line_items" li where li."order_id" = "orders"."id")`,
       openIssueCount,
       openErrorCount,
       waybillNumber: sql<
         string | null
-      >`(select ${shipments.waybillNumber} from ${shipments} where ${shipments.orderId} = ${orders.id} and ${shipments.status} = 'created' order by ${shipments.createdAt} desc limit 1)`,
+      >`(select s."waybill_number" from "shipments" s where s."order_id" = "orders"."id" and s."status" = 'created' order by s."created_at" desc limit 1)`,
     })
     .from(orders)
     .where(where)

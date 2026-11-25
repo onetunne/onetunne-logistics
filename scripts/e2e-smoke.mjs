@@ -17,12 +17,28 @@ let chromium, devices;
 try {
   ({ chromium, devices } = await import("playwright"));
 } catch {
-  console.error("Playwright не встановлено. Встановіть: npm i -D playwright && npx playwright install chromium");
-  process.exit(2);
+  // Запасний варіант: глобально встановлений Playwright.
+  try {
+    const { execSync } = await import("node:child_process");
+    const { createRequire } = await import("node:module");
+    const globalRoot = execSync("npm root -g", { encoding: "utf8" }).trim();
+    ({ chromium, devices } = createRequire(path.join(globalRoot, "noop.js"))("playwright"));
+  } catch {
+    console.error("Playwright не встановлено. Встановіть: npm i -D playwright && npx playwright install chromium");
+    process.exit(2);
+  }
 }
 
 fs.mkdirSync(OUT, { recursive: true });
 const failures = [];
+const visible = async (locator, timeout = 10000) => {
+  try {
+    await locator.first().waitFor({ state: "visible", timeout });
+    return true;
+  } catch {
+    return false;
+  }
+};
 const check = (cond, msg) => {
   if (!cond) failures.push(msg);
   console.log(`${cond ? "✓" : "✗"} ${msg}`);
@@ -65,18 +81,18 @@ try {
   await page.waitForURL(/\/demo\/orders\/[0-9a-f-]+/);
   const orderUrl = page.url();
   await page.getByRole("button", { name: /Перевірити дані/ }).first().click();
-  await page.waitForLoadState("networkidle");
-  check(await page.getByText(/Потребує виправлення/).first().isVisible(), "validation finds a problem (needs correction)");
-  check(await page.getByText(/індекс/i).first().isVisible(), "postal code problem is explained");
+  check(await visible(page.getByText(/Перевірку виконано/)), "validation runs");
+  check(await visible(page.getByText("Потребує виправлення", { exact: true })), "validation finds a problem (needs correction)");
+  check(await visible(page.getByText(/поштового індексу/i)), "postal code problem is explained");
   await page.screenshot({ path: path.join(OUT, "iphone-order-problem.png"), fullPage: true });
 
   await page.locator('input[name="shipping.postalCode"]').fill("69001");
   await page.getByRole("button", { name: /Зберегти/ }).first().click();
-  await page.waitForLoadState("networkidle");
-  check(await page.getByText(/Очікує перевірки/).first().isVisible(), "after manual fix → awaiting review");
+  check(await visible(page.getByText(/Зміни збережено/)), "manual correction saved with history");
+  check(await visible(page.getByText("Очікує перевірки", { exact: true })), "after manual fix → awaiting review");
 
   await page.getByRole("button", { name: /Створити тестову накладну/ }).first().click();
-  await page.waitForLoadState("networkidle");
+  await visible(page.getByText(/TEST\d{10}/));
   const waybill = await page.getByText(/TEST\d{10}/).first().textContent().catch(() => null);
   check(Boolean(waybill), `test waybill created (${waybill?.match(/TEST\d{10}/)?.[0] ?? "none"})`);
   await page.screenshot({ path: path.join(OUT, "iphone-order-waybill.png"), fullPage: true });
@@ -89,9 +105,15 @@ try {
   const occurrences = await page.getByText(waybill?.match(/TEST\d{10}/)?.[0] ?? "—").count();
   check(occurrences >= 1, "waybill listed once in waybills page");
 
+  // Масова перевірка всіх оплачених замовлень з головної.
+  await page.goto(`${BASE}/demo`);
+  await page.getByRole("button", { name: /Перевірити всі оплачені/ }).first().click();
+  await page.getByRole("dialog").getByRole("button").last().click();
+  check(await visible(page.getByText(/Перевірено замовлень/)), "bulk validation of paid orders");
+
   await page.goto(`${BASE}/demo/problems`);
   await page.screenshot({ path: path.join(OUT, "iphone-problems.png"), fullPage: true });
-  check(await page.getByText("#1006").first().isVisible(), "problems page lists problem orders");
+  check(await visible(page.getByText("#1006")), "problems page lists problem orders");
 
   check(consoleErrors.length === 0, `no browser console errors (${consoleErrors.slice(0, 3).join(" | ")})`);
   await phone.close();
