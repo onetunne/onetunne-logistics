@@ -73,9 +73,22 @@ interface FieldState {
 }
 
 /** Обчислює однозначні автовиправлення на копії замовлення. Вхід не змінюється. */
+export interface ValidationOptions {
+  /**
+   * Країна відправлення (з налаштувань відправника, зараз UA). Місцевий номер телефону, дійсний і в цій країні,
+   * і в країні доставки, вважається неоднозначним (рішення менеджера).
+   */
+  originCountry?: string | null;
+}
+
+function alternateCountries(options: ValidationOptions): string[] {
+  return options.originCountry ? [options.originCountry] : [];
+}
+
 export function computeAutoFixes(
   input: OrderValidationInput,
   rules: CountryRules,
+  options: ValidationOptions = {},
 ): { fixed: OrderValidationInput; autoFixes: AutoFix[] } {
   const states = new Map<FixableField, FieldState>();
   for (const field of FIXABLE_FIELDS) {
@@ -115,7 +128,7 @@ export function computeAutoFixes(
   for (const field of ["shipping.phone", "contactPhone"] as const) {
     const current = state(field).value;
     if (current === null || current === "") continue;
-    const result = normalizePhone(current, country);
+    const result = normalizePhone(current, country, alternateCountries(options));
     if (result.status === "valid" && result.ruleId !== null) apply(field, result.e164, result.ruleId);
   }
 
@@ -171,12 +184,16 @@ function validateEmail(email: string | null): ValidationIssue[] {
  * Перевірка замовлення: (1) автовиправлення на копії, (2) перевірка ВИПРАВЛЕНОЇ копії,
  * (3) blocking = є хоча б одна проблема рівня error.
  */
-export function validateOrder(input: OrderValidationInput, rules: CountryRules): ValidationResult {
-  const { fixed, autoFixes } = computeAutoFixes(input, rules);
+export function validateOrder(
+  input: OrderValidationInput,
+  rules: CountryRules,
+  options: ValidationOptions = {},
+): ValidationResult {
+  const { fixed, autoFixes } = computeAutoFixes(input, rules, options);
   const country = countryKey(fixed.shipping.countryCode);
   const issues: ValidationIssue[] = [
     ...validateAddress(fixed.shipping, rules),
-    ...validateShippingPhone(fixed.shipping.phone, country, rules),
+    ...validateShippingPhone(fixed.shipping.phone, country, rules, alternateCountries(options)),
     ...validateEmail(fixed.email),
     ...validateProducts(fixed.items),
   ];

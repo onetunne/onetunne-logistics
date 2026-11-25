@@ -58,7 +58,15 @@ function supportedCountry(code: string | null): CountryCode | null {
   return isSupportedCountry(upper) ? upper : null;
 }
 
-export function normalizePhone(raw: string, shippingCountry: string | null): PhoneNormalization {
+/**
+ * @param alternateCountries додаткові країни для тлумачення місцевого номера (напр. країна відправлення UA):
+ *   якщо місцевий номер дійсний і там, і в країні доставки — це неоднозначність, потрібне рішення менеджера.
+ */
+export function normalizePhone(
+  raw: string,
+  shippingCountry: string | null,
+  alternateCountries: readonly string[] = [],
+): PhoneNormalization {
   const compact = raw.replace(FORMATTING_CHARS, "");
   if (!COMPACT_PHONE.test(compact)) return { status: "invalid", reason: "characters" };
   if (!/\d/.test(compact)) return { status: "invalid", reason: "unparseable" };
@@ -77,10 +85,12 @@ export function normalizePhone(raw: string, shippingCountry: string | null): Pho
 
   // Без "+": можливі тлумачення — місцевий номер країни доставки та номер з кодом країни без "+".
   const candidates: Array<{ e164: string; ruleId: AutoFixRuleId }> = [];
-  const country = supportedCountry(shippingCountry);
-  if (country) {
+  const countries = [shippingCountry, ...alternateCountries]
+    .map((c) => supportedCountry(c))
+    .filter((c, i, all): c is CountryCode => c !== null && all.indexOf(c) === i);
+  for (const country of countries) {
     const national = parseValid(compact, { country });
-    if (national) {
+    if (national && !candidates.some((c) => c.e164 === national)) {
       candidates.push({
         e164: national,
         ruleId: national === `+${compact}` ? "phone.add_plus" : "phone.national_to_international",
@@ -106,6 +116,7 @@ export function validateShippingPhone(
   phone: string | null,
   countryCode: string | null,
   rules: CountryRules,
+  alternateCountries: readonly string[] = [],
 ): ValidationIssue[] {
   const field = "shipping.phone";
   const value = phone?.trim() ?? "";
@@ -114,7 +125,7 @@ export function validateShippingPhone(
     const severity = !rule || rule.phoneRequired ? "error" : "warning";
     return [{ code: "PHONE_MISSING", severity, field, params: {}, suggestion: null }];
   }
-  const result = normalizePhone(value, countryCode);
+  const result = normalizePhone(value, countryCode, alternateCountries);
   if (result.status === "invalid") {
     return [{ code: "PHONE_INVALID", severity: "error", field, params: { reason: result.reason }, suggestion: null }];
   }

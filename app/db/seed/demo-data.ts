@@ -127,15 +127,15 @@ export const DEMO_ORDERS: DemoOrderSeed[] = [
     items: [{ variant: "fender-x", quantity: 1 }], shippingPaid: "11.00",
   },
   {
-    number: "#1003", hoursAgo: 4, scenario: "autofix: GB postcode spacing/case",
+    number: "#1003", hoursAgo: 4, scenario: "autofix: GB postcode spacing/case + national phone",
     email: "oliver.s@example.org", contactPhone: null,
-    shipping: { firstName: "Oliver", lastName: "Smith", address1: "221 Example Street", city: "London", postalCode: "sw1a1aa", countryCode: "gb", phone: "+44 7400 123456" },
+    shipping: { firstName: "Oliver", lastName: "Smith", address1: "221 Example Street", city: "London", postalCode: "sw1a1aa", countryCode: "gb", phone: "07400 123456" },
     items: [{ variant: "bag-black", quantity: 1 }], shippingPaid: "14.00",
   },
   {
     number: "#1004", hoursAgo: 5, scenario: "problem: missing postal code (manual fix)",
     email: "camille.m@example.com", contactPhone: null,
-    shipping: { firstName: "Camille", lastName: "Martin", address1: "12 Rue de l'Exemple", city: "Lyon", postalCode: null, countryCode: "FR", phone: "06 12 34 56 78" },
+    shipping: { firstName: "Camille", lastName: "Martin", address1: "12 Rue de l'Exemple", city: "Lyon", postalCode: null, countryCode: "FR", phone: "+33 6 12 34 56 78" },
     items: [{ variant: "holder-white", quantity: 2 }], shippingPaid: "12.00",
   },
   {
@@ -151,9 +151,9 @@ export const DEMO_ORDERS: DemoOrderSeed[] = [
     items: [{ variant: "fender-s", quantity: 1 }], shippingPaid: "12.00",
   },
   {
-    number: "#1007", hoursAgo: 9, scenario: "autofix: national phone + NL postcode",
+    number: "#1007", hoursAgo: 9, scenario: "autofix: 00-prefix phone + NL postcode",
     email: "daan.v@example.org", contactPhone: null,
-    shipping: { firstName: "Daan", lastName: "de Vries", address1: "Voorbeeldstraat 7", city: "Amsterdam", postalCode: "1012ab", countryCode: "NL", phone: "06 12345678" },
+    shipping: { firstName: "Daan", lastName: "de Vries", address1: "Voorbeeldstraat 7", city: "Amsterdam", postalCode: "1012ab", countryCode: "NL", phone: "0031 6 12345678" },
     items: [{ variant: "grips-black", quantity: 1 }], shippingPaid: "11.00",
   },
   {

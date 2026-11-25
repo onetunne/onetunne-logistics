@@ -27,7 +27,7 @@ import {
   type OrderRow,
   type ShipmentRow,
 } from "~/modules/orders/repository.server";
-import { automationDecision, validateOrderInTx } from "~/modules/orders/workflow.server";
+import { automationDecision, validateOrderInTx, validationOptions } from "~/modules/orders/workflow.server";
 import { REQUIRED_SHIPPER_FIELDS, type AllSettings } from "~/modules/settings/schema";
 import { getSettings } from "~/modules/settings/settings.server";
 import { computeParcelWeights } from "~/modules/shipments/weight";
@@ -269,7 +269,7 @@ export async function createWaybill(
     }
     // Свіжа перевірка даних безпосередньо перед створенням (дані могли змінитися).
     const items = await loadLineItems(tx, orderId);
-    const check = validateOrder(toValidationInput({ order, items }), await loadCountryRules(tx));
+    const check = validateOrder(toValidationInput({ order, items }), await loadCountryRules(tx), await validationOptions(tx));
     if (check.blocking || check.autoFixes.length > 0) {
       const summary = await validateOrderInTx(tx, ctx, orderId, "automation");
       if (summary.blocking) return { kind: "result", result: { kind: "blocked", reason: "validation" } };
@@ -702,6 +702,11 @@ export async function cancelOrder(ctx: ServiceContext, orderId: string): Promise
   await ctx.db.transaction(async (tx) => {
     const fresh = await loadOrderRow(tx, orderId, { forUpdate: true });
     await setOrderStatus(tx, fresh, "cancelled", { cancelledAt: ctx.now() });
+    // Проблеми скасованого замовлення більше не потребують дій.
+    await tx
+      .update(issues)
+      .set({ status: "resolved", resolvedAt: ctx.now(), resolvedBy: ctx.actor.id, resolution: "order_cancelled", updatedAt: ctx.now() })
+      .where(and(eq(issues.orderId, orderId), eq(issues.status, "open")));
     await writeAudit(tx, ctx.actor, "order.cancelled", { type: "order", id: orderId });
   });
 }

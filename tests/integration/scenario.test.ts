@@ -36,10 +36,10 @@ describe("stage 1 scenario: paid → validate → problem → manual fix → tes
     expect(v1.blocking).toBe(true);
     agg = await loadOrderAggregate(ctx.db, id);
     expect(agg.openIssues.map((i) => i.code)).toContain("POSTAL_CODE_MISSING");
-    // Однозначне автовиправлення телефону (національний формат FR) збережено з історією.
+    // Однозначне автовиправлення формату телефону збережено з історією.
     expect(agg.order.shipPhone).toBe("+33612345678");
     const autoChanges = await ctx.db.select().from(orderChanges).where(and(eq(orderChanges.orderId, id), eq(orderChanges.source, "auto_fix")));
-    expect(autoChanges.find((c) => c.field === "shipping.phone")).toMatchObject({ oldValue: "06 12 34 56 78", newValue: "+33612345678" });
+    expect(autoChanges.find((c) => c.field === "shipping.phone")).toMatchObject({ oldValue: "+33 6 12 34 56 78", newValue: "+33612345678" });
 
     // Повторна перевірка не дублює проблеми.
     await validateOrderById(ctx, id);

@@ -7,7 +7,7 @@ import { requirePermission, type Actor } from "~/domain/permissions";
 import { ConflictError, DomainError, NotFoundError } from "~/lib/errors";
 import { writeAudit } from "~/modules/audit/audit.server";
 import { getSetting } from "~/modules/settings/settings.server";
-import { issueFingerprint, validateOrder } from "~/modules/validation";
+import { issueFingerprint, validateOrder, type ValidationOptions } from "~/modules/validation";
 import {
   SHIPPING_FIELDS,
   type AddressInput,
@@ -30,7 +30,11 @@ import {
 /** Статуси, у яких на етапі 1 дозволено перевірку та редагування даних (до створення накладної). */
 export const VALIDATABLE_STATUSES: readonly OrderStatus[] = ["paid", "awaiting_review", "needs_correction"];
 
-export type ValidationTrigger = "manual" | "bulk" | "after_edit" | "automation" | "seed";
+/**
+ * after_edit — ручна зміна даних САМЕ цього замовлення (закриває відмову перевізника);
+ * variant_edit — повторна перевірка після зміни даних товару (відмову перевізника не закриває).
+ */
+export type ValidationTrigger = "manual" | "bulk" | "after_edit" | "variant_edit" | "automation" | "seed";
 
 export interface ValidationSummary {
   orderId: string;
@@ -67,6 +71,12 @@ async function assertNoPendingShipment(tx: DbOrTx, order: OrderRow): Promise<voi
   throw new DomainError("order.notEditable", 409, { status: order.status });
 }
 
+/** Параметри перевірки з налаштувань: країна відправлення для тлумачення місцевих телефонів. */
+export async function validationOptions(db: DbOrTx): Promise<ValidationOptions> {
+  const shipper = await getSetting(db, "shipper");
+  return { originCountry: shipper.countryCode || null };
+}
+
 async function bumpOrder(tx: DbOrTx, order: OrderRow, patch: Partial<typeof orders.$inferInsert>, now: Date) {
   const updated = await tx
     .update(orders)
@@ -96,7 +106,7 @@ export async function validateOrderInTx(
   await assertNoPendingShipment(tx, order);
   const items = await loadLineItems(tx, orderId);
   const rules = await loadCountryRules(tx);
-  const result: ValidationResult = validateOrder(toValidationInput({ order, items }), rules);
+  const result: ValidationResult = validateOrder(toValidationInput({ order, items }), rules, await validationOptions(tx));
 
   // 1) Однозначні автовиправлення → поля замовлення + історія.
   const patch: Record<string, string | null> = {};
@@ -128,6 +138,14 @@ export async function validateOrderInTx(
     .from(issues)
     .where(and(eq(issues.orderId, orderId), eq(issues.status, "open"), notLike(issues.code, "CARRIER_%")));
   const nextByFingerprint = new Map(result.issues.map((i) => [issueFingerprint(orderId, i), i]));
+  // Відхилені менеджером попередження не повертаються при кожній повторній перевірці.
+  const dismissed = await tx
+    .select({ fingerprint: issues.fingerprint })
+    .from(issues)
+    .where(and(eq(issues.orderId, orderId), eq(issues.status, "dismissed"), eq(issues.severity, "warning")));
+  for (const d of dismissed) {
+    if (nextByFingerprint.get(d.fingerprint)?.severity === "warning") nextByFingerprint.delete(d.fingerprint);
+  }
   for (const row of existing) {
     const next = nextByFingerprint.get(row.fingerprint);
     if (!next) {
@@ -165,8 +183,14 @@ export async function validateOrderInTx(
       .where(and(eq(issues.orderId, orderId), eq(issues.status, "open"), eq(issues.code, "CARRIER_REJECTED")));
   }
 
-  // 3) Статус.
-  const nextStatus: OrderStatus = result.blocking ? "needs_correction" : "awaiting_review";
+  // 3) Статус. Відкрита відмова перевізника також блокує (повтор з тими самими даними не має сенсу).
+  const [openRejection] = await tx
+    .select({ id: issues.id })
+    .from(issues)
+    .where(and(eq(issues.orderId, orderId), eq(issues.status, "open"), eq(issues.code, "CARRIER_REJECTED")))
+    .limit(1);
+  const blocking = result.blocking || Boolean(openRejection);
+  const nextStatus: OrderStatus = blocking ? "needs_correction" : "awaiting_review";
   assertTransition(order.status, nextStatus);
   order = await bumpOrder(tx, order, { ...patch, status: nextStatus, lastValidatedAt: now }, now);
 
@@ -184,7 +208,7 @@ export async function validateOrderInTx(
     autoFixes: appliedFixes,
     issueCount: result.issues.length,
     errorCount,
-    blocking: result.blocking,
+    blocking,
   };
 }
 
@@ -354,7 +378,7 @@ async function syncOrderToShopify(ctx: ServiceContext, order: OrderRow, changedF
 /** Підтвердження менеджером одного з запропонованих варіантів виправлення. */
 export async function acceptSuggestion(ctx: ServiceContext, issueId: string, candidate: string): Promise<ValidationSummary> {
   requirePermission(ctx.actor, "orders.edit");
-  return ctx.db.transaction(async (tx) => {
+  const { summary, field } = await ctx.db.transaction(async (tx) => {
     const [issue] = await tx.select().from(issues).where(eq(issues.id, issueId)).for("update");
     if (!issue || !issue.orderId) throw new NotFoundError("issue");
     if (issue.status !== "open" || !issue.suggestion) throw new DomainError("issue.notActionable", 409);
@@ -380,8 +404,11 @@ export async function acceptSuggestion(ctx: ServiceContext, issueId: string, can
       .set({ status: "resolved", resolvedAt: ctx.now(), resolvedBy: ctx.actor.id, resolution: "suggestion_accepted" })
       .where(eq(issues.id, issue.id));
     await writeAudit(tx, ctx.actor, "issue.suggestion_accepted", { type: "issue", id: issue.id }, { code: issue.code });
-    return validateOrderInTx(tx, ctx, order.id, "after_edit");
+    return { summary: await validateOrderInTx(tx, ctx, order.id, "after_edit"), field: issue.suggestion.field };
   });
+  // Підтверджене виправлення передається в Shopify так само, як ручне (у демо — пропускається).
+  await syncOrderToShopify(ctx, await loadOrderRow(ctx.db, summary.orderId), [field]);
+  return summary;
 }
 
 /** Попередження (warning) можна відхилити; помилки (error) потрібно виправити. */
@@ -391,12 +418,18 @@ export async function dismissIssue(ctx: ServiceContext, issueId: string): Promis
     const [issue] = await tx.select().from(issues).where(eq(issues.id, issueId)).for("update");
     if (!issue) throw new NotFoundError("issue");
     if (issue.status !== "open") return;
-    if (issue.severity !== "warning") throw new DomainError("issue.cannotDismissError", 409);
+    // Помилки даних потрібно виправити. Виняток — відмова перевізника: менеджер може свідомо повторити без змін.
+    const carrierRejection = issue.code === "CARRIER_REJECTED";
+    if (issue.severity !== "warning" && !carrierRejection) throw new DomainError("issue.cannotDismissError", 409);
     await tx
       .update(issues)
       .set({ status: "dismissed", resolvedAt: ctx.now(), resolvedBy: ctx.actor.id, resolution: "dismissed" })
       .where(eq(issues.id, issue.id));
     await writeAudit(tx, ctx.actor, "issue.dismissed", { type: "issue", id: issue.id }, { code: issue.code });
+    if (carrierRejection && issue.orderId) {
+      const order = await loadOrderRow(tx, issue.orderId, { forUpdate: true });
+      if (VALIDATABLE_STATUSES.includes(order.status)) await validateOrderInTx(tx, ctx, order.id, "manual");
+    }
   });
 }
 
@@ -484,7 +517,7 @@ export async function updateVariantCustomsData(
   let revalidated = 0;
   for (const id of affected) {
     try {
-      await ctx.db.transaction((tx) => validateOrderInTx(tx, ctx, id, "after_edit"));
+      await ctx.db.transaction((tx) => validateOrderInTx(tx, ctx, id, "variant_edit"));
       revalidated++;
     } catch (e) {
       // Замовлення з накладною в процесі/на розгляді не перевіряються повторно.

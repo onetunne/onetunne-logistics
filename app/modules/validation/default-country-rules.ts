@@ -92,7 +92,7 @@ export const DEFAULT_COUNTRY_RULES: DefaultCountryRule[] = [
   rule("BG", { nameEn: "Bulgaria", nameUk: "Болгарія", pattern: "^\\d{4}$", example: "1000" }),
   rule("HR", { nameEn: "Croatia", nameUk: "Хорватія", pattern: "^\\d{5}$", example: "10000" }),
   rule("SI", { nameEn: "Slovenia", nameUk: "Словенія", pattern: "^\\d{4}$", example: "1000" }),
-  rule("LU", { nameEn: "Luxembourg", nameUk: "Люксембург", pattern: "^\\d{4}$", example: "1009" }),
+  rule("LU", { nameEn: "Luxembourg", nameUk: "Люксембург", pattern: "^(?:L-)?\\d{4}$", example: "L-1009" }),
   rule("GB", { nameEn: "United Kingdom", nameUk: "Велика Британія", pattern: GB_POSTCODE, example: "SW1A 1AA" }),
   rule("CH", { nameEn: "Switzerland", nameUk: "Швейцарія", pattern: "^[1-9]\\d{3}$", example: "8001" }),
   rule("NO", { nameEn: "Norway", nameUk: "Норвегія", pattern: "^\\d{4}$", example: "0150" }),

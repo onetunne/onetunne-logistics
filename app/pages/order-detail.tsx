@@ -868,11 +868,11 @@ function IssueItem({ issue, data }: { issue: Issue; data: Data }) {
         </Form>
       ) : null}
 
-      {issue.severity === "warning" && canEdit ? (
+      {(issue.severity === "warning" || issue.code === "CARRIER_REJECTED") && canEdit ? (
         <Form method="post">
           <Hidden intent="dismissIssue" fields={{ issueId: issue.id }} />
           <Button type="submit" variant="plain" size="sm" loading={busy("dismissIssue", ["issueId", issue.id])}>
-            {t("order.issues.dismiss")}
+            {issue.code === "CARRIER_REJECTED" ? t("order.issues.retryAsIs") : t("order.issues.dismiss")}
           </Button>
         </Form>
       ) : null}
