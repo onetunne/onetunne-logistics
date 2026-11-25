@@ -19,6 +19,7 @@ import {
   INVENTORY_ITEM_PRODUCT_QUERY,
   ORDER_QUERY,
   ORDER_UPDATE_MUTATION,
+  SHOP_SHIPPING_COUNTRIES_QUERY,
   ORDERS_PAGE_QUERY,
   PRODUCT_QUERY,
   PRODUCTS_PAGE_QUERY,
@@ -198,7 +199,7 @@ async function hasActiveShipment(tx: DbOrTx, orderId: string): Promise<boolean> 
 async function openSyncIssue(
   tx: DbOrTx,
   orderId: string,
-  code: "SHOPIFY_ORDER_CHANGED" | "SHOPIFY_SYNC_FAILED" | "SHOPIFY_CANCELLED_AFTER_SHIPMENT",
+  code: "SHOPIFY_ORDER_CHANGED" | "SHOPIFY_SYNC_FAILED" | "SHOPIFY_CANCELLED_AFTER_SHIPMENT" | "SHOPIFY_COUNTRY_NOT_SHIPPED",
   params: Record<string, string | number>,
   field: string | null = null,
 ) {
@@ -472,15 +473,50 @@ export function fieldFromShopify(path: string[] | null): string | null {
   return null;
 }
 
-/** Надсилає поточні (підтверджені) контакти й адресу замовлення в Shopify через orderUpdate. */
+export interface ShippingCountries {
+  countries: string[];
+  restOfWorld: boolean;
+}
+
+/** Країни доставки магазину (зони доставки Shopify). */
+export async function shopShippingCountries(admin: AdminGraphql): Promise<ShippingCountries> {
+  const data = await admin<{
+    shop: { shipsToCountries: string[]; countriesInShippingZones: { countryCodes: string[]; includeRestOfWorld: boolean } };
+  }>(SHOP_SHIPPING_COUNTRIES_QUERY);
+  const countries = new Set([...data.shop.shipsToCountries, ...data.shop.countriesInShippingZones.countryCodes]);
+  return { countries: [...countries].sort(), restOfWorld: data.shop.countriesInShippingZones.includeRestOfWorld };
+}
+
+/**
+ * Надсилає поточні (підтверджені) контакти й адресу замовлення в Shopify через orderUpdate.
+ * Перед відправкою перевіряє, що країна є в зонах доставки магазину: інакше Shopify відповідає
+ * «Country/region not supported». Валідацію Shopify не обходимо — показуємо точну причину.
+ * Після відповіді звіряє, що Shopify справді застосував країну й індекс.
+ */
 export async function pushOrderChanges(db: Db, admin: AdminGraphql, shopifyOrderId: string): Promise<void> {
   const [order] = await db.select().from(orders).where(eq(orders.shopifyOrderId, shopifyOrderId));
   if (!order) return;
-  const data = await admin<{ orderUpdate: { order: { id: string; updatedAt: string } | null; userErrors: Array<{ field: string[] | null; message: string }> } }>(
-    ORDER_UPDATE_MUTATION,
-    { input: buildOrderUpdateInput(order) },
-  );
-  const errors = data.orderUpdate.userErrors;
+  const input = buildOrderUpdateInput(order);
+  const country = input.shippingAddress.countryCode;
+  if (country) {
+    const shipping = await shopShippingCountries(admin);
+    if (!shipping.restOfWorld && !shipping.countries.includes(country)) {
+      await openSyncIssue(db, order.id, "SHOPIFY_COUNTRY_NOT_SHIPPED", { country, shipsTo: shipping.countries.join(", ") || "—" }, "shipping.countryCode");
+      throw new DomainError("shopify.countryNotShipped", 422, { country });
+    }
+  }
+  const data = await admin<{
+    orderUpdate: {
+      order: { id: string; updatedAt: string; shippingAddress: { countryCodeV2: string | null; zip: string | null } | null } | null;
+      userErrors: Array<{ field: string[] | null; message: string }>;
+    };
+  }>(ORDER_UPDATE_MUTATION, { input });
+  const applied = data.orderUpdate.order?.shippingAddress;
+  const errors = [...data.orderUpdate.userErrors];
+  if (errors.length === 0 && applied && (applied.countryCodeV2 ?? null) !== (country ?? null)) {
+    // Shopify відповів без помилок, але країна не змінилася — не вважаємо це успіхом.
+    errors.push({ field: ["shippingAddress", "countryCode"], message: `Shopify kept country ${applied.countryCodeV2 ?? "—"} instead of ${country ?? "—"}` });
+  }
   if (errors.length > 0) {
     // Кожна помилка Shopify — окрема проблема біля відповідного поля, з текстом Shopify.
     await db.transaction(async (tx) => {
@@ -495,7 +531,7 @@ export async function pushOrderChanges(db: Db, admin: AdminGraphql, shopifyOrder
     await tx
       .update(issues)
       .set({ status: "resolved", resolvedAt: new Date(), resolvedBy: SYSTEM_ACTOR.id, resolution: "shopify_synced", updatedAt: new Date() })
-      .where(and(eq(issues.orderId, order.id), eq(issues.status, "open"), eq(issues.code, "SHOPIFY_SYNC_FAILED")));
+      .where(and(eq(issues.orderId, order.id), eq(issues.status, "open"), inArray(issues.code, ["SHOPIFY_SYNC_FAILED", "SHOPIFY_COUNTRY_NOT_SHIPPED"])));
     await tx
       .update(jobs)
       .set({ status: "failed", lastError: "superseded_by_successful_sync", updatedAt: new Date() })

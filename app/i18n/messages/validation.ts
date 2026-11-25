@@ -81,6 +81,9 @@ const messages: MessageModule = {
     "issue.CARRIER_RESULT_UNKNOWN.title": "Результат створення невідомий",
     "issue.CARRIER_RESULT_UNKNOWN.help":
       "Невідомо, чи створив перевізник накладну: зв'язок обірвався до отримання відповіді. Система перевірила відправлення за нашим референсом або не змогла цього перевірити, тому повторне створення заблоковано, щоб уникнути дубліката. Перевірте в кабінеті перевізника: якщо накладна існує — прив'яжіть її номер до замовлення, якщо ні — підтвердьте, що її не створено.",
+    "issue.SHOPIFY_COUNTRY_NOT_SHIPPED.title": "Країни немає в зонах доставки Shopify",
+    "issue.SHOPIFY_COUNTRY_NOT_SHIPPED.help":
+      "Shopify приймає адресу замовлення лише для країн із зон доставки магазину; для {country} її немає (зараз: {shipsTo}). Активний ринок (Markets) сам цього не додає. Додайте {country} до зони доставки: Shopify → Налаштування → Доставка → профіль доставки → зона, потім збережіть адресу ще раз.",
     "issue.SHOPIFY_ORDER_CHANGED.title": "Дані замовлення змінено в Shopify",
     "issue.SHOPIFY_ORDER_CHANGED.help":
       "У Shopify змінено поля ({fields}), але локально замовлення вже не можна змінювати автоматично (накладна в роботі або є неперенесені підтверджені зміни). Перевірте, які дані правильні, і за потреби скасуйте накладну та виправте дані.",
@@ -199,6 +202,9 @@ const messages: MessageModule = {
     "issue.CARRIER_RESULT_UNKNOWN.title": "Creation result unknown",
     "issue.CARRIER_RESULT_UNKNOWN.help":
       "It is unknown whether the carrier created the waybill: the connection dropped before a response arrived. The system checked for the shipment by our reference or could not check, so re-creation is blocked to avoid a duplicate. Check the carrier's portal: if the waybill exists, link its number to the order; if not, confirm that it was not created.",
+    "issue.SHOPIFY_COUNTRY_NOT_SHIPPED.title": "Country is not in Shopify shipping zones",
+    "issue.SHOPIFY_COUNTRY_NOT_SHIPPED.help":
+      "Shopify accepts an order address only for countries in the store’s shipping zones; {country} is not there (currently: {shipsTo}). An active market (Markets) does not add it by itself. Add {country} to a shipping zone: Shopify → Settings → Shipping and delivery → shipping profile → zone, then save the address again.",
     "issue.SHOPIFY_ORDER_CHANGED.title": "Order data changed in Shopify",
     "issue.SHOPIFY_ORDER_CHANGED.help":
       "Fields ({fields}) changed in Shopify, but the order can no longer be updated automatically (a waybill is in progress or confirmed local changes are not yet synced). Check which data is correct and, if needed, cancel the waybill and correct the data.",

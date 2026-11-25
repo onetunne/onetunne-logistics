@@ -90,6 +90,8 @@ export function gqlOrder(n = 5001, over: Partial<GqlOrder> = {}): GqlOrder {
 export function fakeAdmin(store: { orders: Map<string, GqlOrder>; products: Map<string, GqlProduct> }) {
   const calls: Array<{ op: string; variables?: Record<string, unknown> }> = [];
   let updateErrors: Array<{ field: string[] | null; message: string }> = [];
+  let shipsTo: string[] = ["DE", "UA", "PT", "US", "FR", "PL"];
+  let keepCountry: string | null = null;
   const admin: AdminGraphql = async <T,>(query: string, variables?: Record<string, unknown>) => {
     const op = /(query|mutation)\s+(\w+)/.exec(query)?.[2] ?? "unknown";
     calls.push({ op, variables });
@@ -121,13 +123,32 @@ export function fakeAdmin(store: { orders: Map<string, GqlOrder>; products: Map<
       case "OtInventoryItem":
         data = { inventoryItem: { id: variables?.id, variant: { id: "v", product: { id: "gid://shopify/Product/1" } } } };
         break;
-      case "OtOrderUpdate":
-        data = { orderUpdate: { order: updateErrors.length ? null : { id: "x", updatedAt: new Date().toISOString() }, userErrors: updateErrors } };
+      case "OtShopShipping":
+        data = { shop: { shipsToCountries: shipsTo, countriesInShippingZones: { countryCodes: shipsTo, includeRestOfWorld: false } } };
         break;
+      case "OtOrderUpdate": {
+        const addr = (variables?.input as { shippingAddress?: { countryCode?: string; zip?: string } }).shippingAddress;
+        data = {
+          orderUpdate: {
+            order: updateErrors.length
+              ? null
+              : { id: "x", updatedAt: new Date().toISOString(), shippingAddress: { countryCodeV2: keepCountry ?? addr?.countryCode ?? null, zip: addr?.zip ?? null } },
+            userErrors: updateErrors,
+          },
+        };
+        break;
+      }
       default:
         throw new Error(`unexpected op ${op}`);
     }
     return data as T;
   };
-  return { admin, calls, failUpdatesWith: (e: typeof updateErrors) => (updateErrors = e) };
+  return {
+    admin,
+    calls,
+    failUpdatesWith: (e: typeof updateErrors) => (updateErrors = e),
+    setShipsTo: (c: string[]) => (shipsTo = c),
+    /** Імітація: Shopify відповідає без помилок, але лишає стару країну. */
+    keepCountryAs: (c: string | null) => (keepCountry = c),
+  };
 }

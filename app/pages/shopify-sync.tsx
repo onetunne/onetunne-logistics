@@ -7,7 +7,7 @@ import { formatDateTime } from "~/lib/format";
 import { DomainError } from "~/lib/errors";
 import { writeAudit } from "~/modules/audit/audit.server";
 import { enqueueJob, jobStats, retryDeadJobs } from "~/modules/jobs/queue.server";
-import { JOB, currentShop, startOrdersImport } from "~/modules/shopify-sync/sync.server";
+import { JOB, currentShop, shopShippingCountries, startOrdersImport, type ShippingCountries } from "~/modules/shopify-sync/sync.server";
 import { ActionBanner, type ActionResult } from "~/components/action-banner";
 import { getRequestContext } from "~/server/context.server";
 import { formString, toActionError } from "~/server/http.server";
@@ -21,7 +21,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
   } catch {
     throw new Response("Forbidden", { status: 403 });
   }
-  if (ctx.mode === "demo") return { mode: ctx.mode, shop: null, jobs: null, defaultSince: "", limit60: "", stock: [] };
+  if (ctx.mode === "demo") return { mode: ctx.mode, shop: null, jobs: null, defaultSince: "", limit60: "", stock: [], shipping: null };
   const shop = await currentShop(ctx.db);
   const since = new Date(Date.now() - 60 * 86400_000).toISOString().slice(0, 10);
   // Залишки для звірки з Shopify (доступні для продажу, сума по локаціях).
@@ -39,7 +39,16 @@ export async function loader({ request }: LoaderFunctionArgs) {
     .innerJoin(products, eq(productVariants.productId, products.id))
     .orderBy(asc(products.title), asc(productVariants.title))
     .limit(100);
-  return { mode: ctx.mode, shop, jobs: await jobStats(ctx.db), defaultSince: since, limit60: since, stock };
+  let shipping: ShippingCountries | null = null;
+  if (shop) {
+    try {
+      const { adminClientFor } = await import("~/integrations/shopify/admin-client.server");
+      shipping = await shopShippingCountries(await adminClientFor(shop.shop));
+    } catch {
+      shipping = null; // діагностика необов'язкова
+    }
+  }
+  return { mode: ctx.mode, shop, jobs: await jobStats(ctx.db), defaultSince: since, limit60: since, stock, shipping };
 }
 
 export async function action({ request }: ActionFunctionArgs): Promise<ActionResult> {
@@ -107,6 +116,12 @@ export default function ShopifySyncPage() {
               { label: t("shopify.connection.webhooks"), value: formatDateTime(data.shop?.webhooksRegisteredAt, locale) },
               { label: t("shopify.connection.scopes"), value: data.shop?.scopes ?? "—" },
               { label: t("shopify.connection.products"), value: formatDateTime(data.shop?.productsSyncedAt, locale) },
+              {
+                label: t("shopify.connection.shipsTo"),
+                value: data.shipping
+                  ? [...data.shipping.countries, ...(data.shipping.restOfWorld ? [t("shopify.connection.restOfWorld")] : [])].join(", ") || "—"
+                  : "—",
+              },
             ]}
           />
         </Card>

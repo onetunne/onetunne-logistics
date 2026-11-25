@@ -77,10 +77,14 @@ export const INVENTORY_ITEM_PRODUCT_QUERY = `#graphql
 export const ORDER_UPDATE_MUTATION = `#graphql
   mutation OtOrderUpdate($input: OrderInput!) {
     orderUpdate(input: $input) {
-      order { id updatedAt }
+      order { id updatedAt shippingAddress { countryCodeV2 zip } }
       userErrors { field message }
     }
   }`;
+
+/** Країни, у які магазин доставляє (зони доставки). Shopify приймає адресу замовлення лише для цих країн. */
+export const SHOP_SHIPPING_COUNTRIES_QUERY = `#graphql
+  query OtShopShipping { shop { shipsToCountries countriesInShippingZones { countryCodes includeRestOfWorld } } }`;
 
 export const SHOP_CURRENCY_QUERY = `#graphql
   query OtShop { shop { currencyCode } }`;

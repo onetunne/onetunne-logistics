@@ -41,6 +41,7 @@ export const ISSUE_CODES = [
   "SHOPIFY_ORDER_CHANGED",
   "SHOPIFY_SYNC_FAILED",
   "SHOPIFY_CANCELLED_AFTER_SHIPMENT",
+  "SHOPIFY_COUNTRY_NOT_SHIPPED",
 ] as const;
 
 export type IssueCode = (typeof ISSUE_CODES)[number];
