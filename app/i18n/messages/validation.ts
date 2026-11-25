@@ -81,6 +81,15 @@ const messages: MessageModule = {
     "issue.CARRIER_RESULT_UNKNOWN.title": "Результат створення невідомий",
     "issue.CARRIER_RESULT_UNKNOWN.help":
       "Невідомо, чи створив перевізник накладну: зв'язок обірвався до отримання відповіді. Система перевірила відправлення за нашим референсом або не змогла цього перевірити, тому повторне створення заблоковано, щоб уникнути дубліката. Перевірте в кабінеті перевізника: якщо накладна існує — прив'яжіть її номер до замовлення, якщо ні — підтвердьте, що її не створено.",
+    "issue.SHOPIFY_ORDER_CHANGED.title": "Дані замовлення змінено в Shopify",
+    "issue.SHOPIFY_ORDER_CHANGED.help":
+      "У Shopify змінено поля ({fields}), але локально замовлення вже не можна змінювати автоматично (накладна в роботі або є неперенесені підтверджені зміни). Перевірте, які дані правильні, і за потреби скасуйте накладну та виправте дані.",
+    "issue.SHOPIFY_SYNC_FAILED.title": "Не вдалося оновити замовлення в Shopify",
+    "issue.SHOPIFY_SYNC_FAILED.help":
+      "Підтверджені зміни контактів/адреси не передано в Shopify після кількох спроб ({message}). Перевірте дані та повторіть на сторінці «Синхронізація Shopify».",
+    "issue.SHOPIFY_CANCELLED_AFTER_SHIPMENT.title": "Замовлення скасовано в Shopify після відправлення",
+    "issue.SHOPIFY_CANCELLED_AFTER_SHIPMENT.help":
+      "Shopify повідомив про скасування, але автоматично скасувати неможливо ({reason}). Зв’яжіться з перевізником щодо повернення або вирішіть ситуацію з накладною вручну.",
     "issue.CARRIER_UNAVAILABLE.title": "Перевізник недоступний",
     "issue.CARRIER_UNAVAILABLE.help":
       "API перевізника не відповідає. Накладну не створено, нічого не змінено. Повторіть спробу пізніше.",
@@ -190,6 +199,15 @@ const messages: MessageModule = {
     "issue.CARRIER_RESULT_UNKNOWN.title": "Creation result unknown",
     "issue.CARRIER_RESULT_UNKNOWN.help":
       "It is unknown whether the carrier created the waybill: the connection dropped before a response arrived. The system checked for the shipment by our reference or could not check, so re-creation is blocked to avoid a duplicate. Check the carrier's portal: if the waybill exists, link its number to the order; if not, confirm that it was not created.",
+    "issue.SHOPIFY_ORDER_CHANGED.title": "Order data changed in Shopify",
+    "issue.SHOPIFY_ORDER_CHANGED.help":
+      "Fields ({fields}) changed in Shopify, but the order can no longer be updated automatically (a waybill is in progress or confirmed local changes are not yet synced). Check which data is correct and, if needed, cancel the waybill and correct the data.",
+    "issue.SHOPIFY_SYNC_FAILED.title": "Could not update the order in Shopify",
+    "issue.SHOPIFY_SYNC_FAILED.help":
+      "Confirmed contact/address changes were not sent to Shopify after several attempts ({message}). Check the data and retry on the “Shopify sync” page.",
+    "issue.SHOPIFY_CANCELLED_AFTER_SHIPMENT.title": "Order cancelled in Shopify after shipment",
+    "issue.SHOPIFY_CANCELLED_AFTER_SHIPMENT.help":
+      "Shopify reported a cancellation, but it cannot be applied automatically ({reason}). Contact the carrier about a return or resolve the waybill situation manually.",
     "issue.CARRIER_UNAVAILABLE.title": "Carrier unavailable",
     "issue.CARRIER_UNAVAILABLE.help":
       "The carrier API is not responding. No waybill was created and nothing was changed. Try again later.",

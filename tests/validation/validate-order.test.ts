@@ -204,7 +204,7 @@ describe("validateOrder — issues", () => {
       }),
     );
 
-    const validatorCodes = ISSUE_CODES.filter((c) => !c.startsWith("CARRIER_"));
+    const validatorCodes = ISSUE_CODES.filter((c) => !c.startsWith("CARRIER_") && !c.startsWith("SHOPIFY_"));
     expect([...seen].sort()).toEqual([...validatorCodes].sort());
   });
 

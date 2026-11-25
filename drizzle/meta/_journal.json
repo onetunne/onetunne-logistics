@@ -8,6 +8,13 @@
       "when": 1795562020310,
       "tag": "0000_initial",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1795577501666,
+      "tag": "0001_shopify_sync",
+      "breakpoints": true
     }
   ]
 }

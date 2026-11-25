@@ -80,6 +80,15 @@ tests/            unit + інтеграційні тести (PGlite)
 - `npm run db:generate` — нова міграція після зміни `app/db/schema.ts`.
 - `npm run test:e2e` — E2E-перевірка демо (потрібен Playwright і запущений сервер).
 
+## Етап 2 (Shopify)
+- Інструкція налаштування тестового сервера: `docs/shopify-test-server.md`. Документацію Shopify читати як
+  `https://shopify.dev/docs/....md` (хост shopify.dev дозволено в середовищі `onetunne-logistics`).
+- Потік: webhook (`/webhooks/shopify`, HMAC) → `webhook_events` (дедуплікація) → `jobs` → обробник
+  (`modules/shopify-sync/handlers.server.ts`) перечитує дані через GraphQL (`integrations/shopify/graphql.ts`).
+- Обробник черги стартує з сервером (`ensureJobWorker` в entry.server) лише за наявності ключів Shopify і DATABASE_URL.
+- Зміни з Shopify не перезаписують замовлення з накладною або з неперенесеними підтвердженими змінами → проблема SHOPIFY_ORDER_CHANGED.
+- Тести етапу 2 — `tests/stage2` з імітацією Admin API (`fixtures.ts`); реальний API перевіряє власник на тестовому магазині.
+
 ## Нотатки для наступних етапів
 - Етап 2: Dev Dashboard → Custom Distribution, `shopify app config link`, мінімальні scopes (план у `shopify.app.toml`),
   запит Protected Customer Data, робочий ShopifyGateway (GraphQL Admin API), webhooks orders/*, імпорт старих замовлень,

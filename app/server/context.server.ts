@@ -1,8 +1,11 @@
 import { eq } from "drizzle-orm";
 import { redirect } from "react-router";
 import { staffMembers } from "~/db/schema";
-import { makeActor, type Actor } from "~/domain/permissions";
-import { PendingShopifyGateway, DemoShopifyGateway } from "~/integrations/shopify/types";
+import { makeActor, PERMISSIONS, type Actor } from "~/domain/permissions";
+
+/** Вимкнений працівник не має жодних дозволів. */
+const STAFF_ALL = PERMISSIONS;
+import { DemoShopifyGateway } from "~/integrations/shopify/types";
 import { getEnv } from "~/lib/env.server";
 import { demoAccessCookie, demoAccessToken, demoRoleCookie, isRole, readPreferences } from "./cookies.server";
 import { getDemoRuntime } from "./demo-runtime.server";
@@ -74,7 +77,7 @@ export async function getRequestContext(request: Request): Promise<RequestContex
       db: runtime.handle.db,
       actor,
       carriers: runtime.carriers,
-      shopify: new PendingShopifyGateway(),
+      shopify: runtime.shopify,
       now: () => new Date(),
     };
   }
@@ -94,7 +97,16 @@ export async function resolveShopifyActor(
   const id = userId || "unknown";
   if (ownerIds.has(id)) return makeActor({ id: `shopify:${id}`, displayName: "Owner", role: "owner" });
   if (userId) {
+    // Кожен користувач Shopify Admin, що відкрив застосунок, реєструється як «Працівник» (без доступу до
+    // фінансів і налаштувань). Власник призначає ролі в розділі «Працівники».
+    await db
+      .insert(staffMembers)
+      .values({ shopifyUserId: userId, displayName: `Shopify user ${userId}`, role: "staff", lastSeenAt: new Date() })
+      .onConflictDoUpdate({ target: staffMembers.shopifyUserId, set: { lastSeenAt: new Date() } });
     const [member] = await db.select().from(staffMembers).where(eq(staffMembers.shopifyUserId, userId));
+    if (member && !member.active) {
+      return makeActor({ id: `shopify:${id}`, displayName: member.displayName, role: "staff", overrides: { revoke: [...STAFF_ALL] } });
+    }
     if (member?.active) {
       return makeActor({
         id: `shopify:${id}`,

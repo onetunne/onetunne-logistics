@@ -160,6 +160,8 @@ export const products = pgTable("products", {
   title: text("title").notNull(),
   handle: text("handle"),
   imageUrl: text("image_url"),
+  status: text("status"),
+  shopifyUpdatedAt: timestamp("shopify_updated_at", { withTimezone: true }),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 });
@@ -188,10 +190,16 @@ export const productVariants = pgTable(
     customsDescription: text("customs_description"),
     imageUrl: text("image_url"),
     inventoryAvailable: integer("inventory_available"),
+    /** Shopify InventoryItem GID — для оновлення залишків за webhook inventory_levels/update. */
+    inventoryItemId: text("inventory_item_id"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (t) => [index("product_variants_sku_idx").on(t.sku), index("product_variants_barcode_idx").on(t.barcode)],
+  (t) => [
+    index("product_variants_sku_idx").on(t.sku),
+    index("product_variants_barcode_idx").on(t.barcode),
+    index("product_variants_inventory_item_idx").on(t.inventoryItemId),
+  ],
 );
 
 // ---------------------------------------------------------------------------
@@ -224,6 +232,10 @@ export const orders = pgTable(
     shipCountryCode: char("ship_country_code", { length: 2 }),
     shipPhone: text("ship_phone"),
     note: text("note"),
+    billingCountryCode: char("billing_country_code", { length: 2 }),
+    fulfillmentStatus: text("fulfillment_status"),
+    /** updatedAt замовлення в Shopify — захист від застосування застарілих подій. */
+    shopifyUpdatedAt: timestamp("shopify_updated_at", { withTimezone: true }),
     automationPaused: boolean("automation_paused").notNull().default(false),
     /** Оптимістичне блокування: кожна зміна збільшує версію. */
     version: integer("version").notNull().default(1),
@@ -258,7 +270,10 @@ export const orderLineItems = pgTable(
     imageUrl: text("image_url"),
     position: integer("position").notNull().default(0),
   },
-  (t) => [index("order_line_items_order_idx").on(t.orderId)],
+  (t) => [
+    index("order_line_items_order_idx").on(t.orderId),
+    uniqueIndex("order_line_items_shopify_uq").on(t.orderId, t.shopifyLineItemId),
+  ],
 );
 
 /** Історія змін даних замовлення: початкове та нове значення, причина, джерело. */
@@ -420,7 +435,22 @@ export const staffMembers = pgTable("staff_members", {
     .notNull()
     .default({}),
   active: boolean("active").notNull().default(true),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
   createdAt: createdAt(),
+  updatedAt: updatedAt(),
+});
+
+/** Стан підключеного магазину Shopify: встановлення, синхронізація, імпорт. */
+export const shopInstallations = pgTable("shop_installations", {
+  shop: text("shop").primaryKey(),
+  installedAt: timestamp("installed_at", { withTimezone: true }).notNull().defaultNow(),
+  uninstalledAt: timestamp("uninstalled_at", { withTimezone: true }),
+  scopes: text("scopes"),
+  webhooksRegisteredAt: timestamp("webhooks_registered_at", { withTimezone: true }),
+  productsSyncedAt: timestamp("products_synced_at", { withTimezone: true }),
+  ordersSyncedAt: timestamp("orders_synced_at", { withTimezone: true }),
+  /** Стан імпорту старих замовлень: { status, since, imported, skipped, startedAt, finishedAt, error }. */
+  importState: jsonb("import_state").$type<Record<string, unknown>>(),
   updatedAt: updatedAt(),
 });
 
@@ -464,7 +494,8 @@ export const jobs = pgTable(
     type: text("type").notNull(),
     payload: jsonb("payload").notNull().default({}),
     status: jobStatusEnum("status").notNull().default("queued"),
-    dedupeKey: text("dedupe_key").unique(),
+    /** Унікальний серед завдань у черзі (queued): повторна подія не створює дублікат очікуваного завдання. */
+    dedupeKey: text("dedupe_key"),
     runAt: timestamp("run_at", { withTimezone: true }).notNull().defaultNow(),
     attempts: integer("attempts").notNull().default(0),
     maxAttempts: integer("max_attempts").notNull().default(5),
@@ -474,5 +505,8 @@ export const jobs = pgTable(
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (t) => [index("jobs_pick_idx").on(t.status, t.runAt)],
+  (t) => [
+    index("jobs_pick_idx").on(t.status, t.runAt),
+    uniqueIndex("jobs_queued_dedupe_uq").on(t.dedupeKey).where(sql`${t.status} = 'queued'`),
+  ],
 );

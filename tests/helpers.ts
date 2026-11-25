@@ -23,7 +23,7 @@ let dbCounter = 0;
  * Ізольована база з міграціями та демо-даними: PGlite у пам'яті (за замовчуванням)
  * або окрема тимчасова база на справжньому PostgreSQL, якщо задано TEST_DATABASE_URL.
  */
-async function openTestDatabase(): Promise<DatabaseHandle> {
+export async function openTestDatabase(): Promise<DatabaseHandle> {
   const adminUrl = process.env.TEST_DATABASE_URL;
   if (!adminUrl) return openPglite();
   const { Client } = await import("pg");

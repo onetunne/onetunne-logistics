@@ -37,6 +37,10 @@ export const ISSUE_CODES = [
   "CARRIER_REJECTED",
   "CARRIER_RESULT_UNKNOWN",
   "CARRIER_UNAVAILABLE",
+  // Синхронізація з Shopify (створюються сервісом синхронізації)
+  "SHOPIFY_ORDER_CHANGED",
+  "SHOPIFY_SYNC_FAILED",
+  "SHOPIFY_CANCELLED_AFTER_SHIPMENT",
 ] as const;
 
 export type IssueCode = (typeof ISSUE_CODES)[number];
