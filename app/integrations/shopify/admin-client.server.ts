@@ -2,7 +2,10 @@
  * Мінімальний клієнт GraphQL Admin API для фонових завдань.
  * Токен — офлайн-сесія магазину (expiring offline token з автооновленням бібліотекою Shopify).
  */
-export type AdminGraphql = <T>(query: string, variables?: Record<string, unknown>) => Promise<T>;
+export type AdminGraphql = (<T>(query: string, variables?: Record<string, unknown>) => Promise<T>) & {
+  /** X-Request-Id останньої відповіді Shopify (для звернення в підтримку Shopify). */
+  lastRequestId?: string | null;
+};
 
 /** Помилка API. retryable — можна повторити пізніше (обмеження швидкості, 5xx, мережа). */
 export class ShopifyApiError extends Error {
@@ -19,13 +22,14 @@ export class ShopifyApiError extends Error {
 interface GraphqlResponseLike {
   json(): Promise<unknown>;
   status?: number;
+  headers?: { get(name: string): string | null };
 }
 
 type RawGraphql = (query: string, options?: { variables?: Record<string, unknown> }) => Promise<GraphqlResponseLike>;
 
 /** Обгортка над `admin.graphql` бібліотеки Shopify: розбір помилок і класифікація для повторів. */
 export function wrapAdminGraphql(raw: RawGraphql): AdminGraphql {
-  return async <T>(query: string, variables?: Record<string, unknown>): Promise<T> => {
+  const fn: AdminGraphql = async <T>(query: string, variables?: Record<string, unknown>): Promise<T> => {
     let response: GraphqlResponseLike;
     try {
       response = await raw(query, variables ? { variables } : undefined);
@@ -35,6 +39,7 @@ export function wrapAdminGraphql(raw: RawGraphql): AdminGraphql {
       const retryable = status === undefined || status === 429 || status >= 500;
       throw new ShopifyApiError(`Shopify request failed${status ? ` (${status})` : ""}`, retryable, status ? String(status) : "NETWORK");
     }
+    fn.lastRequestId = response.headers?.get("x-request-id") ?? null;
     const body = (await response.json()) as { data?: T; errors?: Array<{ message: string; extensions?: { code?: string } }> };
     if (body.errors?.length) {
       const code = body.errors[0]?.extensions?.code;
@@ -47,6 +52,7 @@ export function wrapAdminGraphql(raw: RawGraphql): AdminGraphql {
     if (!body.data) throw new ShopifyApiError("Shopify GraphQL: empty response", true, "EMPTY");
     return body.data;
   };
+  return fn;
 }
 
 /** Клієнт для конкретного магазину за збереженою офлайн-сесією. */

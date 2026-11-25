@@ -92,6 +92,7 @@ export function fakeAdmin(store: { orders: Map<string, GqlOrder>; products: Map<
   let updateErrors: Array<{ field: string[] | null; message: string }> = [];
   let shipsTo: string[] = ["DE", "UA", "PT", "US", "FR", "PL"];
   let keepCountry: string | null = null;
+  let rejectWhen: ((input: Record<string, any>) => Array<{ field: string[] | null; message: string }>) | null = null;
   const admin: AdminGraphql = async <T,>(query: string, variables?: Record<string, unknown>) => {
     const op = /(query|mutation)\s+(\w+)/.exec(query)?.[2] ?? "unknown";
     calls.push({ op, variables });
@@ -126,8 +127,29 @@ export function fakeAdmin(store: { orders: Map<string, GqlOrder>; products: Map<
       case "OtShopShipping":
         data = { shop: { shipsToCountries: shipsTo, countriesInShippingZones: { countryCodes: shipsTo, includeRestOfWorld: false } } };
         break;
+      case "OtOrderAddressState": {
+        const o = store.orders.get(String(variables?.id));
+        data = {
+          order: o
+            ? {
+                id: o.id,
+                presentmentCurrencyCode: "EUR",
+                shippingAddress: o.shippingAddress
+                  ? { countryCodeV2: o.shippingAddress.countryCodeV2, provinceCode: o.shippingAddress.provinceCode, zip: o.shippingAddress.zip, phone: o.shippingAddress.phone }
+                  : null,
+                shippingLine: { title: "Standard", source: "shopify", code: "Standard", carrierIdentifier: null, deliveryCategory: null },
+              }
+            : null,
+        };
+        break;
+      }
       case "OtOrderUpdate": {
         const addr = (variables?.input as { shippingAddress?: { countryCode?: string; zip?: string } }).shippingAddress;
+        const custom = rejectWhen ? rejectWhen(variables?.input as Record<string, any>) : [];
+        if (custom.length) {
+          data = { orderUpdate: { order: null, userErrors: custom } };
+          break;
+        }
         data = {
           orderUpdate: {
             order: updateErrors.length
@@ -150,5 +172,6 @@ export function fakeAdmin(store: { orders: Map<string, GqlOrder>; products: Map<
     setShipsTo: (c: string[]) => (shipsTo = c),
     /** Імітація: Shopify відповідає без помилок, але лишає стару країну. */
     keepCountryAs: (c: string | null) => (keepCountry = c),
+    rejectWhen: (fn: typeof rejectWhen) => (rejectWhen = fn),
   };
 }

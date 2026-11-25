@@ -20,6 +20,7 @@ import {
   ORDER_QUERY,
   ORDER_UPDATE_MUTATION,
   SHOP_SHIPPING_COUNTRIES_QUERY,
+  ORDER_ADDRESS_STATE_QUERY,
   ORDERS_PAGE_QUERY,
   PRODUCT_QUERY,
   PRODUCTS_PAGE_QUERY,
@@ -29,6 +30,19 @@ import {
 } from "~/integrations/shopify/graphql";
 import type { ServiceContext } from "~/server/types";
 import { initialStatus, isPaid, mapOrder, mapProduct, type MappedOrder, type MappedProduct } from "./mappers";
+import {
+  DIAGNOSTIC_VARIANTS,
+  describeOrderUpdateInput,
+  inputVariant,
+  phoneFormat,
+  valueShape,
+  type DiagnosticVariant,
+  type OrderUpdateInputLike,
+} from "./diagnostics";
+import { logger } from "~/lib/logger.server";
+
+/** Версія GraphQL Admin API (та сама, що в shopify.server.ts). */
+const SHOPIFY_API_VERSION = "2026-10";
 
 export const JOB = {
   syncOrder: "shopify.sync_order",
@@ -493,6 +507,119 @@ export async function shopShippingCountries(admin: AdminGraphql): Promise<Shippi
  * «Country/region not supported». Валідацію Shopify не обходимо — показуємо точну причину.
  * Після відповіді звіряє, що Shopify справді застосував країну й індекс.
  */
+type UpdateError = { field: string[] | null; message: string };
+
+export interface OrderUpdateAttempt {
+  variant: DiagnosticVariant;
+  ok: boolean;
+  errors: UpdateError[];
+  appliedCountry: string | null;
+  requestId: string | null;
+  fields: string[];
+}
+
+interface AddressState {
+  countryCodeV2: string | null;
+  provinceCode: string | null;
+  zip: string | null;
+  phone: string | null;
+}
+
+/** Поточний стан адреси й доставки замовлення в Shopify — лише безпечні для журналу ознаки. */
+async function readAddressState(admin: AdminGraphql, orderGid: string) {
+  const data = await admin<{
+    order: {
+      presentmentCurrencyCode: string | null;
+      shippingAddress: AddressState | null;
+      shippingLine: { title: string | null; source: string | null; code: string | null; carrierIdentifier: string | null; deliveryCategory: string | null } | null;
+    } | null;
+  }>(ORDER_ADDRESS_STATE_QUERY, { id: orderGid });
+  const o = data.order;
+  return {
+    countryIso: o?.shippingAddress?.countryCodeV2 ?? null,
+    regionCode: o?.shippingAddress?.provinceCode ?? null,
+    postShape: o?.shippingAddress?.zip ? valueShape(o.shippingAddress.zip) : null,
+    telFmt: o?.shippingAddress?.phone ? phoneFormat(o.shippingAddress.phone) : null,
+    currency: o?.presentmentCurrencyCode ?? null,
+    deliveryMethod: o?.shippingLine
+      ? {
+          source: o.shippingLine.source,
+          code: o.shippingLine.code,
+          carrier: o.shippingLine.carrierIdentifier,
+          category: o.shippingLine.deliveryCategory,
+        }
+      : null,
+  };
+}
+
+/** Один запит orderUpdate з безпечним журналом (форма запиту, помилки, X-Request-Id). */
+async function sendOrderUpdate(
+  admin: AdminGraphql,
+  input: OrderUpdateInputLike,
+  variant: DiagnosticVariant,
+  context: Record<string, unknown>,
+): Promise<OrderUpdateAttempt> {
+  const fields = describeOrderUpdateInput(input);
+  logger.info("shopify.order_update.request", { variant, apiVersion: SHOPIFY_API_VERSION, fields, ...context });
+  const data = await admin<{
+    orderUpdate: {
+      order: { id: string; updatedAt: string; shippingAddress: { countryCodeV2: string | null; zip: string | null } | null } | null;
+      userErrors: UpdateError[];
+    };
+  }>(ORDER_UPDATE_MUTATION, { input });
+  const appliedCountry = data.orderUpdate.order?.shippingAddress?.countryCodeV2 ?? null;
+  const errors = [...data.orderUpdate.userErrors];
+  const sentCountry = (input.shippingAddress?.countryCode as string | null | undefined) ?? null;
+  if (errors.length === 0 && data.orderUpdate.order && sentCountry && appliedCountry !== sentCountry) {
+    errors.push({ field: ["shippingAddress", "countryCode"], message: `Shopify kept country ${appliedCountry ?? "—"} instead of ${sentCountry}` });
+  }
+  const attempt: OrderUpdateAttempt = {
+    variant,
+    ok: errors.length === 0,
+    errors,
+    appliedCountry,
+    requestId: admin.lastRequestId ?? null,
+    fields,
+  };
+  logger.info("shopify.order_update.response", {
+    variant,
+    ok: attempt.ok,
+    requestId: attempt.requestId,
+    appliedCountry,
+    errors: errors.map((e) => `${(e.field ?? []).join(".")}: ${e.message}`),
+    ...context,
+  });
+  return attempt;
+}
+
+async function recordPushSuccess(db: Db, orderId: string, shopifyOrderId: string) {
+  await db.transaction(async (tx) => {
+    // Успішне оновлення закриває попередні помилки синхронізації й «мертві» завдання для цього замовлення.
+    await tx
+      .update(issues)
+      .set({ status: "resolved", resolvedAt: new Date(), resolvedBy: SYSTEM_ACTOR.id, resolution: "shopify_synced", updatedAt: new Date() })
+      .where(and(eq(issues.orderId, orderId), eq(issues.status, "open"), inArray(issues.code, ["SHOPIFY_SYNC_FAILED", "SHOPIFY_COUNTRY_NOT_SHIPPED"])));
+    await tx
+      .update(jobs)
+      .set({ status: "failed", lastError: "superseded_by_successful_sync", updatedAt: new Date() })
+      .where(and(eq(jobs.type, JOB.pushOrder), eq(jobs.dedupeKey, `push:${shopifyOrderId}`), eq(jobs.status, "dead")));
+    await writeAudit(tx, SYSTEM_ACTOR, "shopify.order_pushed", { type: "order", id: orderId });
+  });
+}
+
+async function recordPushErrors(db: Db, orderId: string, errors: UpdateError[]) {
+  await db.transaction(async (tx) => {
+    for (const e of errors) {
+      await openSyncIssue(tx, orderId, "SHOPIFY_SYNC_FAILED", { message: e.message.slice(0, 200) }, fieldFromShopify(e.field));
+    }
+  });
+}
+
+/**
+ * Надсилає поточні (підтверджені) контакти й адресу замовлення в Shopify через orderUpdate.
+ * Перед відправкою перевіряє, що країна є в зонах доставки магазину; після відповіді звіряє застосовану країну.
+ * Кожен запит журналюється безпечно (без ПД): див. diagnostics.ts.
+ */
 export async function pushOrderChanges(db: Db, admin: AdminGraphql, shopifyOrderId: string): Promise<void> {
   const [order] = await db.select().from(orders).where(eq(orders.shopifyOrderId, shopifyOrderId));
   if (!order) return;
@@ -505,39 +632,53 @@ export async function pushOrderChanges(db: Db, admin: AdminGraphql, shopifyOrder
       throw new DomainError("shopify.countryNotShipped", 422, { country });
     }
   }
-  const data = await admin<{
-    orderUpdate: {
-      order: { id: string; updatedAt: string; shippingAddress: { countryCodeV2: string | null; zip: string | null } | null } | null;
-      userErrors: Array<{ field: string[] | null; message: string }>;
-    };
-  }>(ORDER_UPDATE_MUTATION, { input });
-  const applied = data.orderUpdate.order?.shippingAddress;
-  const errors = [...data.orderUpdate.userErrors];
-  if (errors.length === 0 && applied && (applied.countryCodeV2 ?? null) !== (country ?? null)) {
-    // Shopify відповів без помилок, але країна не змінилася — не вважаємо це успіхом.
-    errors.push({ field: ["shippingAddress", "countryCode"], message: `Shopify kept country ${applied.countryCodeV2 ?? "—"} instead of ${country ?? "—"}` });
-  }
-  if (errors.length > 0) {
-    // Кожна помилка Shopify — окрема проблема біля відповідного поля, з текстом Shopify.
-    await db.transaction(async (tx) => {
-      for (const e of errors) {
-        await openSyncIssue(tx, order.id, "SHOPIFY_SYNC_FAILED", { message: e.message.slice(0, 200) }, fieldFromShopify(e.field));
-      }
-    });
-    throw new DomainError("shopify.updateRejected", 422, { message: errors.map((e) => e.message).join("; ").slice(0, 200) });
-  }
-  await db.transaction(async (tx) => {
-    // Успішне оновлення закриває попередні помилки синхронізації й «мертві» завдання для цього замовлення.
-    await tx
-      .update(issues)
-      .set({ status: "resolved", resolvedAt: new Date(), resolvedBy: SYSTEM_ACTOR.id, resolution: "shopify_synced", updatedAt: new Date() })
-      .where(and(eq(issues.orderId, order.id), eq(issues.status, "open"), inArray(issues.code, ["SHOPIFY_SYNC_FAILED", "SHOPIFY_COUNTRY_NOT_SHIPPED"])));
-    await tx
-      .update(jobs)
-      .set({ status: "failed", lastError: "superseded_by_successful_sync", updatedAt: new Date() })
-      .where(and(eq(jobs.type, JOB.pushOrder), eq(jobs.dedupeKey, `push:${shopifyOrderId}`), eq(jobs.status, "dead")));
-    await writeAudit(tx, SYSTEM_ACTOR, "shopify.order_pushed", { type: "order", id: order.id });
+  const before = await readAddressState(admin, shopifyOrderId);
+  const attempt = await sendOrderUpdate(admin, input, "as_sent", {
+    orderNo: order.orderNumber,
+    before,
+    countryChanged: before.countryIso !== country,
   });
+  if (!attempt.ok) {
+    await recordPushErrors(db, order.id, attempt.errors);
+    throw new DomainError("shopify.updateRejected", 422, { message: attempt.errors.map((e) => e.message).join("; ").slice(0, 200) });
+  }
+  await recordPushSuccess(db, order.id, shopifyOrderId);
+}
+
+/**
+ * Покрокова діагностика (запускає лише власник для замовлення з помилкою синхронізації адреси).
+ * Надсилає ТУ САМУ підтверджену адресу в кількох коректних за схемою 2026-10 форматах — по черзі,
+ * до першого успіху — і повертає, який саме елемент запиту Shopify не приймає. Валідацію Shopify не обходить.
+ */
+export async function diagnoseOrderAddressUpdate(db: Db, admin: AdminGraphql, orderId: string) {
+  const [order] = await db.select().from(orders).where(eq(orders.id, orderId));
+  if (!order?.shopifyOrderId) throw new DomainError("error.notFound", 404);
+  const input = buildOrderUpdateInput(order);
+  const before = await readAddressState(admin, order.shopifyOrderId);
+  const shipping = await shopShippingCountries(admin);
+  const context = {
+    orderNo: order.orderNumber,
+    diagnostic: true,
+    before,
+    targetCountry: input.shippingAddress.countryCode,
+    countryChanged: before.countryIso !== input.shippingAddress.countryCode,
+    targetCountryInZones: shipping.restOfWorld || shipping.countries.includes(input.shippingAddress.countryCode ?? ""),
+  };
+  logger.info("shopify.address_diagnostic.start", context);
+  const attempts: OrderUpdateAttempt[] = [];
+  for (const variant of DIAGNOSTIC_VARIANTS) {
+    const attempt = await sendOrderUpdate(admin, inputVariant(input, variant), variant, context);
+    attempts.push(attempt);
+    if (attempt.ok) break;
+  }
+  const success = attempts.find((a) => a.ok) ?? null;
+  if (success) await recordPushSuccess(db, order.id, order.shopifyOrderId);
+  logger.info("shopify.address_diagnostic.result", {
+    orderNo: order.orderNumber,
+    succeededWith: success?.variant ?? null,
+    attempts: attempts.map((a) => ({ variant: a.variant, ok: a.ok, requestId: a.requestId, errors: a.errors.map((e) => `${(e.field ?? []).join(".")}: ${e.message}`) })),
+  });
+  return { context, attempts, succeededWith: success?.variant ?? null };
 }
 
 export async function reportPushFailure(db: Db, shopifyOrderId: string, error: string) {

@@ -82,6 +82,16 @@ export const ORDER_UPDATE_MUTATION = `#graphql
     }
   }`;
 
+/** Поточна адреса й спосіб доставки замовлення в Shopify (для діагностики; ПД не логуються). */
+export const ORDER_ADDRESS_STATE_QUERY = `#graphql
+  query OtOrderAddressState($id: ID!) {
+    order(id: $id) {
+      id presentmentCurrencyCode
+      shippingAddress { countryCodeV2 provinceCode zip phone }
+      shippingLine { title source code carrierIdentifier deliveryCategory }
+    }
+  }`;
+
 /** Країни, у які магазин доставляє (зони доставки). Shopify приймає адресу замовлення лише для цих країн. */
 export const SHOP_SHIPPING_COUNTRIES_QUERY = `#graphql
   query OtShopShipping { shop { shipsToCountries countriesInShippingZones { countryCodes includeRestOfWorld } } }`;

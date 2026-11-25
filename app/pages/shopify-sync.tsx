@@ -1,13 +1,20 @@
 import { Form, useActionData, useLoaderData, useNavigation, type ActionFunctionArgs, type LoaderFunctionArgs } from "react-router";
-import { asc, eq } from "drizzle-orm";
-import { productVariants, products } from "~/db/schema";
+import { and, asc, eq } from "drizzle-orm";
+import { issues, orders, productVariants, products } from "~/db/schema";
 import { requirePermission } from "~/domain/permissions";
 import { useLocale, useT } from "~/i18n";
 import { formatDateTime } from "~/lib/format";
 import { DomainError } from "~/lib/errors";
 import { writeAudit } from "~/modules/audit/audit.server";
 import { enqueueJob, jobStats, retryDeadJobs } from "~/modules/jobs/queue.server";
-import { JOB, currentShop, shopShippingCountries, startOrdersImport, type ShippingCountries } from "~/modules/shopify-sync/sync.server";
+import {
+  JOB,
+  currentShop,
+  diagnoseOrderAddressUpdate,
+  shopShippingCountries,
+  startOrdersImport,
+  type ShippingCountries,
+} from "~/modules/shopify-sync/sync.server";
 import { ActionBanner, type ActionResult } from "~/components/action-banner";
 import { getRequestContext } from "~/server/context.server";
 import { formString, toActionError } from "~/server/http.server";
@@ -21,7 +28,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
   } catch {
     throw new Response("Forbidden", { status: 403 });
   }
-  if (ctx.mode === "demo") return { mode: ctx.mode, shop: null, jobs: null, defaultSince: "", limit60: "", stock: [], shipping: null };
+  if (ctx.mode === "demo")
+    return { mode: ctx.mode, shop: null, jobs: null, defaultSince: "", limit60: "", stock: [], shipping: null, failedOrders: [] };
   const shop = await currentShop(ctx.db);
   const since = new Date(Date.now() - 60 * 86400_000).toISOString().slice(0, 10);
   // Залишки для звірки з Shopify (доступні для продажу, сума по локаціях).
@@ -48,7 +56,14 @@ export async function loader({ request }: LoaderFunctionArgs) {
       shipping = null; // діагностика необов'язкова
     }
   }
-  return { mode: ctx.mode, shop, jobs: await jobStats(ctx.db), defaultSince: since, limit60: since, stock, shipping };
+  // Замовлення з помилкою оновлення адреси в Shopify — для покрокової діагностики.
+  const failedOrders = await ctx.db
+    .selectDistinct({ id: orders.id, orderNumber: orders.orderNumber })
+    .from(issues)
+    .innerJoin(orders, eq(issues.orderId, orders.id))
+    .where(and(eq(issues.status, "open"), eq(issues.code, "SHOPIFY_SYNC_FAILED")))
+    .limit(20);
+  return { mode: ctx.mode, shop, jobs: await jobStats(ctx.db), defaultSince: since, limit60: since, stock, shipping, failedOrders };
 }
 
 export async function action({ request }: ActionFunctionArgs): Promise<ActionResult> {
@@ -70,6 +85,31 @@ export async function action({ request }: ActionFunctionArgs): Promise<ActionRes
       await startOrdersImport(ctx.db, shop.shop, since);
       await writeAudit(ctx.db, ctx.actor, "shopify.import_requested", { type: "shop", id: shop.shop }, { since });
       return { ok: true, message: "shopify.result.importQueued", params: { since } };
+    }
+    if (intent === "diagnoseAddress") {
+      const orderId = formString(form, "orderId");
+      if (!/^[0-9a-f-]{36}$/i.test(orderId)) throw new DomainError("error.notFound", 404);
+      const { adminClientFor } = await import("~/integrations/shopify/admin-client.server");
+      const report = await diagnoseOrderAddressUpdate(ctx.db, await adminClientFor(shop.shop), orderId);
+      await writeAudit(ctx.db, ctx.actor, "shopify.address_diagnostic", { type: "order", id: orderId }, { succeededWith: report.succeededWith });
+      return {
+        ok: true,
+        message: report.succeededWith ? "shopify.diag.succeeded" : "shopify.diag.failed",
+        params: { variant: report.succeededWith ?? "—" },
+        tone: report.succeededWith ? "success" : "warning",
+        report: {
+          before: report.context.before,
+          countryChanged: report.context.countryChanged,
+          targetCountry: report.context.targetCountry ?? "—",
+          attempts: report.attempts.map((a) => ({
+            variant: a.variant,
+            ok: a.ok,
+            requestId: a.requestId,
+            fields: a.fields,
+            errors: a.errors.map((e) => `${(e.field ?? []).join(".")}: ${e.message}`),
+          })),
+        },
+      } as ActionResult & { report: unknown };
     }
     if (intent === "retryDead") {
       const n = await retryDeadJobs(ctx.db);
@@ -179,6 +219,26 @@ export default function ShopifySyncPage() {
             ))}
           </Stack>
         </Card>
+        <Card title={t("shopify.diag.title")} description={t("shopify.diag.help")}>
+          <Stack gap={3}>
+            {data.failedOrders.length === 0 ? <Text tone="subdued">{t("shopify.diag.none")}</Text> : null}
+            {data.failedOrders.map((o) => (
+              <Form method="post" key={o.id}>
+                <input type="hidden" name="intent" value="diagnoseAddress" />
+                <input type="hidden" name="orderId" value={o.id} />
+                <ConfirmSubmitButton
+                  title={t("shopify.diag.confirmTitle", { order: o.orderNumber })}
+                  message={t("shopify.diag.confirmMessage")}
+                  confirmLabel={t("shopify.diag.run")}
+                  cancelLabel={t("common.cancel")}
+                >
+                  {t("shopify.diag.button", { order: o.orderNumber })}
+                </ConfirmSubmitButton>
+              </Form>
+            ))}
+            {result && result.ok && "report" in result ? <DiagnosticReport report={(result as { report: DiagReport }).report} /> : null}
+          </Stack>
+        </Card>
         <Card title={t("shopify.jobs.title")} description={t("shopify.jobs.help")}>
           <Stack gap={3}>
             <Stack direction="horizontal" gap={2} wrap>
@@ -205,6 +265,46 @@ export default function ShopifySyncPage() {
         </Card>
       </Stack>
     </Page>
+  );
+}
+
+interface DiagReport {
+  before: Record<string, unknown>;
+  countryChanged: boolean;
+  targetCountry: string;
+  attempts: Array<{ variant: string; ok: boolean; requestId: string | null; fields: string[]; errors: string[] }>;
+}
+
+/** Звіт діагностики: лише безпечні ознаки (форми значень, коди країн/регіонів), без персональних даних. */
+function DiagnosticReport({ report }: { report: DiagReport }) {
+  const t = useT();
+  return (
+    <Stack gap={2}>
+      <Text variant="body-sm">
+        {t("shopify.diag.before", { data: JSON.stringify(report.before) })}
+      </Text>
+      <Text variant="body-sm">
+        {t("shopify.diag.target", { country: report.targetCountry, changed: report.countryChanged ? t("common.yes") : t("common.no") })}
+      </Text>
+      {report.attempts.map((a) => (
+        <Stack gap={1} key={a.variant}>
+          <Text weight="semibold" tone={a.ok ? "success" : "critical"}>
+            {t(`shopify.diag.variant.${a.variant}`)} — {a.ok ? t("shopify.diag.ok") : t("shopify.diag.rejected")}
+          </Text>
+          {a.errors.map((e) => (
+            <Text key={e} variant="body-sm" tone="critical">
+              {e}
+            </Text>
+          ))}
+          <Text variant="caption" tone="subdued">
+            {a.fields.join(" · ")}
+          </Text>
+          <Text variant="caption" tone="subdued">
+            X-Request-Id: {a.requestId ?? "—"}
+          </Text>
+        </Stack>
+      ))}
+    </Stack>
   );
 }
 
