@@ -113,8 +113,7 @@ const messages: MessageModule = {
     "settings.integrations.status.default": "За замовчуванням",
     "settings.integrations.shopify": "Shopify",
     "settings.integrations.shopify.demo": "Не підключено — демо-режим. Замовлення вигадані, у Shopify нічого не надсилається.",
-    "settings.integrations.shopify.production":
-      "Вхід через Shopify Admin працює (вбудований застосунок). Синхронізація замовлень — етап 2.",
+    "settings.integrations.shopify.production": "Вбудований застосунок у Shopify Admin. Синхронізація замовлень, товарів і залишків — сторінка «Синхронізація Shopify».",
     "settings.integrations.carrier.test":
       "Лише в демо: створює тестові накладні у вбудованій пісочниці. Реальним перевізникам нічого не надсилається.",
     "settings.integrations.carrier.notConfigured":
@@ -253,7 +252,7 @@ const messages: MessageModule = {
     "settings.integrations.status.default": "Default",
     "settings.integrations.shopify": "Shopify",
     "settings.integrations.shopify.demo": "Not connected — demo mode. Orders are fictional; nothing is sent to Shopify.",
-    "settings.integrations.shopify.production": "Signed in via Shopify Admin (embedded app). Order sync — stage 2.",
+    "settings.integrations.shopify.production": "Embedded app in Shopify Admin. Order, product and stock sync — see the “Shopify sync” page.",
     "settings.integrations.carrier.test":
       "Demo only: creates test waybills in a built-in sandbox. Nothing is sent to real carriers.",
     "settings.integrations.carrier.notConfigured": "Not configured: awaiting official API documentation and keys (stage 3).",

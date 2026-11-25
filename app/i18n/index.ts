@@ -11,6 +11,7 @@ import planned from "./messages/planned";
 import demo from "./messages/demo";
 import results from "./messages/results";
 import order from "./messages/order";
+import shopify from "./messages/shopify";
 
 export * from "./types";
 
@@ -26,6 +27,7 @@ export const MESSAGE_MODULES: Record<string, MessageModule> = {
   demo,
   results,
   order,
+  shopify,
 };
 
 function merge(locale: Locale): Messages {

@@ -299,6 +299,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 
 function syncKey(sync: NonNullable<Awaited<ReturnType<typeof updateOrderData>>["sync"]>): string {
   if (sync.status === "synced") return "sync.synced";
+  if (sync.status === "queued") return "sync.queued";
   if (sync.status === "skipped") return `sync.skipped.${sync.reason}`;
   return "sync.failed";
 }

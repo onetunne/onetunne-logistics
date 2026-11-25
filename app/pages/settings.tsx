@@ -650,10 +650,17 @@ function IntegrationsSection({ data }: { data: LoaderData }) {
       key: "shopify",
       label: t("settings.integrations.shopify"),
       value: integrations.shopifyConnected ? (
-        <Status
-          badges={<Badge tone="success">{t("settings.integrations.status.connected")}</Badge>}
-          text={t("settings.integrations.shopify.production")}
-        />
+        <Stack gap={2}>
+          <Status
+            badges={<Badge tone="success">{t("settings.integrations.status.connected")}</Badge>}
+            text={t("settings.integrations.shopify.production")}
+          />
+          <div>
+            <Button to="/app/shopify" size="sm">
+              {t("shopify.title")}
+            </Button>
+          </div>
+        </Stack>
       ) : (
         <Status
           badges={<Badge tone="outline">{t("settings.integrations.status.notConnected")}</Badge>}

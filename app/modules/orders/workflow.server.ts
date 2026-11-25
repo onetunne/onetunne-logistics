@@ -136,7 +136,14 @@ export async function validateOrderInTx(
   const existing = await tx
     .select()
     .from(issues)
-    .where(and(eq(issues.orderId, orderId), eq(issues.status, "open"), notLike(issues.code, "CARRIER_%")));
+    .where(
+      and(
+        eq(issues.orderId, orderId),
+        eq(issues.status, "open"),
+        notLike(issues.code, "CARRIER_%"),
+        notLike(issues.code, "SHOPIFY_%"),
+      ),
+    );
   const nextByFingerprint = new Map(result.issues.map((i) => [issueFingerprint(orderId, i), i]));
   // Відхилені менеджером попередження не повертаються при кожній повторній перевірці.
   const dismissed = await tx

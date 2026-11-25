@@ -28,7 +28,7 @@ export const SECTIONS: readonly SectionDef[] = [
   { key: "assistant", path: "assistant", implemented: false, stage: 7 },
   { key: "development", path: "development", implemented: false, stage: 9 },
   { key: "countryRules", path: "country-rules", implemented: true, stage: 4, permission: "orders.view" },
-  { key: "staff", path: "staff", implemented: false, stage: 2, permission: "staff.manage" },
+  { key: "staff", path: "staff", implemented: true, stage: 2 },
   { key: "settings", path: "settings", implemented: true, stage: 1, permission: "settings.view" },
 ];
 

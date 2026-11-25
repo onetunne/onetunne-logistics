@@ -7,15 +7,13 @@ application_url = "https://example.com"
 embedded = true
 
 [access_scopes]
-# Мінімальні дозволи. Етап 1 не звертається до Shopify, тому доступи не запитуються.
-# План для етапу 2+ (запитувати поступово, лише потрібні):
-#   read_orders, write_orders            — замовлення, редагування адреси/контактів
-#   read_all_orders                      — імпорт замовлень старших за 60 днів (потребує схвалення)
-#   read_products, read_inventory        — товари, варіанти, фото, залишки
-#   read_merchant_managed_fulfillment_orders, write_merchant_managed_fulfillment_orders — трек-номер після передачі перевізнику
-#   read_shipping, write_shipping        — CarrierService (розрахунок доставки в Checkout, етап 3)
-# Захищені дані клієнтів (ім'я, адреса, телефон, email) — окремий запит у Dev Dashboard.
-scopes = ""
+# Мінімальні дозволи етапу 2 (той самий список — у версії застосунку в Dev Dashboard і в змінній SCOPES):
+#   write_orders    — читання замовлень і оновлення адреси/email/телефону (orderUpdate); включає read_orders
+#   read_products   — товари, варіанти, фото, метаполе митного опису
+#   read_inventory  — залишки, вага, HS-код, країна походження (InventoryItem)
+# Необов'язково: read_all_orders — імпорт замовлень старших за 60 днів.
+# Етап 3+: дозволи fulfillment (трек-номер після передачі перевізнику), shipping (CarrierService).
+scopes = "write_orders,read_products,read_inventory"
 
 [auth]
 redirect_urls = ["https://example.com/auth/callback"]

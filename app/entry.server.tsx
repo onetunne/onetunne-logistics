@@ -9,7 +9,12 @@ import { logger } from "~/lib/logger.server";
 export const streamTimeout = 5000;
 
 // Перевірка конфігурації під час запуску сервера (напр. заборона DEMO_MODE разом із ключами Shopify у production).
-getEnv();
+const bootEnv = getEnv();
+
+// Робочий режим: фоновий обробник черги стартує разом із сервером (не з першим запитом).
+if (bootEnv.NODE_ENV !== "test" && bootEnv.shopifyConfigured && bootEnv.DATABASE_URL) {
+  void import("~/server/production-runtime.server").then((m) => m.ensureJobWorker());
+}
 
 /**
  * Заголовки безпеки. Для вбудованих маршрутів Shopify встановлює CSP frame-ancestors

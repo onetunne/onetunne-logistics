@@ -14,6 +14,8 @@ export async function action({ request }: ActionFunctionArgs) {
   if (!(await claimWebhook(db, { webhookId, topic, shop }))) return new Response();
   try {
     await db.delete(shopifySessions).where(eq(shopifySessions.shop, shop));
+    const { recordUninstall } = await import("~/modules/shopify-sync/sync.server");
+    await recordUninstall(db, shop);
     await completeWebhook(db, webhookId);
   } catch (e) {
     await completeWebhook(db, webhookId, "processing_failed").catch(() => undefined);

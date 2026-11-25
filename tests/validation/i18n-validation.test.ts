@@ -41,7 +41,9 @@ describe("validation i18n messages", () => {
     const allowed = new Set(["country", "example", "title", "sku"]);
     for (const locale of ["uk", "en"] as const) {
       for (const [key, value] of Object.entries(messages[locale])) {
-        for (const p of placeholders(value)) expect(allowed.has(p ?? ""), `${locale}:${key} {${p}}`).toBe(true);
+        // Проблеми синхронізації Shopify створює сервіс синхронізації з власними параметрами.
+        const extra = key.startsWith("issue.SHOPIFY_") ? ["fields", "message", "reason"] : [];
+        for (const p of placeholders(value)) expect(allowed.has(p ?? "") || extra.includes(p ?? ""), `${locale}:${key} {${p}}`).toBe(true);
       }
     }
   });
