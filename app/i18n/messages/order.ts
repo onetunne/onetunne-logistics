@@ -241,6 +241,8 @@ const messages: MessageModule = {
     "order.event.confirmed_not_created_manually": "Менеджер підтвердив: накладну не створено",
     "order.event.manual_review_required": "Потрібен ручний розгляд",
     "order.event.cancelled": "Накладну скасовано",
+    "order.event.late_carrier_result": "Пізня відповідь перевізника — потрібен ручний розгляд",
+    "order.event.found_cancelled": "Звірка: накладна у перевізника скасована",
     "order.event.other": "Подія накладної: {type}",
   },
   en: {
@@ -472,6 +474,8 @@ const messages: MessageModule = {
     "order.event.rejected": "Carrier rejected the data",
     "order.event.not_created": "Carrier did not create the waybill",
     "order.event.confirmed_not_created": "Carrier confirmed: waybill not created",
+    "order.event.late_carrier_result": "Late carrier response — manual review required",
+    "order.event.found_cancelled": "Reconciliation: the waybill is cancelled at the carrier",
     "order.event.confirmed_not_created_manually": "Manager confirmed: waybill not created",
     "order.event.manual_review_required": "Manual review required",
     "order.event.cancelled": "Waybill cancelled",

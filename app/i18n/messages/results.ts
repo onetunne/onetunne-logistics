@@ -55,6 +55,7 @@ const messages: MessageModule = {
     "waybill.notCancellable": "Цю накладну не можна скасувати.",
     "waybill.alreadyHandedOver": "Посилку вже передано перевізнику — скасування недоступне.",
     "waybill.cancelNotSupported": "Перевізник не підтримує скасування.",
+    "waybill.cancelRefused": "Перевізник відмовив у скасуванні — накладна залишається активною.",
     "waybill.resolveFirst": "Спершу вирішіть ситуацію з накладною (ручний розгляд).",
   },
   en: {
@@ -110,6 +111,7 @@ const messages: MessageModule = {
     "waybill.notCancellable": "This waybill cannot be cancelled.",
     "waybill.alreadyHandedOver": "The parcel has already been handed to the carrier — cancellation is unavailable.",
     "waybill.cancelNotSupported": "The carrier does not support cancellation.",
+    "waybill.cancelRefused": "The carrier refused the cancellation — the waybill remains active.",
     "waybill.resolveFirst": "Resolve the waybill situation first (manual review).",
   },
 };

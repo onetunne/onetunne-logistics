@@ -41,6 +41,7 @@ import {
   cancelWaybill,
   confirmNotCreated,
   createWaybill,
+  isManualLink,
   linkWaybillManually,
   reconcileShipment,
   type CreateWaybillResult,
@@ -245,9 +246,9 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         active: (ACTIVE_SHIPMENT_STATUSES as readonly string[]).includes(s.status),
         stale: s.status === "creating" && now - s.updatedAt.getTime() > STALE_CREATING_MS,
         /** Запис створено ручним прив'язуванням: скасування лише знімає прив'язку (у перевізника нічого не скасовується). */
-        manual: s.carrierReference.startsWith("MANUAL-"),
+        manual: isManualLink(s),
         /** Номер накладної внесено вручну (у т. ч. до відправлення з невідомим результатом). */
-        linkedManually: s.carrierReference.startsWith("MANUAL-") || linkedManually.has(s.id),
+        linkedManually: isManualLink(s) || linkedManually.has(s.id),
         canCancel: Boolean(adapter?.capabilities.cancelShipment),
         canLookup: Boolean(adapter?.capabilities.findByReference),
       };

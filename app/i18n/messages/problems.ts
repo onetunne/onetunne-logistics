@@ -64,6 +64,7 @@ const messages: MessageModule = {
     "problems.resolution.recovered": "Звірка знайшла створену накладну",
     "problems.resolution.manually_linked": "Накладну прив’язано вручну",
     "problems.resolution.confirmed_not_created": "Підтверджено, що накладну не створено",
+    "problems.resolution.found_cancelled": "Звірка: накладна у перевізника скасована",
     "problems.resolution.other": "Вирішено",
 
     // Порожні стани та обмеження
@@ -134,6 +135,7 @@ const messages: MessageModule = {
     "problems.resolution.recovered": "Reconciliation found the created waybill",
     "problems.resolution.manually_linked": "Waybill linked manually",
     "problems.resolution.confirmed_not_created": "Confirmed that the waybill was not created",
+    "problems.resolution.found_cancelled": "Reconciliation: the waybill is cancelled at the carrier",
     "problems.resolution.other": "Resolved",
 
     "problems.empty.open.title": "No problems",

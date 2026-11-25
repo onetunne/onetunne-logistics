@@ -354,16 +354,41 @@ export async function createWaybill(
   return markCreated(ctx, shipment.id, created, "created");
 }
 
+/** Ручне прив'язування позначається в carrierShipmentId (скасування — лише в кабінеті перевізника). */
+export function isManualLink(shipment: Pick<ShipmentRow, "carrierShipmentId" | "carrierReference">): boolean {
+  return Boolean(shipment.carrierShipmentId?.startsWith("manual:")) || shipment.carrierReference.startsWith("MANUAL-");
+}
+
+/**
+ * Фіксує підтверджений результат перевізника. Приймається ЛИШЕ для відправлення у стані
+ * creating/unknown (compare-and-set). Пізній результат для вже закритого відправлення
+ * не прив'язується мовчки — створюється проблема для ручного розгляду.
+ */
 async function markCreated(
   ctx: ServiceContext,
   shipmentId: string,
   created: CreatedShipment,
-  eventType: "created" | "recovered" | "manually_linked",
+  eventType: "created" | "recovered",
 ): Promise<CreateWaybillResult> {
   return ctx.db.transaction(async (tx) => {
     const [current] = await tx.select().from(shipments).where(eq(shipments.id, shipmentId)).for("update");
     if (!current) throw new NotFoundError("shipment");
     if (current.status === "created") return { kind: "already_exists", shipment: current };
+    const order = await loadOrderRow(tx, current.orderId, { forUpdate: true });
+    if (current.status !== "creating" && current.status !== "unknown") {
+      // Напр. менеджер підтвердив «не створено», а відповідь перевізника прийшла пізніше.
+      await addEvent(tx, shipmentId, "late_carrier_result", null, { waybillNumber: created.waybillNumber });
+      await openCarrierIssue(tx, current.orderId, shipmentId, "CARRIER_RESULT_UNKNOWN", {
+        carrier: ctx.carriers.get(current.carrierCode)?.displayName ?? current.carrierCode,
+        reference: current.carrierReference,
+        waybill: created.waybillNumber,
+      });
+      await writeAudit(tx, ctx.actor, "waybill.late_result", { type: "shipment", id: shipmentId }, {
+        orderId: current.orderId,
+        waybillNumber: created.waybillNumber,
+      });
+      return { kind: "unknown", shipment: current };
+    }
     const [row] = await tx
       .update(shipments)
       .set({
@@ -374,9 +399,8 @@ async function markCreated(
         lastError: null,
         updatedAt: ctx.now(),
       })
-      .where(eq(shipments.id, shipmentId))
+      .where(and(eq(shipments.id, shipmentId), inArray(shipments.status, ["creating", "unknown"])))
       .returning();
-    const order = await loadOrderRow(tx, current.orderId, { forUpdate: true });
     if (order.status === "awaiting_review") await setOrderStatus(tx, order, "waybill_created");
     await addEvent(tx, shipmentId, eventType, null, { waybillNumber: created.waybillNumber });
     await resolveCarrierIssues(tx, current.orderId, ctx.actor.id, eventType);
@@ -386,6 +410,20 @@ async function markCreated(
     });
     return eventType === "created" ? { kind: "created", shipment: row! } : { kind: "recovered", shipment: row! };
   });
+}
+
+async function currentShipment(db: DbOrTx, shipmentId: string): Promise<ShipmentRow> {
+  const [row] = await db.select().from(shipments).where(eq(shipments.id, shipmentId));
+  if (!row) throw new NotFoundError("shipment");
+  return row;
+}
+
+/** Відповідь для відправлення, яке вже не очікує результату (стан змінився паралельно). */
+function resultForSettled(shipment: ShipmentRow): CreateWaybillResult {
+  if (shipment.status === "created") return { kind: "already_exists", shipment };
+  if (shipment.status === "unknown") return { kind: "unknown", shipment };
+  if (shipment.status === "creating") return { kind: "blocked", reason: "in_progress" };
+  return { kind: "not_created", shipment, message: shipment.lastError ?? shipment.status };
 }
 
 async function handleCreateFailure(
@@ -400,13 +438,16 @@ async function handleCreateFailure(
 
   if (!definitelyNotCreated) {
     // Результат невідомий (тайм-аут, 5xx, неочікуваний виняток) — НЕ повторюємо створення наосліп.
-    await ctx.db.transaction(async (tx) => {
-      await tx
+    const moved = await ctx.db.transaction(async (tx) => {
+      const [row] = await tx
         .update(shipments)
         .set({ status: "unknown", lastError: message, updatedAt: ctx.now() })
-        .where(eq(shipments.id, shipment.id));
-      await addEvent(tx, shipment.id, "outcome_unknown", message);
+        .where(and(eq(shipments.id, shipment.id), eq(shipments.status, "creating")))
+        .returning();
+      if (row) await addEvent(tx, shipment.id, "outcome_unknown", message);
+      return Boolean(row);
     });
+    if (!moved) return resultForSettled(await currentShipment(ctx.db, shipment.id));
     return reconcileShipmentInternal(ctx, shipment.id);
   }
 
@@ -415,8 +456,9 @@ async function handleCreateFailure(
     const [row] = await tx
       .update(shipments)
       .set({ status: "failed", lastError: message, updatedAt: ctx.now() })
-      .where(eq(shipments.id, shipment.id))
+      .where(and(eq(shipments.id, shipment.id), eq(shipments.status, "creating")))
       .returning();
+    if (!row) return resultForSettled(await currentShipment(tx, shipment.id));
     await addEvent(tx, shipment.id, rejected ? "rejected" : "not_created", message, {
       kind: error instanceof CarrierError ? error.kind : "unknown",
       fields: error instanceof CarrierError ? error.details.map((d) => d.field).filter(Boolean) : [],
@@ -433,20 +475,23 @@ async function handleCreateFailure(
       kind: error instanceof CarrierError ? error.kind : "unknown",
     });
     return rejected
-      ? { kind: "rejected", shipment: row!, message }
-      : { kind: "not_created", shipment: row!, message };
+      ? { kind: "rejected", shipment: row, message }
+      : { kind: "not_created", shipment: row, message };
   });
 }
 
 /**
  * Звірка відправлення з невідомим результатом: шукаємо у перевізника за reference.
- * Знайдено → прив'язуємо; точно не знайдено → «не створено» (можна безпечно повторити);
- * перевірити неможливо → ручний розгляд.
+ * Знайдено → прив'язуємо; знайдено, але скасовано → «скасовано»; точно не знайдено → «не створено»
+ * (можна безпечно повторити); перевірити неможливо → ручний розгляд.
+ * Звіряються ЛИШЕ відправлення у стані creating/unknown.
  */
 async function reconcileShipmentInternal(ctx: ServiceContext, shipmentId: string): Promise<CreateWaybillResult> {
-  const [shipment] = await ctx.db.select().from(shipments).where(eq(shipments.id, shipmentId));
-  if (!shipment) throw new NotFoundError("shipment");
-  if (shipment.status === "created") return { kind: "already_exists", shipment };
+  const shipment = await currentShipment(ctx.db, shipmentId);
+  if (shipment.status !== "creating" && shipment.status !== "unknown") return resultForSettled(shipment);
+  if (shipment.status === "creating" && ctx.now().getTime() - shipment.updatedAt.getTime() <= STALE_CREATING_MS) {
+    return { kind: "blocked", reason: "in_progress" };
+  }
   const adapter = ctx.carriers.get(shipment.carrierCode);
 
   if (adapter?.capabilities.findByReference) {
@@ -455,20 +500,24 @@ async function reconcileShipmentInternal(ctx: ServiceContext, shipmentId: string
         signal: AbortSignal.timeout(CARRIER_TIMEOUT_MS),
       });
       if (lookup.found && !lookup.cancelled) return markCreated(ctx, shipmentId, lookup.shipment, "recovered");
-      if (!lookup.found && lookup.authoritative && adapter.capabilities.referenceLookupAuthoritative) {
+      const confirmedAbsent = !lookup.found && lookup.authoritative && adapter.capabilities.referenceLookupAuthoritative;
+      if ((lookup.found && lookup.cancelled) || confirmedAbsent) {
+        const nextStatus = lookup.found ? "cancelled" : "failed";
+        const note = lookup.found ? "found_cancelled" : "confirmed_not_created";
         return ctx.db.transaction(async (tx) => {
           const [row] = await tx
             .update(shipments)
-            .set({ status: "failed", lastError: "confirmed_not_created", updatedAt: ctx.now() })
+            .set({ status: nextStatus, lastError: note, updatedAt: ctx.now() })
             .where(and(eq(shipments.id, shipmentId), inArray(shipments.status, ["creating", "unknown"])))
             .returning();
-          await addEvent(tx, shipmentId, "confirmed_not_created");
-          await resolveCarrierIssues(tx, shipment.orderId, ctx.actor.id, "confirmed_not_created", ["CARRIER_RESULT_UNKNOWN"]);
+          if (!row) return resultForSettled(await currentShipment(tx, shipmentId));
+          await addEvent(tx, shipmentId, note);
+          await resolveCarrierIssues(tx, shipment.orderId, ctx.actor.id, note, ["CARRIER_RESULT_UNKNOWN"]);
           await openCarrierIssue(tx, shipment.orderId, shipmentId, "CARRIER_UNAVAILABLE", {
             carrier: adapter.displayName,
-            message: "confirmed_not_created",
+            message: note,
           });
-          return { kind: "not_created", shipment: row ?? shipment, message: "confirmed_not_created" } as const;
+          return { kind: "not_created", shipment: row, message: note } as const;
         });
       }
     } catch {
@@ -480,8 +529,9 @@ async function reconcileShipmentInternal(ctx: ServiceContext, shipmentId: string
     const [row] = await tx
       .update(shipments)
       .set({ status: "unknown", updatedAt: ctx.now() })
-      .where(eq(shipments.id, shipmentId))
+      .where(and(eq(shipments.id, shipmentId), inArray(shipments.status, ["creating", "unknown"])))
       .returning();
+    if (!row) return resultForSettled(await currentShipment(tx, shipmentId));
     await addEvent(tx, shipmentId, "manual_review_required");
     await openCarrierIssue(tx, shipment.orderId, shipmentId, "CARRIER_RESULT_UNKNOWN", {
       carrier: adapter?.displayName ?? shipment.carrierCode,
@@ -497,7 +547,7 @@ async function reconcileShipmentInternal(ctx: ServiceContext, shipmentId: string
     await writeAudit(tx, ctx.actor, "waybill.manual_review_required", { type: "shipment", id: shipmentId }, {
       orderId: shipment.orderId,
     });
-    return { kind: "unknown", shipment: row! };
+    return { kind: "unknown", shipment: row };
   });
 }
 
@@ -508,8 +558,8 @@ export async function reconcileShipment(ctx: ServiceContext, shipmentId: string)
 }
 
 /**
- * Ручне прив'язування номера накладної (напр. накладну створено вручну в кабінеті перевізника
- * або результат невідомий і менеджер знайшов номер).
+ * Ручне прив'язування номера накладної (накладну створено вручну в кабінеті перевізника
+ * або результат невідомий і менеджер знайшов номер). Виконується в одній транзакції.
  */
 export async function linkWaybillManually(
   ctx: ServiceContext,
@@ -522,52 +572,73 @@ export async function linkWaybillManually(
   const carrier = ctx.carriers.getDefault();
   if (!carrier) throw new DomainError("waybill.noCarrier", 409);
 
-  const shipmentId = await ctx.db.transaction(async (tx) => {
+  return ctx.db.transaction(async (tx) => {
     const order = await loadOrderRow(tx, orderId, { forUpdate: true });
     if (isShipped(order.status) || order.status === "cancelled") {
       throw new DomainError("order.notEditable", 409, { status: order.status });
     }
+    // Номер не можна прив'язати повторно, навіть до того самого замовлення після скасування.
     const [taken] = await tx
-      .select({ id: shipments.id, orderId: shipments.orderId })
+      .select({ id: shipments.id })
       .from(shipments)
       .where(and(eq(shipments.carrierCode, carrier.code), eq(shipments.waybillNumber, waybillNumber)));
-    if (taken && taken.orderId !== orderId) throw new DomainError("waybill.alreadyLinked", 409);
+    if (taken) throw new DomainError("waybill.alreadyLinked", 409);
     const active = await findActiveShipment(tx, orderId);
     if (active?.status === "created") throw new DomainError("waybill.alreadyExists", 409);
     if (active?.status === "creating" && ctx.now().getTime() - active.updatedAt.getTime() <= STALE_CREATING_MS) {
       throw new DomainError("waybill.inProgress", 409);
     }
-    if (active) return active.id;
-    if (order.status !== "awaiting_review") {
+    if (!active && order.status !== "awaiting_review") {
       throw new DomainError("waybill.linkRequiresReview", 409, { status: order.status });
     }
-    const [row] = await tx
-      .insert(shipments)
-      .values({
-        orderId,
-        carrierCode: carrier.code,
-        mode: carrier.mode,
-        status: "unknown",
-        carrierReference: `MANUAL-${waybillNumber}`,
-        generation: 0,
-        createdBy: ctx.actor.id,
-      })
-      .returning();
-    return row!.id;
+    const values = {
+      status: "created" as const,
+      carrierShipmentId: `manual:${waybillNumber}`,
+      waybillNumber,
+      trackingNumber: waybillNumber,
+      lastError: null,
+      updatedAt: ctx.now(),
+    };
+    let row: ShipmentRow | undefined;
+    if (active) {
+      [row] = await tx
+        .update(shipments)
+        .set(values)
+        .where(and(eq(shipments.id, active.id), inArray(shipments.status, ["creating", "unknown"])))
+        .returning();
+      if (!row) throw new DomainError("waybill.inProgress", 409);
+    } else {
+      [row] = await tx
+        .insert(shipments)
+        .values({
+          ...values,
+          orderId,
+          carrierCode: carrier.code,
+          mode: carrier.mode,
+          carrierReference: `MANUAL-${waybillNumber}`,
+          generation: 0,
+          createdBy: ctx.actor.id,
+        })
+        .returning();
+    }
+    if (order.status === "awaiting_review") await setOrderStatus(tx, order, "waybill_created");
+    await addEvent(tx, row!.id, "manually_linked", null, { waybillNumber });
+    await resolveCarrierIssues(tx, orderId, ctx.actor.id, "manually_linked");
+    await writeAudit(tx, ctx.actor, "waybill.manually_linked", { type: "shipment", id: row!.id }, { orderId, waybillNumber });
+    return { kind: "created", shipment: row! };
   });
-
-  return markCreated(
-    ctx,
-    shipmentId,
-    { carrierShipmentId: `manual:${waybillNumber}`, waybillNumber, trackingNumber: waybillNumber, createdAt: ctx.now() },
-    "manually_linked",
-  );
 }
 
 /** Менеджер підтверджує, що перевізник НЕ створив накладну (після перевірки в кабінеті). */
 export async function confirmNotCreated(ctx: ServiceContext, shipmentId: string): Promise<void> {
   requirePermission(ctx.actor, "waybills.manage");
   await ctx.db.transaction(async (tx) => {
+    const [current] = await tx.select().from(shipments).where(eq(shipments.id, shipmentId)).for("update");
+    if (!current) throw new NotFoundError("shipment");
+    // Запит, що ще виконується, не можна оголосити «не створеним».
+    if (current.status === "creating" && ctx.now().getTime() - current.updatedAt.getTime() <= STALE_CREATING_MS) {
+      throw new DomainError("waybill.inProgress", 409);
+    }
     const [row] = await tx
       .update(shipments)
       .set({ status: "failed", lastError: "confirmed_not_created_manually", updatedAt: ctx.now() })
@@ -582,28 +653,40 @@ export async function confirmNotCreated(ctx: ServiceContext, shipmentId: string)
   });
 }
 
-/** Скасування накладної до передачі перевізнику (переоформлення створить нове покоління). */
+/**
+ * Скасування накладної до передачі перевізнику (переоформлення створить нове покоління).
+ * Відмова перевізника скасувати → накладна залишається активною.
+ */
 export async function cancelWaybill(ctx: ServiceContext, shipmentId: string): Promise<void> {
   requirePermission(ctx.actor, "waybills.manage");
-  const [shipment] = await ctx.db.select().from(shipments).where(eq(shipments.id, shipmentId));
-  if (!shipment) throw new NotFoundError("shipment");
+  const shipment = await currentShipment(ctx.db, shipmentId);
   if (shipment.status !== "created" || !shipment.waybillNumber) throw new DomainError("waybill.notCancellable", 409);
   const order = await loadOrderRow(ctx.db, shipment.orderId);
   if (isShipped(order.status)) throw new DomainError("waybill.alreadyHandedOver", 409);
   const adapter = ctx.carriers.get(shipment.carrierCode);
-  const isManual = shipment.carrierReference.startsWith("MANUAL-");
-  if (!isManual) {
+  const manual = isManualLink(shipment);
+  if (!manual) {
     if (!adapter?.capabilities.cancelShipment) throw new DomainError("waybill.cancelNotSupported", 409);
-    await adapter.cancelShipment(shipment.waybillNumber, { signal: AbortSignal.timeout(CARRIER_TIMEOUT_MS) });
+    const res = await adapter.cancelShipment(shipment.waybillNumber, { signal: AbortSignal.timeout(CARRIER_TIMEOUT_MS) });
+    if (!res.cancelled) throw new DomainError("waybill.cancelRefused", 409);
   }
   await ctx.db.transaction(async (tx) => {
-    await tx.update(shipments).set({ status: "cancelled", updatedAt: ctx.now() }).where(eq(shipments.id, shipmentId));
-    await addEvent(tx, shipmentId, "cancelled", isManual ? "manual_link_removed" : null);
+    const [row] = await tx
+      .update(shipments)
+      .set({ status: "cancelled", updatedAt: ctx.now() })
+      .where(and(eq(shipments.id, shipmentId), eq(shipments.status, "created")))
+      .returning();
+    if (!row) return; // уже скасовано паралельним запитом
+    await addEvent(tx, shipmentId, "cancelled", manual ? "manual_link_removed" : null);
     const fresh = await loadOrderRow(tx, shipment.orderId, { forUpdate: true });
-    if (fresh.status === "waybill_created" || fresh.status === "awaiting_picking") {
+    const stillActive = await findActiveShipment(tx, shipment.orderId);
+    if (!stillActive && (fresh.status === "waybill_created" || fresh.status === "awaiting_picking")) {
       await setOrderStatus(tx, fresh, "awaiting_review");
     }
-    await writeAudit(tx, ctx.actor, "waybill.cancelled", { type: "shipment", id: shipmentId }, { orderId: shipment.orderId });
+    await writeAudit(tx, ctx.actor, "waybill.cancelled", { type: "shipment", id: shipmentId }, {
+      orderId: shipment.orderId,
+      manual,
+    });
   });
 }
 

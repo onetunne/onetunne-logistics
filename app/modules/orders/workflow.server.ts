@@ -1,7 +1,7 @@
 import { and, eq, inArray, notLike, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { DbOrTx, Tx } from "~/db/client.server";
-import { issues, orderChanges, orderLineItems, orders, productVariants } from "~/db/schema";
+import { issues, orderChanges, orderLineItems, orders, productVariants, shipments } from "~/db/schema";
 import { assertTransition, type OrderStatus } from "~/domain/order-status";
 import { requirePermission, type Actor } from "~/domain/permissions";
 import { ConflictError, DomainError, NotFoundError } from "~/lib/errors";
@@ -51,6 +51,22 @@ function columnForField(field: string): keyof OrderRow | null {
   return null;
 }
 
+/**
+ * Поки накладна створюється, має невідомий результат або вже створена, дані замовлення змінювати не можна:
+ * накладна містила б інші дані, ніж замовлення.
+ */
+async function assertNoPendingShipment(tx: DbOrTx, order: OrderRow): Promise<void> {
+  const [active] = await tx
+    .select({ status: shipments.status })
+    .from(shipments)
+    .where(and(eq(shipments.orderId, order.id), inArray(shipments.status, ["creating", "created", "unknown"])))
+    .limit(1);
+  if (!active) return;
+  if (active.status === "creating") throw new DomainError("waybill.inProgress", 409);
+  if (active.status === "unknown") throw new DomainError("waybill.resolveFirst", 409);
+  throw new DomainError("order.notEditable", 409, { status: order.status });
+}
+
 async function bumpOrder(tx: DbOrTx, order: OrderRow, patch: Partial<typeof orders.$inferInsert>, now: Date) {
   const updated = await tx
     .update(orders)
@@ -77,6 +93,7 @@ export async function validateOrderInTx(
   if (!VALIDATABLE_STATUSES.includes(order.status)) {
     throw new DomainError("order.notValidatable", 409, { status: order.status });
   }
+  await assertNoPendingShipment(tx, order);
   const items = await loadLineItems(tx, orderId);
   const rules = await loadCountryRules(tx);
   const result: ValidationResult = validateOrder(toValidationInput({ order, items }), rules);
@@ -269,6 +286,7 @@ export async function updateOrderData(ctx: ServiceContext, orderId: string, inpu
     if (!VALIDATABLE_STATUSES.includes(current.status)) {
       throw new DomainError("order.notEditable", 409, { status: current.status });
     }
+    await assertNoPendingShipment(tx, current);
     const updates: Record<string, string | null> = {};
     const changes: { field: string; oldValue: string | null; newValue: string | null }[] = [];
     const consider = (field: string, column: keyof OrderRow, next: string | null | undefined) => {
@@ -346,6 +364,7 @@ export async function acceptSuggestion(ctx: ServiceContext, issueId: string, can
 
     const order = await loadOrderRow(tx, issue.orderId, { forUpdate: true });
     if (!VALIDATABLE_STATUSES.includes(order.status)) throw new DomainError("order.notEditable", 409, { status: order.status });
+    await assertNoPendingShipment(tx, order);
     await tx.insert(orderChanges).values({
       orderId: order.id,
       field: issue.suggestion.field,
@@ -464,8 +483,13 @@ export async function updateVariantCustomsData(
   });
   let revalidated = 0;
   for (const id of affected) {
-    await ctx.db.transaction((tx) => validateOrderInTx(tx, ctx, id, "after_edit"));
-    revalidated++;
+    try {
+      await ctx.db.transaction((tx) => validateOrderInTx(tx, ctx, id, "after_edit"));
+      revalidated++;
+    } catch (e) {
+      // Замовлення з накладною в процесі/на розгляді не перевіряються повторно.
+      if (!(e instanceof DomainError)) throw e;
+    }
   }
   return { revalidated };
 }

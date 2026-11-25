@@ -4,11 +4,10 @@
  * Спершу: npm run build. Дані демо зберігаються у .data/demo-db (PGlite).
  */
 import { spawn } from "node:child_process";
-import { createRequire } from "node:module";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const require = createRequire(import.meta.url);
-const serveBin = path.join(path.dirname(require.resolve("@react-router/serve/package.json")), "bin.js");
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const env = {
   ...process.env,
@@ -19,6 +18,6 @@ const env = {
 };
 
 console.log(`ONE TUNNE Logistics demo → http://localhost:${env.PORT}/demo`);
-const child = spawn(process.execPath, [serveBin, "./build/server/index.js"], { env, stdio: "inherit" });
+const child = spawn(process.execPath, [path.join(root, "server.mjs")], { env, stdio: "inherit", cwd: root });
 child.on("exit", (code) => process.exit(code ?? 0));
 for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => child.kill(sig));
