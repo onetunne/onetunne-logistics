@@ -23,7 +23,6 @@ const EnvSchema = z.object({
   SCOPES: z.string().optional(),
   SHOP_CUSTOM_DOMAIN: z.string().optional(),
   OWNER_SHOPIFY_USER_IDS: z.string().optional(),
-  ALLOW_DEMO_WITH_SHOPIFY: bool,
 });
 
 export type AppEnv = z.infer<typeof EnvSchema> & {
@@ -61,8 +60,7 @@ export function assertSafeConfiguration(env: AppEnv): void {
   if (
     env.DEMO_MODE &&
     env.NODE_ENV === "production" &&
-    env.shopifyConfigured &&
-    !env.ALLOW_DEMO_WITH_SHOPIFY
+    env.shopifyConfigured
   ) {
     throw new Error(
       "DEMO_MODE=true заборонено разом із ключами Shopify у production. " +

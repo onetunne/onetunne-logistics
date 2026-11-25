@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { openPglite, type DatabaseHandle } from "~/db/client.server";
 import { seedDemoData } from "~/db/seed/seed.server";
 import { SYSTEM_ACTOR } from "~/domain/permissions";
@@ -40,9 +42,21 @@ export function demoServiceContext(runtime: DemoRuntime, actor = SYSTEM_ACTOR): 
   };
 }
 
+/** Шаблон бази, створений під час збірки (scripts/prepare-demo-db.mjs). */
+const TEMPLATE_DIR = path.resolve(process.cwd(), "build", "demo-db-template");
+
+/** Новий каталог демо-бази створюється копіюванням шаблону — без важкої ініціалізації PostgreSQL. */
+function prepareDataDir(dir: string): void {
+  const target = path.resolve(dir);
+  if (fs.existsSync(target) || !fs.existsSync(TEMPLATE_DIR)) return;
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.cpSync(TEMPLATE_DIR, target, { recursive: true });
+}
+
 async function init(): Promise<DemoRuntime> {
   const env = getEnv();
   const dir = env.DEMO_DATA_DIR === "memory" ? undefined : (env.DEMO_DATA_DIR ?? ".data/demo-db");
+  if (dir) prepareDataDir(dir);
   const handle = await openPglite(dir);
   const runtime: DemoRuntime = { handle, carriers: createDemoCarriers(handle.db) };
   await seedDemoData(demoServiceContext(runtime));

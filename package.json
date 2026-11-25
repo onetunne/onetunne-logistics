@@ -8,8 +8,8 @@
   },
   "scripts": {
     "dev": "react-router dev",
-    "build": "react-router build",
-    "start": "node server.mjs",
+    "build": "react-router build && node scripts/prepare-demo-db.mjs",
+    "start": "node --env-file-if-exists=.env server.mjs",
     "demo": "npm run build && node scripts/run-demo.mjs",
     "start:demo": "node scripts/run-demo.mjs",
     "typecheck": "react-router typegen && tsc --noEmit",

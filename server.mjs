@@ -15,8 +15,12 @@ import { createRequestHandler } from "@react-router/express";
 const root = path.dirname(fileURLToPath(import.meta.url));
 const build = await import(pathToFileURL(path.join(root, "build/server/index.js")).href);
 
+/**
+ * За замовчуванням проксі НЕ довіряємо (локальний запуск / Wi-Fi): інакше клієнт міг би підробити IP.
+ * На хостингу (Render, Fly, …) задайте TRUST_PROXY=1 — це вже зроблено в render.yaml.
+ */
 function trustProxySetting(value) {
-  if (value === undefined || value === "") return 1; // один проксі перед застосунком
+  if (value === undefined || value === "") return false;
   if (/^\d+$/.test(value)) return Number(value);
   if (value === "true") return true;
   if (value === "false") return false;

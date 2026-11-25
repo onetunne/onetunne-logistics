@@ -101,9 +101,18 @@ try {
   await page.goto(orderUrl);
   const again = page.getByRole("button", { name: /Створити тестову накладну/ });
   check((await again.count()) === 0, "create button hidden once waybill exists");
+  // Подвійне натискання «Створити» з іншої вкладки (той самий запит) не створює дубліката.
+  const number = waybill?.match(/TEST\d{10}/)?.[0] ?? "—";
+  const replay = await page.request.post(orderUrl, {
+    form: { intent: "createWaybill" },
+    headers: { Origin: new URL(BASE).origin },
+  });
+  check(replay.ok(), `repeated create request accepted (${replay.status()})`);
   await page.goto(`${BASE}/demo/waybills`);
-  const occurrences = await page.getByText(waybill?.match(/TEST\d{10}/)?.[0] ?? "—").count();
-  check(occurrences >= 1, "waybill listed once in waybills page");
+  const visibleRows = await page.getByText(number).filter({ visible: true }).count();
+  check(visibleRows === 1, `waybill listed exactly once (${visibleRows})`);
+  const testRows = await page.getByText(/TEST\d{10}/).filter({ visible: true }).allTextContents();
+  check(testRows.filter((t) => t.includes(number)).length === 1, "no duplicate waybill for the order");
 
   // Масова перевірка всіх оплачених замовлень з головної.
   await page.goto(`${BASE}/demo`);

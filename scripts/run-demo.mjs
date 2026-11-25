@@ -18,6 +18,11 @@ const env = {
 };
 
 console.log(`ONE TUNNE Logistics demo → http://localhost:${env.PORT}/demo`);
-const child = spawn(process.execPath, [path.join(root, "server.mjs")], { env, stdio: "inherit", cwd: root });
+// .env (якщо є) підхоплюється так само, як у `npm start`; явні змінні середовища мають пріоритет.
+const child = spawn(process.execPath, ["--env-file-if-exists=.env", path.join(root, "server.mjs")], {
+  env,
+  stdio: "inherit",
+  cwd: root,
+});
 child.on("exit", (code) => process.exit(code ?? 0));
 for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => child.kill(sig));
