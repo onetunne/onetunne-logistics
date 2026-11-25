@@ -1,0 +1,25 @@
+# Render Blueprint: безкоштовне розміщення ДЕМО-версії (без Shopify і без реальних ключів).
+# Render → New → Blueprint → оберіть репозиторій onetunne-logistics.
+# Примітка: безкоштовний план «засинає» після простою; демо-дані скидаються при перезапуску.
+services:
+  - type: web
+    name: onetunne-logistics-demo
+    runtime: node
+    plan: free
+    branch: claude/one-tunne-logistics-stage-1-x4yjmz
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start:demo
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: DEMO_MODE
+        value: "true"
+      - key: TRUST_PROXY
+        value: "1"
+      - key: DEMO_DATA_DIR
+        value: .data/demo-db
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: DEMO_PASSWORD
+        sync: false

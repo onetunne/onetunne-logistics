@@ -1,0 +1,55 @@
+{
+  "name": "onetunne-logistics",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "dev": "react-router dev",
+    "build": "react-router build && node scripts/prepare-demo-db.mjs",
+    "start": "node --env-file-if-exists=.env server.mjs",
+    "demo": "npm run build && node scripts/run-demo.mjs",
+    "start:demo": "node scripts/run-demo.mjs",
+    "typecheck": "react-router typegen && tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "node scripts/e2e-smoke.mjs",
+    "check": "npm run typecheck && npm run test && npm run build",
+    "db:generate": "drizzle-kit generate",
+    "shopify": "shopify",
+    "dev:shopify": "shopify app dev",
+    "deploy:shopify": "shopify app deploy"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.6.0",
+    "@react-router/express": "^7.18.7",
+    "@react-router/node": "^7.18.7",
+    "@shopify/app-bridge-react": "^4.3.1",
+    "@shopify/shopify-app-react-router": "^4.0.4",
+    "@shopify/shopify-app-session-storage-drizzle": "^6.0.4",
+    "compression": "^1.8.2",
+    "drizzle-orm": "^0.45.4",
+    "express": "^4.22.3",
+    "isbot": "^5.2.4",
+    "libphonenumber-js": "^1.13.17",
+    "pg": "^8.23.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router": "^7.18.7",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@react-router/dev": "^7.18.7",
+    "@types/node": "^22.20.5",
+    "@types/pg": "^8.23.1",
+    "@types/react": "^18.3.25",
+    "@types/react-dom": "^18.3.7",
+    "drizzle-kit": "^0.31.11",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.8",
+    "vite-tsconfig-paths": "^6.1.1",
+    "vitest": "^4.1.12"
+  }
+}
