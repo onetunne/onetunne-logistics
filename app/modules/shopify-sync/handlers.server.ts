@@ -82,6 +82,8 @@ export function createSyncHandlers(deps: SyncDeps): JobHandlers {
           after: str(p.after),
           imported: Number(p.imported ?? 0),
           skipped: Number(p.skipped ?? 0),
+          updated: Number(p.updated ?? 0),
+          failed: Array.isArray(p.failed) ? p.failed.map(String) : [],
         });
       },
     },

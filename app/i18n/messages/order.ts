@@ -55,6 +55,7 @@ const messages: MessageModule = {
     "order.issues.apply": "Застосувати {value}",
     "order.issues.dismiss": "Приховати попередження",
     "order.issues.retryAsIs": "Закрити відмову і повторити без змін",
+    "order.address.shopifyRejected": "Shopify відхилив: {message}",
     "order.issues.carrierMessage": "Повідомлення перевізника: {message}",
     "order.issues.carrierReference": "Референс відправлення: {reference}",
     "order.issues.next.CARRIER_REJECTED":
@@ -299,6 +300,7 @@ const messages: MessageModule = {
     "order.issues.apply": "Apply {value}",
     "order.issues.dismiss": "Dismiss warning",
     "order.issues.retryAsIs": "Close the rejection and retry unchanged",
+    "order.address.shopifyRejected": "Rejected by Shopify: {message}",
     "order.issues.carrierMessage": "Carrier message: {message}",
     "order.issues.carrierReference": "Shipment reference: {reference}",
     "order.issues.next.CARRIER_REJECTED":

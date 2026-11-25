@@ -7,7 +7,7 @@ import type { AddressInput } from "~/modules/validation/types";
 export type ShopifySyncResult =
   | { status: "synced" }
   | { status: "queued" }
-  | { status: "skipped"; reason: "demo_mode" | "not_linked" | "not_implemented" }
+  | { status: "skipped"; reason: "demo_mode" | "not_linked" | "not_implemented" | "invalid_data" }
   | { status: "failed"; error: string };
 
 export interface ShopifyGateway {

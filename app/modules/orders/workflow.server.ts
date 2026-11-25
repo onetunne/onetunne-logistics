@@ -1,4 +1,4 @@
-import { and, eq, inArray, notLike, sql } from "drizzle-orm";
+import { and, eq, inArray, like, notLike, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { DbOrTx, Tx } from "~/db/client.server";
 import { issues, orderChanges, orderLineItems, orders, productVariants, shipments } from "~/db/schema";
@@ -360,6 +360,26 @@ export async function updateOrderData(ctx: ServiceContext, orderId: string, inpu
 /** Передає підтверджені зміни в Shopify (у демо — пропускається, запит не надсилається). */
 async function syncOrderToShopify(ctx: ServiceContext, order: OrderRow, changedFields: string[]): Promise<ShopifySyncResult> {
   let result: ShopifySyncResult = { status: "skipped", reason: "not_linked" };
+  // Адресу/контакти з помилками перевірки не надсилаємо в Shopify: спершу виправлення в застосунку.
+  if (order.shopifyOrderId) {
+    const [invalid] = await ctx.db
+      .select({ id: issues.id })
+      .from(issues)
+      .where(
+        and(
+          eq(issues.orderId, order.id),
+          eq(issues.status, "open"),
+          eq(issues.severity, "error"),
+          or(like(issues.field, "shipping.%"), inArray(issues.field, ["email", "contactPhone"])),
+          notLike(issues.code, "SHOPIFY_%"),
+        ),
+      )
+      .limit(1);
+    if (invalid) {
+      await writeAudit(ctx.db, ctx.actor, "order.shopify_sync", { type: "order", id: order.id }, { status: "skipped", reason: "invalid_data" });
+      return { status: "skipped", reason: "invalid_data" };
+    }
+  }
   try {
     if (changedFields.some((f) => f.startsWith("shipping."))) {
       result = await ctx.shopify.updateOrderShippingAddress(order.shopifyOrderId, shippingAddressOf(order));

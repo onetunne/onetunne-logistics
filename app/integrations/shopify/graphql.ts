@@ -7,7 +7,12 @@
 const MONEY = "shopMoney { amount currencyCode }";
 const ADDRESS = "firstName lastName company address1 address2 city province provinceCode zip countryCodeV2 phone";
 
-export const ORDER_FIELDS = `
+/**
+ * Розміри сторінок обрано так, щоб запитувана вартість запиту не перевищувала ліміт 1000 балів
+ * (вкладені списки множать вартість). Якщо в замовленні/товарі більше позицій, ніж на сторінці,
+ * воно перечитується окремим запитом із більшим лімітом.
+ */
+const orderFields = (lineItemsFirst: number) => `
   id legacyResourceId name email phone createdAt updatedAt processedAt cancelledAt test note
   displayFinancialStatus displayFulfillmentStatus currencyCode
   subtotalPriceSet { ${MONEY} }
@@ -15,7 +20,8 @@ export const ORDER_FIELDS = `
   totalShippingPriceSet { ${MONEY} }
   shippingAddress { ${ADDRESS} }
   billingAddress { countryCodeV2 }
-  lineItems(first: 100) {
+  lineItems(first: ${lineItemsFirst}) {
+    pageInfo { hasNextPage }
     nodes {
       id title variantTitle sku quantity
       originalUnitPriceSet { ${MONEY} }
@@ -26,27 +32,28 @@ export const ORDER_FIELDS = `
 `;
 
 export const ORDER_QUERY = `#graphql
-  query OtOrder($id: ID!) { order(id: $id) { ${ORDER_FIELDS} } }`;
+  query OtOrder($id: ID!) { order(id: $id) { ${orderFields(100)} } }`;
 
 export const ORDERS_PAGE_QUERY = `#graphql
   query OtOrders($first: Int!, $after: String, $query: String) {
     orders(first: $first, after: $after, query: $query, sortKey: CREATED_AT) {
       pageInfo { hasNextPage endCursor }
-      nodes { ${ORDER_FIELDS} }
+      nodes { ${orderFields(15)} }
     }
   }`;
 
-export const PRODUCT_FIELDS = `
+const productFields = (variantsFirst: number) => `
   id title handle status updatedAt
   featuredMedia { preview { image { url } } }
   customsDescription: metafield(namespace: "logistics", key: "customs_description") { value }
-  variants(first: 100) {
+  variants(first: ${variantsFirst}) {
+    pageInfo { hasNextPage }
     nodes {
       id title sku barcode price inventoryQuantity
       selectedOptions { name value }
       image { url }
       inventoryItem {
-        id harmonizedSystemCode countryCodeOfOrigin
+        id tracked harmonizedSystemCode countryCodeOfOrigin
         measurement { weight { unit value } }
       }
     }
@@ -54,13 +61,13 @@ export const PRODUCT_FIELDS = `
 `;
 
 export const PRODUCT_QUERY = `#graphql
-  query OtProduct($id: ID!) { product(id: $id) { ${PRODUCT_FIELDS} } }`;
+  query OtProduct($id: ID!) { product(id: $id) { ${productFields(200)} } }`;
 
 export const PRODUCTS_PAGE_QUERY = `#graphql
   query OtProducts($first: Int!, $after: String) {
     products(first: $first, after: $after) {
       pageInfo { hasNextPage endCursor }
-      nodes { ${PRODUCT_FIELDS} }
+      nodes { ${productFields(30)} }
     }
   }`;
 
@@ -119,6 +126,7 @@ export interface GqlOrder {
   shippingAddress: GqlAddress | null;
   billingAddress: { countryCodeV2: string | null } | null;
   lineItems: {
+    pageInfo?: { hasNextPage: boolean };
     nodes: Array<{
       id: string;
       title: string;
@@ -143,6 +151,7 @@ export interface GqlVariant {
   image: { url: string } | null;
   inventoryItem: {
     id: string;
+    tracked?: boolean;
     harmonizedSystemCode: string | null;
     countryCodeOfOrigin: string | null;
     measurement: { weight: { unit: string; value: number } | null } | null;
@@ -157,7 +166,7 @@ export interface GqlProduct {
   updatedAt: string;
   featuredMedia: { preview: { image: { url: string } | null } | null } | null;
   customsDescription: { value: string } | null;
-  variants: { nodes: GqlVariant[] };
+  variants: { pageInfo?: { hasNextPage: boolean }; nodes: GqlVariant[] };
 }
 
 export interface PageInfo {

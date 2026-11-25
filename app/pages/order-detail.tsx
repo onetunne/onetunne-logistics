@@ -891,7 +891,14 @@ function useFieldError(issues: Issue[], fieldErrors: FieldErrors) {
   const t = useT();
   return (name: string): string | null => {
     if (fieldErrors?.[name]) return t("order.address.fieldInvalid");
-    const titles = issues.filter((i) => i.field === name).map((i) => t(`issue.${i.code}.title`));
+    const titles = issues
+      .filter((i) => i.field === name)
+      .map((i) =>
+        // Помилку Shopify показуємо його власним текстом біля поля.
+        i.code === "SHOPIFY_SYNC_FAILED" && typeof i.params?.message === "string"
+          ? t("order.address.shopifyRejected", { message: i.params.message })
+          : t(`issue.${i.code}.title`),
+      );
     return titles.length > 0 ? titles.join("; ") : null;
   };
 }

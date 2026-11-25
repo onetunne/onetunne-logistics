@@ -16,6 +16,11 @@ export async function action({ request }: ActionFunctionArgs) {
   try {
     if (session && Array.isArray(current)) {
       await db.update(shopifySessions).set({ scope: current.map(String).join(",") }).where(eq(shopifySessions.id, session.id));
+      const { shopInstallations } = await import("~/db/schema");
+      await db
+        .update(shopInstallations)
+        .set({ scopes: current.map(String).join(","), updatedAt: new Date() })
+        .where(eq(shopInstallations.shop, shop));
     }
     await completeWebhook(db, webhookId);
   } catch (e) {

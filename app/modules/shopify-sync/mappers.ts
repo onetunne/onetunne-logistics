@@ -77,7 +77,8 @@ function mapVariant(v: GqlVariant, product: GqlProduct, productImage: string | n
     countryOfOrigin: blank(v.inventoryItem?.countryCodeOfOrigin)?.toUpperCase() ?? null,
     customsDescription: blank(product.customsDescription?.value),
     imageUrl: v.image?.url ?? productImage,
-    inventoryAvailable: typeof v.inventoryQuantity === "number" ? v.inventoryQuantity : null,
+    // Доступна для продажу кількість (сума по локаціях). Якщо Shopify не відстежує залишок — null, а не 0.
+    inventoryAvailable: v.inventoryItem?.tracked === false ? null : typeof v.inventoryQuantity === "number" ? v.inventoryQuantity : null,
     inventoryItemId: v.inventoryItem?.id ?? null,
   };
 }

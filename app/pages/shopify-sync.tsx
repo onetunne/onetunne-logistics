@@ -1,4 +1,6 @@
 import { Form, useActionData, useLoaderData, useNavigation, type ActionFunctionArgs, type LoaderFunctionArgs } from "react-router";
+import { asc, eq } from "drizzle-orm";
+import { productVariants, products } from "~/db/schema";
 import { requirePermission } from "~/domain/permissions";
 import { useLocale, useT } from "~/i18n";
 import { formatDateTime } from "~/lib/format";
@@ -19,10 +21,25 @@ export async function loader({ request }: LoaderFunctionArgs) {
   } catch {
     throw new Response("Forbidden", { status: 403 });
   }
-  if (ctx.mode === "demo") return { mode: ctx.mode, shop: null, jobs: null, defaultSince: "" };
+  if (ctx.mode === "demo") return { mode: ctx.mode, shop: null, jobs: null, defaultSince: "", limit60: "", stock: [] };
   const shop = await currentShop(ctx.db);
   const since = new Date(Date.now() - 60 * 86400_000).toISOString().slice(0, 10);
-  return { mode: ctx.mode, shop, jobs: await jobStats(ctx.db), defaultSince: since };
+  // Залишки для звірки з Shopify (доступні для продажу, сума по локаціях).
+  const stock = await ctx.db
+    .select({
+      id: productVariants.id,
+      product: products.title,
+      variant: productVariants.title,
+      sku: productVariants.sku,
+      available: productVariants.inventoryAvailable,
+      updatedAt: productVariants.updatedAt,
+      status: products.status,
+    })
+    .from(productVariants)
+    .innerJoin(products, eq(productVariants.productId, products.id))
+    .orderBy(asc(products.title), asc(productVariants.title))
+    .limit(100);
+  return { mode: ctx.mode, shop, jobs: await jobStats(ctx.db), defaultSince: since, limit60: since, stock };
 }
 
 export async function action({ request }: ActionFunctionArgs): Promise<ActionResult> {
@@ -68,7 +85,15 @@ export default function ShopifySyncPage() {
       </Page>
     );
   }
-  const imp = (data.shop?.importState ?? null) as { status?: string; since?: string; imported?: number; skipped?: number } | null;
+  const imp = (data.shop?.importState ?? null) as {
+    status?: string;
+    since?: string;
+    imported?: number;
+    updated?: number;
+    skipped?: number;
+    failed?: string[];
+  } | null;
+  const hasAllOrders = (data.shop?.scopes ?? "").split(",").includes("read_all_orders");
   return (
     <Page title={t("shopify.title")} subtitle={t("shopify.subtitle")}>
       <Stack gap={4}>
@@ -102,9 +127,14 @@ export default function ShopifySyncPage() {
                   since: imp.since ?? "—",
                   imported: imp.imported ?? 0,
                   skipped: imp.skipped ?? 0,
-                })}
+                })}{" "}
+                {t("shopify.import.updated", { updated: imp.updated ?? 0 })}
               </Text>
             ) : null}
+            {imp?.failed?.length ? (
+              <Banner tone="warning">{t("shopify.import.failed", { orders: imp.failed.join(", ") })}</Banner>
+            ) : null}
+            {!hasAllOrders ? <Banner tone="info">{t("shopify.import.limit60", { date: data.limit60 })}</Banner> : null}
             <Form method="post">
               <input type="hidden" name="intent" value="importOrders" />
               <Stack gap={2}>
@@ -120,6 +150,18 @@ export default function ShopifySyncPage() {
                 </ConfirmSubmitButton>
               </Stack>
             </Form>
+          </Stack>
+        </Card>
+        <Card title={t("shopify.stock.title")} description={t("shopify.stock.help")}>
+          <Stack gap={1}>
+            {data.stock.length === 0 ? <Text tone="subdued">{t("shopify.stock.empty")}</Text> : null}
+            {data.stock.map((v) => (
+              <Text key={v.id} variant="body-sm" tone={v.status === "DELETED" ? "subdued" : "default"}>
+                {v.product} · {v.variant} · {v.sku ?? "—"} — {v.available === null ? t("shopify.stock.untracked") : t("shopify.stock.available", { n: v.available })}
+                {" · "}
+                {formatDateTime(v.updatedAt, locale)}
+              </Text>
+            ))}
           </Stack>
         </Card>
         <Card title={t("shopify.jobs.title")} description={t("shopify.jobs.help")}>

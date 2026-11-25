@@ -39,7 +39,8 @@ export const JOB = {
   pushOrder: "shopify.push_order",
 } as const;
 
-const PAGE_SIZE = 25;
+/** Сторінка списку: невелика, щоб запитувана вартість GraphQL не перевищувала ліміт. */
+const PAGE_SIZE = 10;
 
 // ---------------------------------------------------------------------------
 // Товари
@@ -95,7 +96,11 @@ export async function syncProductsPage(db: Db, admin: AdminGraphql, shop: string
     first: PAGE_SIZE,
     after,
   });
-  for (const p of data.products.nodes) await upsertProduct(db, mapProduct(p), currency);
+  for (const p of data.products.nodes) {
+    // Товар із великою кількістю варіантів перечитується окремо (повний список варіантів).
+    if (p.variants.pageInfo?.hasNextPage) await syncProduct(db, admin, p.id, currency);
+    else await upsertProduct(db, mapProduct(p), currency);
+  }
   if (data.products.pageInfo.hasNextPage && data.products.pageInfo.endCursor) {
     await enqueueJob(db, JOB.productsPage, { shop, after: data.products.pageInfo.endCursor }, { dedupeKey: `products:${data.products.pageInfo.endCursor}` });
   } else {
@@ -195,8 +200,9 @@ async function openSyncIssue(
   orderId: string,
   code: "SHOPIFY_ORDER_CHANGED" | "SHOPIFY_SYNC_FAILED" | "SHOPIFY_CANCELLED_AFTER_SHIPMENT",
   params: Record<string, string | number>,
+  field: string | null = null,
 ) {
-  const fingerprint = `${orderId}:${code}:`;
+  const fingerprint = `${orderId}:${code}:${field ?? ""}`;
   const [existing] = await tx.select({ id: issues.id }).from(issues).where(and(eq(issues.fingerprint, fingerprint), eq(issues.status, "open")));
   if (existing) {
     await tx.update(issues).set({ params, updatedAt: new Date() }).where(eq(issues.id, existing.id));
@@ -206,7 +212,7 @@ async function openSyncIssue(
     orderId,
     code,
     severity: code === "SHOPIFY_ORDER_CHANGED" ? "warning" : "error",
-    field: null,
+    field,
     params,
     fingerprint,
   });
@@ -346,6 +352,12 @@ export async function syncOrder(ctx: ServiceContext, admin: AdminGraphql, orderG
 }
 
 async function applyOrder(ctx: ServiceContext, admin: AdminGraphql, order: GqlOrder, mode: "live" | "import") {
+  if (order.lineItems.pageInfo?.hasNextPage) {
+    // На сторінці списку не всі позиції — перечитуємо замовлення повністю.
+    const full = await admin<{ order: GqlOrder | null }>(ORDER_QUERY, { id: order.id });
+    if (full.order && !full.order.lineItems.pageInfo?.hasNextPage) order = full.order;
+    else throw new DomainError("shopify.tooManyLineItems", 422, { order: order.name });
+  }
   const m = mapOrder(order);
   const known = await resolveVariantIds(ctx.db, m);
   const missingProducts = new Set(
@@ -359,7 +371,7 @@ async function applyOrder(ctx: ServiceContext, admin: AdminGraphql, order: GqlOr
 export async function importOrdersPage(
   ctx: ServiceContext,
   admin: AdminGraphql,
-  payload: { shop: string; since: string; after?: string | null; imported?: number; skipped?: number },
+  payload: { shop: string; since: string; after?: string | null; imported?: number; skipped?: number; updated?: number; failed?: string[] },
 ) {
   const data = await admin<{ orders: { pageInfo: PageInfo; nodes: GqlOrder[] } }>(ORDERS_PAGE_QUERY, {
     first: PAGE_SIZE,
@@ -368,17 +380,29 @@ export async function importOrdersPage(
   });
   let imported = payload.imported ?? 0;
   let skipped = payload.skipped ?? 0;
+  let updated = payload.updated ?? 0;
+  const failed = [...(payload.failed ?? [])];
   for (const order of data.orders.nodes) {
-    const r = await applyOrder(ctx, admin, order, "import");
-    if (r.result === "created") imported++;
-    else if (r.result === "skipped_unpaid") skipped++;
+    // Помилка одного замовлення не зупиняє імпорт: воно повторюється окремим завданням.
+    try {
+      const r = await applyOrder(ctx, admin, order, "import");
+      if (r.result === "created") imported++;
+      else if (r.result === "skipped_unpaid") skipped++;
+      else updated++;
+    } catch (e) {
+      if (failed.length < 50) failed.push(order.name);
+      await enqueueJob(ctx.db, JOB.syncOrder, { shop: payload.shop, orderGid: order.id, mode: "import" }, { dedupeKey: `order:${order.id}` });
+      if (e instanceof Error && !(e instanceof DomainError) && /ECONN|fetch failed|timeout/i.test(e.message)) throw e;
+    }
   }
   const { hasNextPage, endCursor } = data.orders.pageInfo;
   const state = {
     status: hasNextPage ? "running" : "done",
     since: payload.since,
     imported,
+    updated,
     skipped,
+    failed,
     updatedAt: new Date().toISOString(),
   };
   await ctx.db.update(shopInstallations).set({ importState: state, updatedAt: new Date() }).where(eq(shopInstallations.shop, payload.shop));
@@ -386,7 +410,7 @@ export async function importOrdersPage(
     await enqueueJob(
       ctx.db,
       JOB.importOrdersPage,
-      { shop: payload.shop, since: payload.since, after: endCursor, imported, skipped },
+      { shop: payload.shop, since: payload.since, after: endCursor, imported, skipped, updated, failed },
       { dedupeKey: `import:${endCursor}` },
     );
   }
@@ -397,26 +421,55 @@ export async function importOrdersPage(
 // Передача підтверджених змін у Shopify
 // ---------------------------------------------------------------------------
 
+/**
+ * Вхід для orderUpdate. Усі поля адреси передаються явно (порожнє → null): інакше при зміні країни
+ * в Shopify лишався б старий регіон/індекс попередньої країни, і Shopify відхиляв би країну та індекс.
+ * Регіон передається лише як код (provinceCode, напр. "TX", "ON"); назва регіону без коду → null.
+ */
 export function buildOrderUpdateInput(order: OrderRow) {
   const a = shippingAddressOf(order);
-  const provinceCode = a.province && /^[A-Z0-9-]{1,5}$/.test(a.province) ? a.province : undefined;
+  const provinceCode = a.province && /^[A-Z0-9]{1,3}$/.test(a.province) ? a.province : null;
   return {
     id: order.shopifyOrderId,
-    email: order.email ?? undefined,
-    phone: order.contactPhone ?? undefined,
+    email: order.email,
+    phone: order.contactPhone,
     shippingAddress: {
-      firstName: a.firstName ?? undefined,
-      lastName: a.lastName ?? undefined,
-      company: a.company ?? undefined,
-      address1: a.address1 ?? undefined,
-      address2: a.address2 ?? undefined,
-      city: a.city ?? undefined,
-      ...(provinceCode ? { provinceCode } : {}),
-      zip: a.postalCode ?? undefined,
-      countryCode: a.countryCode ?? undefined,
-      phone: a.phone ?? undefined,
+      firstName: a.firstName,
+      lastName: a.lastName,
+      company: a.company,
+      address1: a.address1,
+      address2: a.address2,
+      city: a.city,
+      provinceCode,
+      zip: a.postalCode,
+      countryCode: a.countryCode,
+      phone: a.phone,
     },
   };
+}
+
+/** Поле помилки Shopify (userErrors.field) → поле форми застосунку. */
+export function fieldFromShopify(path: string[] | null): string | null {
+  if (!path || path.length === 0) return null;
+  const last = path[path.length - 1]!;
+  const inAddress = path.includes("shippingAddress");
+  const map: Record<string, string> = {
+    zip: "shipping.postalCode",
+    countryCode: "shipping.countryCode",
+    country: "shipping.countryCode",
+    provinceCode: "shipping.province",
+    province: "shipping.province",
+    city: "shipping.city",
+    address1: "shipping.address1",
+    address2: "shipping.address2",
+    firstName: "shipping.firstName",
+    lastName: "shipping.lastName",
+    company: "shipping.company",
+  };
+  if (inAddress) return last === "phone" ? "shipping.phone" : (map[last] ?? null);
+  if (last === "email") return "email";
+  if (last === "phone") return "contactPhone";
+  return null;
 }
 
 /** Надсилає поточні (підтверджені) контакти й адресу замовлення в Shopify через orderUpdate. */
@@ -429,14 +482,38 @@ export async function pushOrderChanges(db: Db, admin: AdminGraphql, shopifyOrder
   );
   const errors = data.orderUpdate.userErrors;
   if (errors.length > 0) {
+    // Кожна помилка Shopify — окрема проблема біля відповідного поля, з текстом Shopify.
+    await db.transaction(async (tx) => {
+      for (const e of errors) {
+        await openSyncIssue(tx, order.id, "SHOPIFY_SYNC_FAILED", { message: e.message.slice(0, 200) }, fieldFromShopify(e.field));
+      }
+    });
     throw new DomainError("shopify.updateRejected", 422, { message: errors.map((e) => e.message).join("; ").slice(0, 200) });
   }
-  await writeAudit(db, SYSTEM_ACTOR, "shopify.order_pushed", { type: "order", id: order.id });
+  await db.transaction(async (tx) => {
+    // Успішне оновлення закриває попередні помилки синхронізації й «мертві» завдання для цього замовлення.
+    await tx
+      .update(issues)
+      .set({ status: "resolved", resolvedAt: new Date(), resolvedBy: SYSTEM_ACTOR.id, resolution: "shopify_synced", updatedAt: new Date() })
+      .where(and(eq(issues.orderId, order.id), eq(issues.status, "open"), eq(issues.code, "SHOPIFY_SYNC_FAILED")));
+    await tx
+      .update(jobs)
+      .set({ status: "failed", lastError: "superseded_by_successful_sync", updatedAt: new Date() })
+      .where(and(eq(jobs.type, JOB.pushOrder), eq(jobs.dedupeKey, `push:${shopifyOrderId}`), eq(jobs.status, "dead")));
+    await writeAudit(tx, SYSTEM_ACTOR, "shopify.order_pushed", { type: "order", id: order.id });
+  });
 }
 
 export async function reportPushFailure(db: Db, shopifyOrderId: string, error: string) {
   const [order] = await db.select({ id: orders.id }).from(orders).where(eq(orders.shopifyOrderId, shopifyOrderId));
-  if (order) await openSyncIssue(db, order.id, "SHOPIFY_SYNC_FAILED", { message: error.slice(0, 200) });
+  if (!order) return;
+  const [existing] = await db
+    .select({ id: issues.id })
+    .from(issues)
+    .where(and(eq(issues.orderId, order.id), eq(issues.status, "open"), eq(issues.code, "SHOPIFY_SYNC_FAILED")))
+    .limit(1);
+  // Помилки полів уже зафіксовано під час відповіді Shopify; загальна — лише для збоїв без деталей.
+  if (!existing) await openSyncIssue(db, order.id, "SHOPIFY_SYNC_FAILED", { message: error.slice(0, 200) });
 }
 
 // ---------------------------------------------------------------------------
