@@ -12,7 +12,12 @@ export async function action({ request }: ActionFunctionArgs) {
   const { shop, topic, webhookId } = await (await getShopify()).authenticate.webhook(request);
   const { db } = (await getProductionRuntime()).handle;
   if (!(await claimWebhook(db, { webhookId, topic, shop }))) return new Response();
-  await db.delete(shopifySessions).where(eq(shopifySessions.shop, shop));
-  await completeWebhook(db, webhookId);
+  try {
+    await db.delete(shopifySessions).where(eq(shopifySessions.shop, shop));
+    await completeWebhook(db, webhookId);
+  } catch (e) {
+    await completeWebhook(db, webhookId, "processing_failed").catch(() => undefined);
+    throw e; // 500 → Shopify повторить доставку, і її буде оброблено
+  }
   return new Response();
 }

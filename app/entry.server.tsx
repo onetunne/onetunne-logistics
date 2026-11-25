@@ -4,6 +4,7 @@ import { ServerRouter, type EntryContext } from "react-router";
 import { createReadableStreamFromReadable } from "@react-router/node";
 import { isbot } from "isbot";
 import { getEnv } from "~/lib/env.server";
+import { logger } from "~/lib/logger.server";
 
 export const streamTimeout = 5000;
 
@@ -48,9 +49,15 @@ export default async function handleRequest(
       },
       onError(error) {
         responseStatusCode = 500;
-        console.error(error);
+        logger.error("render.error", { error });
       },
     });
     setTimeout(abort, streamTimeout + 1000);
   });
+}
+
+/** Необроблені помилки loader/action: лише через логер із маскуванням персональних даних. */
+export function handleError(error: unknown, { request }: { request: Request }) {
+  if (request.signal.aborted) return;
+  logger.error("request.error", { path: new URL(request.url).pathname, error });
 }

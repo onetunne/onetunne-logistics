@@ -13,9 +13,14 @@ export async function action({ request }: ActionFunctionArgs) {
   const { db } = (await getProductionRuntime()).handle;
   if (!(await claimWebhook(db, { webhookId, topic, shop }))) return new Response();
   const current = (payload as { current?: unknown }).current;
-  if (session && Array.isArray(current)) {
-    await db.update(shopifySessions).set({ scope: current.map(String).join(",") }).where(eq(shopifySessions.id, session.id));
+  try {
+    if (session && Array.isArray(current)) {
+      await db.update(shopifySessions).set({ scope: current.map(String).join(",") }).where(eq(shopifySessions.id, session.id));
+    }
+    await completeWebhook(db, webhookId);
+  } catch (e) {
+    await completeWebhook(db, webhookId, "processing_failed").catch(() => undefined);
+    throw e;
   }
-  await completeWebhook(db, webhookId);
   return new Response();
 }

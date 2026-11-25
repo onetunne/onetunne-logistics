@@ -7,7 +7,7 @@ import { listOrders, countOrdersByStatus } from "~/modules/orders/repository.ser
 import { dismissIssue, setOrderAutomationPaused, updateVariantCustomsData, validateOrderById, validateOrders, listOrderIdsByStatus } from "~/modules/orders/workflow.server";
 import { getSetting, loadSettings, updateSetting } from "~/modules/settings/settings.server";
 import { cancelOrder, cancelWaybill, createWaybill, processPaidOrder } from "~/modules/shipments/waybill.server";
-import { claimWebhook } from "~/modules/webhooks/dedupe.server";
+import { claimWebhook, completeWebhook } from "~/modules/webhooks/dedupe.server";
 import { createTestEnv, OWNER, STAFF, type TestEnv } from "../helpers";
 import { ForbiddenError } from "~/domain/permissions";
 
@@ -152,6 +152,7 @@ describe("webhook dedupe", () => {
   it("claims a webhook id only once", async () => {
     const db = env.handle.db;
     expect(await claimWebhook(db, { webhookId: "w-1", topic: "orders/paid", shop: "x.myshopify.com" })).toBe(true);
+    await completeWebhook(db, "w-1");
     expect(await claimWebhook(db, { webhookId: "w-1", topic: "orders/paid", shop: "x.myshopify.com" })).toBe(false);
   });
 });

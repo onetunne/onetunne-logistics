@@ -7,12 +7,36 @@ const SENSITIVE_KEY_RE =
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 const PHONE_RE = /\+?\d[\d\s().-]{6,}\d/g;
 
+/**
+ * Повідомлення помилки без даних запиту: помилки БД (Drizzle) містять текст SQL і значення параметрів
+ * (імена, адреси) — їх відкидаємо повністю, залишаємо лише тип і код SQLSTATE.
+ */
+function safeErrorMessage(message: string): string {
+  if (/^Failed query/i.test(message)) return "Database query failed";
+  const firstLine = message.split("\n")[0] ?? "";
+  return firstLine.replace(/params:.*$/i, "").slice(0, 300);
+}
+
+function errorCode(error: Error): string | undefined {
+  const own = (error as { code?: unknown }).code;
+  const cause = (error as { cause?: { code?: unknown } }).cause?.code;
+  const code = typeof own === "string" ? own : typeof cause === "string" ? cause : undefined;
+  return code && /^[A-Z0-9_]{1,32}$/i.test(code) ? code : undefined;
+}
+
 export function redact(value: unknown, depth = 0): unknown {
   if (depth > 6) return "[depth]";
   if (value === null || value === undefined) return value;
   if (typeof value === "string") return value.replace(EMAIL_RE, "[email]").replace(PHONE_RE, "[phone]");
   if (typeof value === "number" || typeof value === "boolean") return value;
-  if (value instanceof Error) return { name: value.name, message: redact(value.message, depth + 1) };
+  if (value instanceof Error) {
+    const code = errorCode(value);
+    return {
+      name: value.name,
+      ...(code ? { code } : {}),
+      message: redact(safeErrorMessage(value.message), depth + 1),
+    };
+  }
   if (Array.isArray(value)) return value.map((v) => redact(v, depth + 1));
   if (typeof value === "object") {
     const out: Record<string, unknown> = {};

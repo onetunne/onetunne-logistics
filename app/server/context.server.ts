@@ -4,7 +4,7 @@ import { staffMembers } from "~/db/schema";
 import { makeActor, type Actor } from "~/domain/permissions";
 import { PendingShopifyGateway, DemoShopifyGateway } from "~/integrations/shopify/types";
 import { getEnv } from "~/lib/env.server";
-import { demoAccessCookie, demoRoleCookie, isRole, readPreferences } from "./cookies.server";
+import { demoAccessCookie, demoAccessToken, demoRoleCookie, isRole, readPreferences } from "./cookies.server";
 import { getDemoRuntime } from "./demo-runtime.server";
 import { getProductionRuntime } from "./production-runtime.server";
 import type { RequestContext } from "./types";
@@ -24,7 +24,7 @@ export async function isDemoAuthorized(request: Request): Promise<boolean> {
   const env = getEnv();
   if (!env.DEMO_PASSWORD) return true;
   const value = await demoAccessCookie().parse(request.headers.get("Cookie"));
-  return value === "granted";
+  return typeof value === "string" && value === demoAccessToken();
 }
 
 /**

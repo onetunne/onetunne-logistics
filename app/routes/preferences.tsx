@@ -1,10 +1,11 @@
 import { redirect, type ActionFunctionArgs } from "react-router";
 import { isLocale } from "~/i18n/types";
 import { demoRoleCookie, isRole, isTheme, localeCookie, themeCookie } from "~/server/cookies.server";
-import { formString, safeRedirectPath } from "~/server/http.server";
+import { formString, isSameOrigin, safeRedirectPath } from "~/server/http.server";
 
 /** Особисті налаштування (мова, тема) і вибір ролі в демо. */
 export async function action({ request }: ActionFunctionArgs) {
+  if (!isSameOrigin(request)) return new Response("Forbidden", { status: 403 });
   const form = await request.formData();
   const intent = formString(form, "intent");
   const value = formString(form, "value");

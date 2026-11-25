@@ -34,3 +34,17 @@ export function safeRedirectPath(value: string | null | undefined, fallback: str
   if (!value || !value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return fallback;
   return value;
 }
+
+/**
+ * Перевірка походження для ресурсних маршрутів (React Router перевіряє Origin лише для сторінок).
+ * Запит із чужого сайту (заголовок Origin з іншим хостом) відхиляється.
+ */
+export function isSameOrigin(request: Request): boolean {
+  const origin = request.headers.get("Origin");
+  if (!origin || origin === "null") return origin !== "null";
+  try {
+    return new URL(origin).host === new URL(request.url).host;
+  } catch {
+    return false;
+  }
+}
