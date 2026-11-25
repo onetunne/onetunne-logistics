@@ -60,6 +60,11 @@ tests/            unit + інтеграційні тести (PGlite)
 - Гроші — `numeric(14,2)` + валюта, арифметика через BigInt (`app/lib/money.ts`).
 - Дозволи перевіряються на сервері (`requirePermission`). Фінанси/ключі/критичні налаштування — лише власник.
 - Час в інтерфейсі — Europe/Kyiv (`app/lib/format.ts`).
+- Стани відправлення змінюються лише compare-and-set (`WHERE status IN (...)`); поки накладна `creating/unknown/created`,
+  дані замовлення не редагуються. Відмова перевізника скасувати → накладна лишається активною.
+- Сервер — `server.mjs` (Express + `trust proxy`), інакше перевірка Origin React Router відхиляє форми за HTTPS-проксі.
+  Ресурсні маршрути (без компонента) перевіряють Origin самі (`isSameOrigin`).
+- Помилки логуються без тексту SQL і параметрів (`redact` для Error).
 
 ## Команди
 - `npm run dev` — розробка (демо: `DEMO_MODE=true` у `.env`).
