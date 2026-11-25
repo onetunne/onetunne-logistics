@@ -185,6 +185,11 @@ const messages: MessageModule = {
     "order.code.confirmed_not_created": "перевізник підтвердив, що накладну не створено",
     "order.code.confirmed_not_created_manually": "менеджер підтвердив, що накладну не створено",
     "order.code.manual_link_removed": "ручну прив’язку знято",
+    "order.code.found_cancelled": "під час звірки накладна виявилася скасованою у перевізника",
+    "order.code.simulated_rejection": "тестовий перевізник відхилив дані (імітація)",
+    "order.code.simulated_unavailable": "тестовий перевізник недоступний (імітація), нічого не створено",
+    "order.code.simulated_timeout_before_create": "тайм-аут до створення накладної (імітація)",
+    "order.code.simulated_failure_after_create": "збій після створення накладної — відповідь втрачено (імітація)",
 
     // --- Результати дій (доповнення до result.*) ---
     "order.result.createdLive": "Накладну {number} створено.",
@@ -422,6 +427,11 @@ const messages: MessageModule = {
     "order.code.confirmed_not_created": "the carrier confirmed that the waybill was not created",
     "order.code.confirmed_not_created_manually": "a manager confirmed that the waybill was not created",
     "order.code.manual_link_removed": "manual link removed",
+    "order.code.found_cancelled": "reconciliation found the waybill cancelled at the carrier",
+    "order.code.simulated_rejection": "the test carrier rejected the data (simulation)",
+    "order.code.simulated_unavailable": "the test carrier is unavailable (simulation), nothing was created",
+    "order.code.simulated_timeout_before_create": "timeout before the waybill was created (simulation)",
+    "order.code.simulated_failure_after_create": "failure after the waybill was created — response lost (simulation)",
 
     // --- Action results (in addition to result.*) ---
     "order.result.createdLive": "Waybill {number} created.",

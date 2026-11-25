@@ -2,6 +2,7 @@ import type { LinksFunction, LoaderFunctionArgs } from "react-router";
 import {
   isRouteErrorResponse,
   Links,
+  useLocation,
   Meta,
   Outlet,
   Scripts,
@@ -56,6 +57,8 @@ export function ErrorBoundary() {
   const locale = data?.locale ?? DEFAULT_LOCALE;
   const t = makeT(locale);
   const status = isRouteErrorResponse(error) ? error.status : 500;
+  const { pathname } = useLocation();
+  const home = pathname.startsWith("/app") ? "/app" : pathname.startsWith("/demo") ? "/demo" : "/";
   const message =
     status === 404 ? t("error.notFound") : status === 403 ? t("error.forbidden") : t("error.generic");
   return (
@@ -63,7 +66,7 @@ export function ErrorBoundary() {
       <main className="ot-error-page">
         <h1>{status}</h1>
         <p>{message}</p>
-        <a href="/">ONE TUNNE Logistics</a>
+        <a href={home}>ONE TUNNE Logistics</a>
       </main>
     </Document>
   );

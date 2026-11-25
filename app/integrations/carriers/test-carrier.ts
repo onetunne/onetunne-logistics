@@ -156,14 +156,14 @@ export class TestCarrierAdapter implements CarrierAdapter {
     );
     switch (simulation) {
       case "reject":
-        throw this.error("rejected", "Simulated rejection", [{ carrierCode: "SIMULATED", message: "Simulated rejection" }]);
+        throw this.error("rejected", "simulated_rejection", [{ carrierCode: "SIMULATED", message: "simulated_rejection" }]);
       case "unavailable":
-        throw this.error("unavailable", "Simulated carrier unavailability (nothing created)");
+        throw this.error("unavailable", "simulated_unavailable");
       case "timeout_before_create":
-        throw this.error("unknown_outcome", "Simulated timeout (request lost before creation)");
+        throw this.error("unknown_outcome", "simulated_timeout_before_create");
       case "fail_after_create": {
         await this.createRecord(req, opts);
-        throw this.error("unknown_outcome", "Simulated failure after creation (response lost)");
+        throw this.error("unknown_outcome", "simulated_failure_after_create");
       }
       case "none":
         return toCreated(await this.createRecord(req, opts));

@@ -202,7 +202,7 @@ describe("TestCarrierAdapter simulations", () => {
   it("reject → rejected, nothing created", async () => {
     const { adapter, store } = setup("reject");
     const err = await expectCarrierError(adapter.createShipment(makeRequest()), "rejected");
-    expect(err.message).toBe("Simulated rejection");
+    expect(err.message).toBe("simulated_rejection");
     expect(err.outcomeUnknown).toBe(false);
     expect(store.size).toBe(0);
   });

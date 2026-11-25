@@ -14,6 +14,7 @@ import { OrderStatusBadge, SeverityBadge, ShipmentStatusBadge, TestBadge } from 
 import { isShipped } from "~/domain/order-status";
 import { requirePermission } from "~/domain/permissions";
 import { hasKey, makeT, useLocale, useT, type TFunction } from "~/i18n";
+import { localizeCode, localizeParams } from "~/i18n/localize";
 import { NotFoundError } from "~/lib/errors";
 import { countryName, formatDateTime, formatMoney, formatWeight } from "~/lib/format";
 import { isDecimalString, multiplyMoney } from "~/lib/money";
@@ -828,7 +829,7 @@ function IssueItem({ issue, data }: { issue: Issue; data: Data }) {
           {t("order.issues.field", { field: label })}
         </Text>
       ) : null}
-      <Text variant="body-sm">{t(`issue.${issue.code}.help`, issue.params)}</Text>
+      <Text variant="body-sm">{t(`issue.${issue.code}.help`, localizeParams(issue.params, t))}</Text>
 
       {isCarrier && message ? (
         <Text variant="body-sm">{t("order.issues.carrierMessage", { message: codeText(message, t) })}</Text>

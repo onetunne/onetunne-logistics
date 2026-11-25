@@ -11,8 +11,11 @@ export async function action({ request }: ActionFunctionArgs) {
   const value = formString(form, "value");
   const back = safeRedirectPath(formString(form, "redirectTo"), "/");
   const headers = new Headers();
-  if (intent === "locale" && isLocale(value)) headers.append("Set-Cookie", await localeCookie.serialize(value));
-  else if (intent === "theme" && isTheme(value)) headers.append("Set-Cookie", await themeCookie.serialize(value));
+  // У Shopify Admin застосунок працює в iframe іншого сайту: cookie мають бути SameSite=None; Secure; Partitioned.
+  const embedded = back.startsWith("/app") && new URL(request.url).protocol === "https:";
+  const opts = embedded ? ({ sameSite: "none", secure: true, partitioned: true } as const) : undefined;
+  if (intent === "locale" && isLocale(value)) headers.append("Set-Cookie", await localeCookie.serialize(value, opts));
+  else if (intent === "theme" && isTheme(value)) headers.append("Set-Cookie", await themeCookie.serialize(value, opts));
   else if (intent === "demoRole" && isRole(value) && back.startsWith("/demo")) {
     // Роль діє лише в демо-маршрутах; /app завжди визначає роль через Shopify.
     headers.append("Set-Cookie", await demoRoleCookie.serialize(value));

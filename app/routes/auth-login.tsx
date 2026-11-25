@@ -1,5 +1,6 @@
 import { Form, useActionData, useLoaderData, type ActionFunctionArgs, type LoaderFunctionArgs } from "react-router";
 import { getEnv } from "~/lib/env.server";
+import { useT } from "~/i18n";
 import { Button, Card, Stack, Text, TextField } from "~/ui";
 
 /** Вхід за доменом магазину (для відкриття поза Shopify Admin). */
@@ -23,23 +24,25 @@ export default function AuthLogin() {
   const loaderData = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const errors = (actionData ?? loaderData).errors as { shop?: string };
+  const t = useT();
   return (
     <main className="ot-auth-page">
       <Card>
         <Form method="post">
           <Stack gap={4}>
             <Text as="h1" variant="heading-md">
-              ONE TUNNE Logistics
+              {t("app.name")}
             </Text>
+            <Text tone="subdued">{t("auth.login.title")}</Text>
             <TextField
-              label="Shop domain"
+              label={t("auth.login.shop")}
               name="shop"
-              helpText="example.myshopify.com"
+              helpText={t("auth.login.help")}
               autoComplete="on"
-              error={errors.shop ? "Invalid shop domain" : null}
+              error={errors.shop ? t("auth.login.invalid") : null}
             />
             <Button variant="primary" type="submit" fullWidth>
-              Log in
+              {t("auth.login.submit")}
             </Button>
           </Stack>
         </Form>

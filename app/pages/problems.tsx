@@ -14,6 +14,7 @@ import { OrderStatusBadge, SeverityBadge } from "~/components/status-badge";
 import { isOrderStatus, type OrderStatus } from "~/domain/order-status";
 import { requirePermission } from "~/domain/permissions";
 import { hasKey, makeT, useLocale, useT, type Locale } from "~/i18n";
+import { localizeCode, localizeParams } from "~/i18n/localize";
 import { countryName, formatDateTime, formatNumber } from "~/lib/format";
 import { countOpenIssues, listIssues, type OpenIssueListRow } from "~/modules/orders/repository.server";
 import { VALIDATABLE_STATUSES, acceptSuggestion, dismissIssue } from "~/modules/orders/workflow.server";
@@ -475,10 +476,10 @@ function IssueItem({
           {t(`issue.${issue.code}.title`)}
         </Text>
       </Stack>
-      <Text>{t(`issue.${issue.code}.help`, issue.params)}</Text>
+      <Text>{t(`issue.${issue.code}.help`, localizeParams(issue.params, t))}</Text>
       {issue.carrierMessage ? (
         <Text variant="body-sm" tone="subdued">
-          {t("problems.issue.carrierMessage", { message: issue.carrierMessage })}
+          {t("problems.issue.carrierMessage", { message: localizeCode(issue.carrierMessage, t) })}
         </Text>
       ) : null}
       <KeyValueList items={details} />

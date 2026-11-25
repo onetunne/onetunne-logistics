@@ -3,6 +3,11 @@ import type { MessageModule } from "../types";
 /** Спільні тексти: назва, навігація, статуси, ролі, тема/мова, загальні дії та помилки. */
 const messages: MessageModule = {
   uk: {
+    "auth.login.title": "Вхід через Shopify",
+    "auth.login.shop": "Домен магазину",
+    "auth.login.help": "Наприклад: example.myshopify.com",
+    "auth.login.invalid": "Некоректний домен магазину",
+    "auth.login.submit": "Увійти",
     "app.name": "ONE TUNNE Logistics",
 
     // Навігація (17 розділів)
@@ -112,6 +117,11 @@ const messages: MessageModule = {
     "error.validation": "Перевірте виділені поля",
   },
   en: {
+    "auth.login.title": "Sign in with Shopify",
+    "auth.login.shop": "Shop domain",
+    "auth.login.help": "For example: example.myshopify.com",
+    "auth.login.invalid": "Invalid shop domain",
+    "auth.login.submit": "Log in",
     "app.name": "ONE TUNNE Logistics",
 
     "nav.dashboard": "Home",
