@@ -3,8 +3,8 @@
  * і ресурсний маршрут …/orders/:orderId/shipments/:shipmentId/documents/:kind (демо-середовище).
  */
 import { eq } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { documentErrorKey } from "~/components/carrier-documents";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { REVOKE_AFTER_MS, documentErrorKey, downloadCarrierDocument, readDocumentResponse } from "~/components/carrier-documents";
 import { TRACKING_STATUSES } from "~/components/tracking-badge";
 import { orderLineItems, orders } from "~/db/schema";
 import { makeActor } from "~/domain/permissions";
@@ -285,5 +285,160 @@ describe("document errors and tracking i18n (UI)", () => {
     // До фактичної передачі посилку не називаємо відправленою.
     expect(DICTIONARIES.uk["tracking.status.created"]).not.toMatch(/відправлен/i);
     expect(DICTIONARIES.en["tracking.status.created"]).not.toMatch(/shipped/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Клієнт: CarrierDocumentButtons → downloadCarrierDocument (fetch → перевірка відповіді → blob → нова вкладка).
+// Без DOM-середовища: window/document/URL підмінено мінімальними заглушками.
+// ---------------------------------------------------------------------------
+
+interface FakeAnchor {
+  href: string;
+  download: string;
+  rel: string;
+  click: ReturnType<typeof vi.fn>;
+  remove: ReturnType<typeof vi.fn>;
+}
+
+function stubBrowser(fetchImpl: (url: string, init?: RequestInit) => Promise<Response>, { popupBlocked = false } = {}) {
+  const fetch = vi.fn(fetchImpl);
+  const open = vi.fn((_url: string, _target: string) => (popupBlocked ? null : {}));
+  const setTimeout = vi.fn();
+  vi.stubGlobal("window", { fetch, open, setTimeout });
+  const anchors: FakeAnchor[] = [];
+  const appendChild = vi.fn();
+  vi.stubGlobal("document", {
+    createElement: vi.fn(() => {
+      const a: FakeAnchor = { href: "", download: "", rel: "", click: vi.fn(), remove: vi.fn() };
+      anchors.push(a);
+      return a;
+    }),
+    body: { appendChild },
+  });
+  const blobs: Blob[] = [];
+  vi.spyOn(URL, "createObjectURL").mockImplementation((blob) => {
+    blobs.push(blob as Blob);
+    return `blob:test/${blobs.length}`;
+  });
+  const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+  return { fetch, open, setTimeout, anchors, appendChild, blobs, revoke };
+}
+
+const docUrl = (orderId: string, shipmentId: string, kind: string) => `/demo/orders/${orderId}/shipments/${shipmentId}/documents/${kind}`;
+
+describe("carrier document download (client)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("opens the PDF from the resource route in a new tab; fetch does not follow redirects", async () => {
+    const { orderId, shipment } = await orderWithWaybill();
+    const b = stubBrowser(() => get(orderId, shipment.id, "label"));
+    const url = docUrl(orderId, shipment.id, "label");
+    expect(await downloadCarrierDocument(url, "label.pdf")).toBeNull();
+    expect(b.fetch).toHaveBeenCalledWith(url, expect.objectContaining({ credentials: "same-origin", redirect: "manual" }));
+    expect(b.blobs).toHaveLength(1);
+    expect(b.blobs[0]!.type).toBe("application/pdf");
+    expect(await b.blobs[0]!.text()).toBe("%PDF-1.4 label");
+    expect(b.open).toHaveBeenCalledWith("blob:test/1", "_blank");
+    expect(b.anchors).toEqual([]);
+    // Посилання на blob звільняється згодом.
+    expect(b.setTimeout).toHaveBeenCalledWith(expect.any(Function), REVOKE_AFTER_MS);
+    (b.setTimeout.mock.calls[0]![0] as () => void)();
+    expect(b.revoke).toHaveBeenCalledWith("blob:test/1");
+  });
+
+  it("downloads the file under the server's safe name when the new tab is blocked", async () => {
+    const { orderId, shipment } = await orderWithWaybill();
+    const b = stubBrowser(() => get(orderId, shipment.id, "invoice"), { popupBlocked: true });
+    expect(await downloadCarrierDocument(docUrl(orderId, shipment.id, "invoice"), "invoice.pdf")).toBeNull();
+    expect(b.open).toHaveBeenCalledTimes(1);
+    expect(b.anchors).toHaveLength(1);
+    expect(b.anchors[0]).toMatchObject({ href: "blob:test/1", download: `${shipment.waybillNumber}_invoice.pdf`, rel: "noopener" });
+    expect(b.appendChild).toHaveBeenCalledWith(b.anchors[0]);
+    expect(b.anchors[0]!.click).toHaveBeenCalledTimes(1);
+    expect(b.anchors[0]!.remove).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns the inline error for a non-200 response and opens nothing", async () => {
+    const { orderId, shipment } = await orderWithWaybill();
+    const b = stubBrowser(() => get(orderId, shipment.id, "customs_declaration"));
+    expect(await downloadCarrierDocument(docUrl(orderId, shipment.id, "customs_declaration"), "customs_declaration.pdf")).toBe(
+      "tracking.documents.error.notAvailable",
+    );
+    b.fetch.mockImplementation(() => get(orderId, shipment.id, "label"));
+    withDocs.failWith = new CarrierError("unavailable", "docs", "down");
+    try {
+      expect(await downloadCarrierDocument(docUrl(orderId, shipment.id, "label"), "label.pdf")).toBe("tracking.documents.error.unavailable");
+    } finally {
+      withDocs.failWith = null;
+    }
+    expect(b.open).not.toHaveBeenCalled();
+    expect(b.blobs).toEqual([]);
+  });
+
+  it("an expired session (redirect to the login page or HTML instead of a PDF) is reported, never opened", async () => {
+    // Демо з паролем без cookie доступу: ресурсний маршрут перенаправляє на вхід (у браузері fetch з
+    // redirect: "manual" отримує opaqueredirect, а не HTML сторінки входу зі статусом 200).
+    const { orderId, shipment } = await orderWithWaybill();
+    const env = { DEMO_PASSWORD: process.env.DEMO_PASSWORD, SESSION_SECRET: process.env.SESSION_SECRET };
+    process.env.DEMO_PASSWORD = "test-password";
+    process.env.SESSION_SECRET = "s".repeat(40);
+    resetEnvCache();
+    try {
+      const thrown = await get(orderId, shipment.id, "label").catch((e: unknown) => e);
+      expect(thrown).toBeInstanceOf(Response);
+      expect((thrown as Response).status).toBe(302);
+      expect((thrown as Response).headers.get("Location")).toMatch(/^\/demo\/login\?next=/);
+    } finally {
+      for (const [k, v] of Object.entries(env)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      resetEnvCache();
+    }
+
+    const opaque = { type: "opaqueredirect", redirected: false, ok: false, status: 0, headers: new Headers(), text: async () => "" };
+    const followed = new Response("<!doctype html><title>Login</title>", { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } });
+    Object.defineProperty(followed, "redirected", { value: true });
+    const html = () => new Response("<!doctype html><title>Login</title>", { status: 200, headers: { "Content-Type": "text/html" } });
+    const json = () => new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+
+    const b = stubBrowser(async () => opaque as unknown as Response);
+    expect(await downloadCarrierDocument("/demo/x", "label.pdf")).toBe("tracking.documents.error.session");
+    b.fetch.mockImplementation(async () => followed);
+    expect(await downloadCarrierDocument("/demo/x", "label.pdf")).toBe("tracking.documents.error.session");
+    b.fetch.mockImplementation(async () => html());
+    expect(await downloadCarrierDocument("/demo/x", "label.pdf")).toBe("tracking.documents.error.session");
+    b.fetch.mockImplementation(async () => new Response("", { status: 401 }));
+    expect(await downloadCarrierDocument("/demo/x", "label.pdf")).toBe("tracking.documents.error.session");
+    b.fetch.mockImplementation(async () => json());
+    expect(await downloadCarrierDocument("/demo/x", "label.pdf")).toBe("tracking.documents.error.generic");
+    expect(b.open).not.toHaveBeenCalled();
+    expect(b.blobs).toEqual([]);
+  });
+
+  it("reports a network failure", async () => {
+    const b = stubBrowser(async () => {
+      throw new TypeError("Failed to fetch");
+    });
+    expect(await downloadCarrierDocument("/demo/x", "label.pdf")).toBe("tracking.documents.error.network");
+    expect(b.open).not.toHaveBeenCalled();
+  });
+
+  it("rebuilds the blob with the checked type and keeps only a safe file name", async () => {
+    const ok = await readDocumentResponse(
+      new Response(new TextEncoder().encode("%PDF-1.4"), {
+        status: 200,
+        headers: { "Content-Type": "application/pdf; charset=binary", "Content-Disposition": 'inline; filename="../evil<script>.pdf"' },
+      }),
+      "label.pdf",
+    );
+    expect(ok.ok).toBe(true);
+    if (!ok.ok) return;
+    expect(ok.blob.type).toBe("application/pdf");
+    expect(ok.fileName).toBe("label.pdf");
   });
 });

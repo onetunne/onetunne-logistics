@@ -90,6 +90,11 @@ export const customsSchema = z.object({
   incoterm: z.enum(INCOTERMS),
   exportReason: z.enum(EXPORT_REASONS),
   invoiceType: z.enum(["commercial", "proforma"]),
+  /**
+   * Адреса реєстрації одержувача (Nova Post вимагає для DE, SK, HU, FR). Застосунок не знає адреси реєстрації клієнта:
+   * "shipping" — власник дозволив використовувати адресу доставки; "none" — накладні до цих країн не створюються.
+   */
+  recipientRegistrationAddress: z.enum(["none", "shipping"]).default("none"),
 });
 
 /** Параметри Nova Post API v1.0 (договір, тариф). */
@@ -203,7 +208,7 @@ export const DEFAULT_SETTINGS: AllSettings = {
     ],
   },
   testCarrier: { simulation: "none" },
-  customs: { incoterm: "DAP", exportReason: "sale", invoiceType: "commercial" },
+  customs: { incoterm: "DAP", exportReason: "sale", invoiceType: "commercial", recipientRegistrationAddress: "none" },
   novaPost: { payerType: "Sender", payerContractNumber: "", deliveryType: "", tariffCurrency: "UAH" },
   checkoutRates: { enabled: false, markupPercent: 0, markupFixed: "0.00", rounding: "none", fxRates: [], serviceName: "" },
   tracking: { enabled: true, intervalMinutes: 60, pushToShopify: true, notifyCustomer: false, trackingUrlTemplate: "" },

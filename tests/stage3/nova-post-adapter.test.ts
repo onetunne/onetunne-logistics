@@ -146,7 +146,7 @@ describe("NovaPostAdapter: identity and capabilities", () => {
       documentKinds: ["label", "invoice", "customs_declaration"],
     });
     expect(setup(() => ({ status: 200 }), { allow: false }).adapter.capabilities.createShipment).toBe(false);
-    expect(adapter.trackingInfo(WAYBILL)).toEqual({ company: "Nova Poshta", number: WAYBILL, url: null });
+    expect(adapter.trackingInfo(WAYBILL)).toEqual({ company: "Nova Post", number: WAYBILL, url: null });
   });
 });
 

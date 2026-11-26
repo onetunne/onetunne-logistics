@@ -453,8 +453,8 @@ interface PricedQuote {
 
 /**
  * Базова валюта таблиці курсів: опис налаштування — «скільки одиниць валюти перевізника (UAH) коштує 1 одиниця валюти».
- * Поки єдиний перевізник із тарифами — Nova Post, тож база = novaPost.tariffCurrency (адаптер Nova Post так само
- * перераховує оголошену вартість у tariffCurrency за цією таблицею).
+ * Поки єдиний перевізник із тарифами — Nova Post, тож база = novaPost.tariffCurrency (адаптер Nova Post за цією
+ * таблицею перераховує оголошену вартість у валюту країни відправника — UAH — і лише коли tariffCurrency = UAH).
  */
 const fxBaseCurrency = (settings: AllSettings) => settings.novaPost.tariffCurrency;
 

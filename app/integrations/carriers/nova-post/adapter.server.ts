@@ -387,11 +387,12 @@ export class NovaPostAdapter implements CarrierAdapter {
   }
 
   /**
-   * Дані для Shopify. Назва перевізника зі списку Shopify і публічне посилання на відстеження підтверджуються
-   * на кроці інтеграції виконань Shopify (окреме завдання); поки url = null.
+   * Дані для Shopify. Nova Post/Nova Poshta немає в списку перевізників Shopify (перевірено за документацією
+   * FulfillmentTrackingInfo), тому company — довільний текст, а посилання — з шаблону в налаштуваннях відстеження
+   * (публічна адреса відстеження в документації Nova Post API не наведена).
    */
   trackingInfo(trackingNumber: string): ShopifyTrackingInfo {
-    return { company: "Nova Poshta", number: trackingNumber, url: null };
+    return { company: "Nova Post", number: trackingNumber, url: null };
   }
 }
 

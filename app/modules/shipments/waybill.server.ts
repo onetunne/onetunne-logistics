@@ -201,6 +201,19 @@ export function buildShipmentRequest(
         address2: order.shipAddress2,
         ...streetParts(order.shipAddress1),
       },
+      // Лише з явного рішення власника (налаштування «Митні документи»); інакше адаптер відмовить для DE/SK/HU/FR.
+      registrationAddress:
+        settings.customs.recipientRegistrationAddress === "shipping"
+          ? {
+              countryCode: order.shipCountryCode ?? "",
+              city: order.shipCity ?? "",
+              postalCode: order.shipPostalCode,
+              province: order.shipProvince,
+              address1: order.shipAddress1 ?? "",
+              address2: order.shipAddress2,
+              ...streetParts(order.shipAddress1),
+            }
+          : null,
     },
     parcels: [
       {

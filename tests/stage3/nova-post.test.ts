@@ -47,6 +47,38 @@ describe("Nova Post API client", () => {
     expect(safeErrorText(`bad ${KEY} eyJhbGc.eyJzdWI.abc`, KEY)).toBe("bad [apiKey] [jwt]");
   });
 
+  it("secrets are redacted before truncation (key or JWT straddling the 400-character limit)", () => {
+    for (const offset of [385, 395, 399]) {
+      const text = `${"x".repeat(offset)}${KEY}${"y".repeat(50)}`;
+      const out = safeErrorText(text, KEY);
+      expect(out.length).toBeLessThanOrEqual(400);
+      // Жодного префікса ключа довжиною від 4 символів.
+      for (let n = 4; n <= KEY.length; n++) expect(out, `offset ${offset}, prefix ${n}`).not.toContain(KEY.slice(0, n));
+    }
+    const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlLXRlc3Q";
+    const cut = safeErrorText(`${"z".repeat(380)}${jwt}`, KEY);
+    expect(cut).not.toContain("eyJhbGci");
+    expect(cut).not.toContain("eyJzdWIi");
+    // Обрізаний «хвіст» без повного JWT на межі ліміту теж прибирається.
+    expect(safeErrorText(`${"z".repeat(390)}eyJhbGciOiJIUzI1NiJ9.eyJzdWIi`, KEY)).not.toContain("eyJ");
+    expect(safeErrorText("short", KEY)).toBe("short");
+  });
+
+  it.each([
+    [422, { errors: { errorMessage: "Cid profile timeout" } }, "unavailable"],
+    [400, { errors: { errorMessage: "Internal TypeError error" } }, "unavailable"],
+    [500, { errors: { errorMessage: "x" } }, "unavailable"],
+    [429, { errors: { errorMessage: "Too Many Attempts." } }, "unavailable"],
+    [404, { errors: { errorMessage: "not_found" } }, "auth"],
+    [422, { errors: { errorMessage: "Cid profile not found" } }, "auth"],
+    [400, { errors: { errorMessage: "something else" } }, "auth"],
+  ] as const)("authorization error %i %j → %s (never 'rejected')", async (status, body, kind) => {
+    const { fn } = mockFetch(() => ({ status, body }));
+    const err = await new NovaPostClient({ apiKey: KEY, baseUrl: BASE, fetch: fn }).authorize().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CarrierError);
+    expect((err as CarrierError).kind).toBe(kind);
+  });
+
   it("network failure → unavailable (nothing was sent)", async () => {
     const fn = vi.fn(async () => {
       throw new TypeError("fetch failed");
