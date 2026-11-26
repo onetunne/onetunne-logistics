@@ -9,6 +9,10 @@ const pages = (prefix: "demo" | "app") => [
   index("pages/dashboard.tsx", { id: `${prefix}-dashboard` }),
   route("orders", "pages/orders.tsx", { id: `${prefix}-orders` }),
   route("orders/:orderId", "pages/order-detail.tsx", { id: `${prefix}-order` }),
+  route("orders/:orderId/invoice", "pages/order-invoice.tsx", { id: `${prefix}-order-invoice` }),
+  route("orders/:orderId/shipments/:shipmentId/documents/:kind", "pages/order-document.tsx", {
+    id: `${prefix}-order-document`,
+  }),
   route("problems", "pages/problems.tsx", { id: `${prefix}-problems` }),
   route("waybills", "pages/waybills.tsx", { id: `${prefix}-waybills` }),
   route("country-rules", "pages/country-rules.tsx", { id: `${prefix}-country-rules` }),

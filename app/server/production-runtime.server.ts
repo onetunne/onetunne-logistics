@@ -10,6 +10,7 @@ import { createSyncHandlers, defaultAdmin } from "~/modules/shopify-sync/handler
 import { currentShop } from "~/modules/shopify-sync/sync.server";
 import { QueueingShopifyGateway } from "~/integrations/shopify/queueing-gateway.server";
 import type { ShopifyGateway } from "~/integrations/shopify/types";
+import { scheduleTrackingPoll } from "~/modules/tracking/tracking.server";
 import type { ServiceContext } from "./types";
 
 /**
@@ -60,6 +61,8 @@ export async function ensureJobWorker(): Promise<void> {
       admin: defaultAdmin,
     });
     startJobWorker(runtime.handle.db, handlers);
+    // Ланцюжок опитування відстеження: одне очікуване завдання (dedupe), перше — через хвилину після старту.
+    await scheduleTrackingPoll(runtime.handle.db, new Date(Date.now() + 60_000));
   } catch (e) {
     workerStarted = false;
     logger.error("job.worker_start_failed", { error: e });
