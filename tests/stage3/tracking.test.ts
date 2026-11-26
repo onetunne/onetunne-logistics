@@ -267,10 +267,10 @@ describe("manual handover", () => {
   it("does not request Shopify fulfillment when disabled in settings", async () => {
     const ctx = ctxFor();
     const { shipment } = await orderWithWaybill("#1008", "gid://shopify/Order/9008");
-    await updateSetting(ctx.db, OWNER, "tracking", { enabled: true, intervalMinutes: 60, pushToShopify: false, notifyCustomer: false });
+    await updateSetting(ctx.db, OWNER, "tracking", { enabled: true, intervalMinutes: 60, pushToShopify: false, notifyCustomer: false, trackingUrlTemplate: "" });
     await markHandedOver(ctx, shipment.id);
     expect(gateway.requests).toHaveLength(0);
-    await updateSetting(ctx.db, OWNER, "tracking", { enabled: true, intervalMinutes: 60, pushToShopify: true, notifyCustomer: false });
+    await updateSetting(ctx.db, OWNER, "tracking", { enabled: true, intervalMinutes: 60, pushToShopify: true, notifyCustomer: false, trackingUrlTemplate: "" });
   });
 });
 

@@ -4,6 +4,8 @@ import { adminClientFor, type AdminGraphql } from "~/integrations/shopify/admin-
 import { SHOP_CURRENCY_QUERY } from "~/integrations/shopify/graphql";
 import type { JobHandlers } from "~/modules/jobs/worker.server";
 import type { ServiceContext } from "~/server/types";
+import { runTrackingPollJob } from "~/modules/tracking/tracking.server";
+import { fulfillShipment, reportFulfillmentFailure } from "./fulfillment.server";
 import {
   JOB,
   importOrdersPage,
@@ -93,6 +95,21 @@ export function createSyncHandlers(deps: SyncDeps): JobHandlers {
         await pushOrderChanges(deps.db, await deps.admin(String(p.shop)), String(p.shopifyOrderId));
       },
       onDead: async (job, error) => reportPushFailure(deps.db, String((job.payload as Record<string, unknown>).shopifyOrderId), error),
+    },
+    [JOB.fulfillShipment]: {
+      run: async (job) => {
+        const p = job.payload as Record<string, unknown>;
+        await fulfillShipment(deps.db, await deps.admin(String(p.shop)), deps.serviceContext().carriers, {
+          shopifyOrderId: String(p.shopifyOrderId),
+          shipmentId: String(p.shipmentId),
+        });
+      },
+      onDead: async (job, error) => reportFulfillmentFailure(deps.db, String((job.payload as Record<string, unknown>).shipmentId), error),
+    },
+    [JOB.trackingPoll]: {
+      run: async () => {
+        await runTrackingPollJob(ctx());
+      },
     },
   };
 }

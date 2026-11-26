@@ -141,6 +141,16 @@ export const trackingSchema = z.object({
   pushToShopify: z.boolean(),
   /** Чи надсилати клієнту лист Shopify про відправлення. За замовчуванням — ні. */
   notifyCustomer: z.boolean(),
+  /**
+   * Шаблон публічного посилання відстеження для Shopify, напр. https://…{number}… (Nova Post немає в списку
+   * перевізників Shopify, тому без посилання трек-номер у Shopify не клікабельний). Порожньо — лише номер.
+   */
+  trackingUrlTemplate: z
+    .string()
+    .trim()
+    .max(300)
+    .refine((v) => v === "" || (/^https:\/\/[^\s]+$/.test(v) && v.includes("{number}")), "https://…{number}")
+    .default(""),
 });
 
 export const settingsSchemas = {
@@ -192,7 +202,7 @@ export const DEFAULT_SETTINGS: AllSettings = {
   customs: { incoterm: "DAP", exportReason: "sale", invoiceType: "commercial" },
   novaPost: { payerType: "Sender", payerContractNumber: "", deliveryType: "", tariffCurrency: "UAH" },
   checkoutRates: { enabled: false, markupPercent: 0, markupFixed: "0.00", rounding: "none", fxRates: [], serviceName: "" },
-  tracking: { enabled: true, intervalMinutes: 60, pushToShopify: true, notifyCustomer: false },
+  tracking: { enabled: true, intervalMinutes: 60, pushToShopify: true, notifyCustomer: false, trackingUrlTemplate: "" },
 };
 
 /** Перелік обов'язкових полів відправника для створення накладної. */
