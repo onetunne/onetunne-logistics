@@ -3,8 +3,11 @@
  *
  * Конвеєр: ціна перевізника (десятковий рядок у валюті перевізника)
  *   → перерахунок у валюту кошика за курсами власника (settings.checkoutRates.fxRates)
- *   → націнка у відсотках → округлення ВГОРУ до копійок/центів (одне округлення, без накопичення)
- *   → + фіксована надбавка (валюта кошика)
+ *   → націнка у відсотках
+ *   → + фіксована надбавка: задана у БАЗОВІЙ валюті таблиці курсів (валюта тарифу перевізника, UAH)
+ *     і перераховується у валюту кошика за тим самим курсом. Одне число для всіх валют кошика
+ *     («+20 грн») — інакше "5.00" означало б 5 EUR, 5 UAH або 5 JPY залежно від покупця
+ *   → одне округлення ВГОРУ до копійок/центів від точної суми (без накопичення)
  *   → режим округлення (none | up_whole | up_99).
  *
  * Усі ділення округлюються ВГОРУ — магазин ніколи не бере з клієнта менше, ніж розрахував перевізник.
@@ -181,7 +184,8 @@ export type PricingResult = { ok: true; price: CheckoutPrice } | { ok: false; re
 export interface PricingOptions {
   /**
    * Валюта, відносно якої задано таблицю курсів (за описом налаштування — валюта перевізника, UAH).
-   * null — таблиця вважається заданою відносно валюти ціни перевізника (як у описі налаштування).
+   * У ній же задано фіксовану надбавку `markupFixed`.
+   * null — таблиця (і надбавка) вважаються заданими відносно валюти ціни перевізника.
    */
   fxBaseCurrency: string | null;
 }
@@ -208,16 +212,23 @@ export function priceCheckoutRate(
   const price = parseDecimal(carrierPrice.amount);
   if (!price) return { ok: false, reason: "invalid_price" };
 
-  const factor = conversionFactor(from, target, settings.fxRates, options.fxBaseCurrency ?? from);
+  const base = options.fxBaseCurrency ? normalizeCurrency(options.fxBaseCurrency) : from;
+  if (!base) return { ok: false, reason: "unsupported_currency" };
+  const factor = conversionFactor(from, target, settings.fxRates, base);
   if (!factor) return { ok: false, reason: "no_fx_rate" };
+  // Фіксована надбавка — у базовій валюті таблиці курсів (див. опис модуля).
+  const fixedFactor = fixedCents === 0n ? ONE : conversionFactor(base, target, settings.fxRates, base);
+  if (!fixedFactor) return { ok: false, reason: "no_fx_rate" };
 
   // Центи у валюті кошика = price × factor × 100, округлено вгору.
   const convNum = price.num * factor.num * CENTS;
   const convDen = price.den * factor.den;
   const convertedCents = ceilDiv(convNum, convDen);
-  // З націнкою: price × factor × (10000 + bp) / 10000 × 100 — одне округлення вгору від точного значення.
-  const markedCents = ceilDiv(convNum * (BASIS_POINTS + bp), convDen * BASIS_POINTS);
-  const cents = applyRounding(markedCents + fixedCents, settings.rounding, digits);
+  // price × factor × (10000 + bp) / 10000 × 100 + fixed × fixedFactor — точна сума, одне округлення вгору.
+  const markedNum = convNum * (BASIS_POINTS + bp);
+  const markedDen = convDen * BASIS_POINTS;
+  const totalCents = ceilDiv(markedNum * fixedFactor.den + fixedCents * fixedFactor.num * markedDen, markedDen * fixedFactor.den);
+  const cents = applyRounding(totalCents, settings.rounding, digits);
 
   return {
     ok: true,
@@ -226,8 +237,24 @@ export function priceCheckoutRate(
 }
 
 /**
- * Ціле значення в найменших одиницях валюти (як `order_totals` / `items[].price` у запиті Shopify) → десятковий рядок.
- * Документація: order_totals — «integer in the smallest unit of the shop's currency (for example, cents)».
+ * Найменша оголошена вартість для розрахунку тарифу у валюті `currency`: 1 одиниця базової валюти таблиці курсів
+ * (валюти тарифу перевізника), перерахована у `currency` і округлена ВГОРУ до цілої одиниці (EUR → "1.00",
+ * JPY за курсу 0.27 → "4.00"). Nova Post вимагає insuranceCost > 0, тож нульова вартість (безкоштовні товари)
+ * давала б відмову перевізника і резервні тарифи Shopify. Немає курсу → null.
+ */
+export function minimumDeclaredAmount(currency: string, fxRates: PricingSettings["fxRates"], fxBaseCurrency: string): string | null {
+  const target = normalizeCurrency(currency);
+  const base = normalizeCurrency(fxBaseCurrency);
+  if (!target || !base) return null;
+  const factor = conversionFactor(base, target, fxRates, base);
+  if (!factor) return null;
+  return fromMinor(ceilDiv(ceilDiv(CENTS * factor.num, factor.den), CENTS) * CENTS);
+}
+
+/**
+ * Ціле значення в найменших одиницях валюти (як `items[].price` у запиті Shopify) → десятковий рядок.
+ * Одиниця `items[].price` у документації прямо не названа (приклад 1999 узгоджується з центами); для
+ * `order_totals` — «integer in the smallest unit of the shop's currency (for example, cents)».
  * Для валют без дробових одиниць найменша одиниця = ціла (JPY 1000 → "1000.00"); 3 знаки → округлення вгору до 2.
  */
 export function subunitsToDecimal(subunits: bigint, currency: string): string {

@@ -38,7 +38,14 @@ import type { AllSettings } from "~/modules/settings/schema";
 import { getSettings } from "~/modules/settings/settings.server";
 import { computeParcelWeights } from "~/modules/shipments/weight";
 import type { ServiceContext } from "~/server/types";
-import { canPriceInCurrency, priceCheckoutRate, subunitsToDecimal, type PricingFailure, type PricingResult } from "./pricing";
+import {
+  canPriceInCurrency,
+  minimumDeclaredAmount,
+  priceCheckoutRate,
+  subunitsToDecimal,
+  type PricingFailure,
+  type PricingResult,
+} from "./pricing";
 
 // ---------------------------------------------------------------------------
 // Константи
@@ -69,6 +76,15 @@ export const CHECKOUT_RATES_CACHE_MAX_ENTRIES = 500;
 
 /** Shopify: service_code «must be stable and consistent across requests» — без дат, сесій, ідентифікаторів запиту. */
 const SERVICE_CODE_MAX_LENGTH = 64;
+
+/**
+ * `phone_required` у кожному тарифі: перевізник (Nova Post: recipient.phone — обов'язкове поле накладної) без телефону
+ * накладну не створить, і замовлення пішло б у ручний розгляд. Поле задокументоване («Whether the customer must provide
+ * a phone number at checkout»), але його ТИП у таблиці не вказано і в прикладах його немає — boolean лише за змістом
+ * (НЕ ЗАДОКУМЕНТОВАНО). Перевірити на тестовому магазині: Checkout вимагає телефон для цього тарифу, тарифи показуються.
+ * Якщо Shopify відкидає відповідь із цим полем — поставити false (поле тоді не надсилається).
+ */
+export const SHOPIFY_RATE_PHONE_REQUIRED = true;
 
 // ---------------------------------------------------------------------------
 // Розбір запиту Shopify
@@ -112,12 +128,6 @@ const itemSchema = z.object({
   variant_id: idLike,
 });
 
-const orderTotalsSchema = z.object({
-  subtotal_price: intLike(1e15).nullish(),
-  total_price: intLike(1e15).nullish(),
-  discount_amount: intLike(1e15).nullish(),
-});
-
 export const rateRequestSchema = z.object({
   rate: z.object({
     origin: addressSchema.nullish(),
@@ -129,7 +139,8 @@ export const rateRequestSchema = z.object({
       .regex(/^[A-Za-z]{3}$/)
       .transform((s) => s.toUpperCase()),
     locale: optStr,
-    order_totals: orderTotalsSchema.nullish(),
+    // `order_totals` свідомо НЕ розбираємо (і не використовуємо — див. «Оголошена вартість» у computeCheckoutRates):
+    // невикористане поле не повинно відхиляти запит (400 → резервні тарифи). zod відкидає невідомі ключі.
   }),
 });
 
@@ -159,6 +170,8 @@ export interface ShopifyRate {
   service_code: string;
   currency: string;
   total_price: string;
+  /** Див. SHOPIFY_RATE_PHONE_REQUIRED. */
+  phone_required?: boolean;
 }
 
 export interface CheckoutRatesResponse {
@@ -201,7 +214,7 @@ interface CacheEntry {
 
 const cache = new Map<string, CacheEntry>();
 
-/** Очищення кешу тарифів (тести; зміна налаштувань перевізника). */
+/** Очищення кешу тарифів (тести). Зміна налаштувань перевізника кеш не потребує очищати — див. carrierSettingsFingerprint. */
 export function clearCheckoutRatesCache(): void {
   cache.clear();
 }
@@ -232,8 +245,25 @@ function cacheSet(key: string, quotes: RateQuote[], nowMs: number): void {
 
 const norm = (s: string | null | undefined) => (s ?? "").trim().toUpperCase().replace(/\s+/g, " ");
 
-/** Ключ — SHA-256 (у пам'яті не зберігаються адреси у відкритому вигляді). */
-function cacheKey(carrier: CarrierAdapter, req: RateRequest): string {
+/**
+ * Налаштування, від яких залежить ціна перевізника, але яких немає в RateRequest: Nova Post бере з налаштувань
+ * платника, договір, тип тарифу, відділення відправника (замість міста/індексу), ЄДРПОУ/назву (індивідуальна знижка)
+ * і курси для перерахунку оголошеної вартості; тестовий перевізник — свої тарифи. Зміна будь-якого з них дає новий ключ,
+ * тож Checkout не показує старі ціни до 10 хв після збереження (окремий виклик clearCheckoutRatesCache не потрібен).
+ * Новий перевізник із власним розділом налаштувань — додати розділ сюди.
+ */
+function carrierSettingsFingerprint(settings: AllSettings): unknown {
+  return {
+    shipper: settings.shipper,
+    customs: settings.customs,
+    novaPost: settings.novaPost,
+    testCarrier: settings.testCarrier,
+    fxRates: settings.checkoutRates.fxRates,
+  };
+}
+
+/** Ключ — SHA-256 (у пам'яті не зберігаються адреси й налаштування у відкритому вигляді). */
+function cacheKey(carrier: CarrierAdapter, req: RateRequest, settings: AllSettings): string {
   const parcel = req.parcels[0];
   const bucket = parcel ? Math.ceil(parcel.chargeableWeightGrams / RATE_WEIGHT_STEP_GRAMS) * RATE_WEIGHT_STEP_GRAMS : 0;
   const parts = [
@@ -252,6 +282,7 @@ function cacheKey(carrier: CarrierAdapter, req: RateRequest): string {
     req.declaredValue.amount,
     req.declaredValue.currency,
     req.incoterm ?? "",
+    carrierSettingsFingerprint(settings),
   ];
   return createHash("sha256").update(JSON.stringify(parts)).digest("base64url");
 }
@@ -389,7 +420,7 @@ async function runQuote(
     incoterm: settings.customs.incoterm,
   };
 
-  const key = cacheKey(carrier, request);
+  const key = cacheKey(carrier, request, settings);
   if (opts.useCache) {
     const hit = cacheGet(key, deps.now().getTime());
     if (hit) return { kind: "quoted", carrier, parcel, quotes: hit, cached: true };
@@ -462,6 +493,7 @@ function toShopifyRates(carrier: CarrierAdapter, priced: PricedQuote[], settings
       service_code: serviceCode,
       currency,
       total_price: shopifyTotalPrice(cents),
+      ...(SHOPIFY_RATE_PHONE_REQUIRED ? { phone_required: true } : {}),
     };
   });
 }
@@ -575,12 +607,24 @@ export async function computeCheckoutRates(deps: CheckoutRatesDeps, request: Sho
       return finish("missing_weight", 200);
     }
 
-    // Оголошена вартість: order_totals.total_price (лише коли Shopify має підсумки кошика) або Σ ціна × кількість.
-    const totalSubunits =
-      rate.order_totals?.total_price !== null && rate.order_totals?.total_price !== undefined
-        ? BigInt(rate.order_totals.total_price)
-        : shippable.reduce((acc, i) => acc + BigInt(i.price ?? 0) * BigInt(i.quantity), 0n);
-    const declaredValue: Money = { amount: subunitsToDecimal(totalSubunits, rate.currency), currency: rate.currency };
+    // Оголошена вартість = Σ price × quantity товарів З ДОСТАВКОЮ саме цього запиту (до знижок).
+    // order_totals НЕ використовуємо (документація, «Order totals»): підсумки охоплюють увесь кошик — зокрема товари
+    // без доставки й товари інших запитів, коли Shopify ділить кошик за складом/профілем доставки; вони «in the smallest
+    // unit of the shop's currency», а чи збігається валюта магазину з `rate.currency` — НЕ ЗАДОКУМЕНТОВАНО; total_price
+    // може бути 0 (знижка 100 %); підсумків немає в ключі кешу тарифів Shopify (зміна знижки кеш не оновлює).
+    // Без знижки вартість не менша за фактичну — страховий збір не занижується.
+    // Припущення: `items[].price` — у валюті `rate.currency` (валюту цін товарів НЕ ЗАДОКУМЕНТОВАНО; перевірити
+    // на тестовому магазині з покупцем в іншій валюті).
+    const itemsSubunits = shippable.reduce((acc, i) => acc + BigInt(i.price ?? 0) * BigInt(i.quantity), 0n);
+    let declaredAmount = subunitsToDecimal(itemsSubunits, rate.currency);
+    if (toMinor(declaredAmount) === 0n) {
+      // Безкоштовні товари: перевізник вимагає вартість > 0 — мінімум (1 одиниця валюти тарифу, ціла одиниця кошика).
+      const minimum = minimumDeclaredAmount(rate.currency, settings.checkoutRates.fxRates, fxBaseCurrency(settings));
+      if (minimum === null) return finish("no_fx_rate", 200); // недосяжно: курс перевірено вище
+      declaredAmount = minimum;
+      log.declaredValueMinimum = true;
+    }
+    const declaredValue: Money = { amount: declaredAmount, currency: rate.currency };
 
     const destination: CarrierAddress = {
       countryCode: country,

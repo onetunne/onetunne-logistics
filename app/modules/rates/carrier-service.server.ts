@@ -3,8 +3,9 @@
  *
  * Shopify НЕ підписує запити до callbackUrl (жодних HMAC/заголовків у документації CarrierService — НЕ ЗАДОКУМЕНТОВАНО),
  * тому адреса містить секретний токен: HMAC-SHA256(SHOPIFY_API_SECRET, "carrier-service:v1:" + shop), base64url, 32 символи
- * (192 біти). Токен не логується й не повертається в UI. Після зміни SHOPIFY_API_SECRET токен змінюється —
- * потрібно повторно зареєструвати сервіс (кнопка «Підключити» оновить адресу).
+ * (192 біти). Токен не логується застосунком і не повертається в UI; журнал HTTP-запитів (server.mjs) мусить маскувати
+ * шлях `/carrier-service/<токен>`. Після зміни SHOPIFY_API_SECRET токен змінюється — потрібно повторно зареєструвати
+ * сервіс (кнопка «Підключити» оновить адресу); вимкнення й видалення знаходять застарілий сервіс так само, як статус.
  *
  * Доступ: `write_shipping` (мутації), `read_shipping` (запит; входить у write_shipping).
  * Вимога тарифного плану магазину (Advanced або вище / Shopify з річною оплатою / dev-магазин не на Basic) —
@@ -177,13 +178,21 @@ export interface RegisterCarrierServiceResult {
   active: boolean;
 }
 
-/** Створює сервіс (active, supportsServiceDiscovery) або оновлює наявний (адреса, назва, active). */
-export async function registerCarrierService(admin: AdminGraphql, params: CarrierServiceParams): Promise<RegisterCarrierServiceResult> {
+/**
+ * Єдиний пошук нашого сервісу для реєстрації, статусу, вимкнення й видалення (однакові правила збігу, зокрема
+ * за назвою після зміни секрету) — інакше статус бачив би застарілий сервіс, а «Вимкнути» повертало б not_found.
+ */
+async function locateOurCarrierService(admin: AdminGraphql, params: CarrierServiceParams) {
   const name = params.name?.trim() || DEFAULT_CARRIER_SERVICE_NAME;
   const token = carrierServiceToken(params.secret, params.shop);
   const callbackUrl = carrierServiceCallbackUrl(params.appUrl, token);
-  const secrets = [callbackUrl, token];
   const found = await findOurCarrierService(admin, callbackUrl, name);
+  return { name, callbackUrl, secrets: [callbackUrl, token], found };
+}
+
+/** Створює сервіс (active, supportsServiceDiscovery) або оновлює наявний (адреса, назва, active). */
+export async function registerCarrierService(admin: AdminGraphql, params: CarrierServiceParams): Promise<RegisterCarrierServiceResult> {
+  const { name, callbackUrl, secrets, found } = await locateOurCarrierService(admin, params);
 
   if (!found) {
     const input: CarrierServiceCreateInput = { name, callbackUrl, active: true, supportsServiceDiscovery: true };
@@ -211,14 +220,12 @@ export async function deactivateCarrierService(
   admin: AdminGraphql,
   params: CarrierServiceParams,
 ): Promise<{ id: string | null; result: "deactivated" | "not_found" | "unchanged" }> {
-  const token = carrierServiceToken(params.secret, params.shop);
-  const callbackUrl = carrierServiceCallbackUrl(params.appUrl, token);
-  const found = await findOurCarrierService(admin, callbackUrl);
+  const { secrets, found } = await locateOurCarrierService(admin, params);
   if (!found) return { id: null, result: "not_found" };
   if (!found.service.active) return { id: found.service.id, result: "unchanged" };
   const input: CarrierServiceUpdateInput = { id: found.service.id, active: false };
   const data = await admin<CarrierServiceUpdateData>(CARRIER_SERVICE_UPDATE_MUTATION, { input });
-  throwUserErrors("update", data.carrierServiceUpdate.userErrors, [callbackUrl, token]);
+  throwUserErrors("update", data.carrierServiceUpdate.userErrors, secrets);
   return { id: found.service.id, result: "deactivated" };
 }
 
@@ -227,12 +234,10 @@ export async function unregisterCarrierService(
   admin: AdminGraphql,
   params: CarrierServiceParams,
 ): Promise<{ deletedId: string | null; result: "deleted" | "not_found" }> {
-  const token = carrierServiceToken(params.secret, params.shop);
-  const callbackUrl = carrierServiceCallbackUrl(params.appUrl, token);
-  const found = await findOurCarrierService(admin, callbackUrl);
+  const { secrets, found } = await locateOurCarrierService(admin, params);
   if (!found) return { deletedId: null, result: "not_found" };
   const data = await admin<CarrierServiceDeleteData>(CARRIER_SERVICE_DELETE_MUTATION, { id: found.service.id });
-  throwUserErrors("delete", data.carrierServiceDelete.userErrors, [callbackUrl, token]);
+  throwUserErrors("delete", data.carrierServiceDelete.userErrors, secrets);
   return { deletedId: data.carrierServiceDelete.deletedId ?? found.service.id, result: "deleted" };
 }
 
@@ -246,9 +251,7 @@ export interface CarrierServiceStatus {
 }
 
 export async function carrierServiceStatus(admin: AdminGraphql, params: CarrierServiceParams): Promise<CarrierServiceStatus> {
-  const name = params.name?.trim() || DEFAULT_CARRIER_SERVICE_NAME;
-  const callbackUrl = carrierServiceCallbackUrl(params.appUrl, carrierServiceToken(params.secret, params.shop));
-  const found = await findOurCarrierService(admin, callbackUrl, name);
+  const { found } = await locateOurCarrierService(admin, params);
   if (!found) return { registered: false, active: false, id: null, name: null, callbackUrlCurrent: false };
   return {
     registered: true,
@@ -267,6 +270,8 @@ export interface CarrierServiceEnv {
   appUrl?: string | null;
   secret?: string | null;
   adminFor?: (shop: string) => Promise<AdminGraphql>;
+  /** Назва сервісу (порожньо — DEFAULT_CARRIER_SERVICE_NAME). Однакова для підключення, статусу й вимкнення. */
+  name?: string;
 }
 
 export type CarrierServiceUnavailable =
@@ -292,7 +297,7 @@ async function prepare(
   if (!shop) return { ok: false, reason: "not_installed" };
   if (!hasScope(shop.scopes, CARRIER_SERVICE_SCOPE)) return { ok: false, reason: "missing_scope", scope: CARRIER_SERVICE_SCOPE };
   const admin = await (env.adminFor ?? adminClientFor)(shop.shop);
-  return { ok: true, admin, params: { appUrl, secret, shop: shop.shop } };
+  return { ok: true, admin, params: { appUrl, secret, shop: shop.shop, name: env.name } };
 }
 
 export async function getCarrierServiceStatus(
@@ -306,11 +311,11 @@ export async function getCarrierServiceStatus(
 
 export async function enableCarrierService(
   ctx: ServiceContext,
-  env: CarrierServiceEnv & { name?: string } = {},
+  env: CarrierServiceEnv = {},
 ): Promise<CarrierServiceOutcome<RegisterCarrierServiceResult>> {
   const p = await prepare(ctx, env);
   if (!p.ok) return p;
-  const value = await registerCarrierService(p.admin, { ...p.params, name: env.name });
+  const value = await registerCarrierService(p.admin, p.params);
   await writeAudit(ctx.db, ctx.actor, "carrier_service.register", { type: "carrier_service", id: value.id }, { result: value.result });
   return { ok: true, value };
 }
