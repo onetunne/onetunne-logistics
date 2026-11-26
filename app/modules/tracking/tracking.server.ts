@@ -1,0 +1,403 @@
+/**
+ * Відстеження посилок (етап 3).
+ *
+ * - Періодичне опитування перевізників (фонове завдання tracking.poll) і ручне оновлення з картки замовлення.
+ * - Події зберігаються без персональних даних (shipment_tracking_events), дедуплікація за (час, код).
+ * - Статус замовлення змінюється лише дозволеними переходами (domain/order-status). «Передано перевізнику» —
+ *   лише за фактом (статус перевізника «прийнято»/далі або підтвердження менеджера), не після створення накладної.
+ * - Після фактичної передачі трек-номер передається в Shopify (через ShopifyGateway → черга), якщо увімкнено.
+ * - Проблеми доставки → розділ «Проблеми» (DELIVERY_PROBLEM); видалення накладної у перевізника → CARRIER_SHIPMENT_DELETED.
+ */
+import { and, asc, eq, inArray, isNotNull, isNull, lt, notInArray, or, sql } from "drizzle-orm";
+import type { DbOrTx } from "~/db/client.server";
+import { issues, orders, shipmentEvents, shipments, shipmentTrackingEvents } from "~/db/schema";
+import { canTransition, isShipped, type OrderStatus } from "~/domain/order-status";
+import { requirePermission } from "~/domain/permissions";
+import { DomainError, NotFoundError } from "~/lib/errors";
+import { logger } from "~/lib/logger.server";
+import { writeAudit } from "~/modules/audit/audit.server";
+import { enqueueJob } from "~/modules/jobs/queue.server";
+import { loadOrderRow, type OrderRow, type ShipmentRow } from "~/modules/orders/repository.server";
+import { getSetting } from "~/modules/settings/settings.server";
+import { JOB } from "~/modules/shopify-sync/sync.server";
+import type { CarrierAdapter, TrackingSnapshot, TrackingStatus } from "~/integrations/carriers/types";
+import type { ServiceContext } from "~/server/types";
+
+export const TRACKING_TIMEOUT_MS = 30_000;
+/** Не опитувати одне відправлення частіше (ручне оновлення — без обмеження). */
+export const MIN_POLL_AGE_MS = 15 * 60 * 1000;
+export const POLL_BATCH_LIMIT = 200;
+
+/** Статуси, з яких відправлення більше не опитується. */
+export const FINAL_TRACKING_STATUSES: readonly TrackingStatus[] = ["delivered", "returned", "cancelled"];
+
+/** Статуси, що означають: посилка фізично у перевізника (передачу виконано). */
+export const HANDOVER_TRACKING_STATUSES: readonly TrackingStatus[] = [
+  "accepted",
+  "in_transit",
+  "customs",
+  "out_for_delivery",
+  "delivered",
+  "failed_attempt",
+  "returned",
+  "lost",
+  "exception",
+];
+
+const PRE_HANDOVER_ORDER_STATUSES: readonly OrderStatus[] = ["waybill_created", "awaiting_picking", "packed"];
+const PROBLEM_TRACKING_STATUSES: readonly TrackingStatus[] = ["failed_attempt", "lost", "exception"];
+
+/** Цільовий статус замовлення для статусу відстеження (null — статус замовлення не змінюється). */
+export function orderStatusForTracking(status: TrackingStatus): OrderStatus | null {
+  switch (status) {
+    case "accepted":
+      return "handed_to_carrier";
+    case "in_transit":
+    case "out_for_delivery":
+      return "in_transit";
+    case "customs":
+      return "customs";
+    case "delivered":
+      return "delivered";
+    case "failed_attempt":
+    case "lost":
+    case "exception":
+      return "delivery_problem";
+    case "returned":
+      return "returned";
+    case "created":
+    case "cancelled":
+    case "unknown":
+      return null;
+  }
+}
+
+/**
+ * Послідовність дозволених переходів від поточного статусу до цільового.
+ * До передачі перевізнику спочатку фіксується «Передано перевізнику». Недозволений перехід → [] (без змін).
+ */
+export function planOrderTransitions(current: OrderStatus, target: OrderStatus | null): OrderStatus[] {
+  if (!target || current === target) return [];
+  if (PRE_HANDOVER_ORDER_STATUSES.includes(current) && isShipped(target)) {
+    if (!canTransition(current, "handed_to_carrier")) return [];
+    if (target === "handed_to_carrier") return ["handed_to_carrier"];
+    return canTransition("handed_to_carrier", target) ? ["handed_to_carrier", target] : ["handed_to_carrier"];
+  }
+  return canTransition(current, target) ? [target] : [];
+}
+
+function firstHandoverTime(snapshot: TrackingSnapshot): Date | null {
+  const ev = snapshot.events.find((e) => HANDOVER_TRACKING_STATUSES.includes(e.status));
+  if (ev) return ev.occurredAt;
+  return HANDOVER_TRACKING_STATUSES.includes(snapshot.status) ? snapshot.statusAt : null;
+}
+
+async function openTrackingIssue(
+  tx: DbOrTx,
+  orderId: string,
+  shipmentId: string,
+  code: "DELIVERY_PROBLEM" | "CARRIER_SHIPMENT_DELETED",
+  params: Record<string, string | number>,
+) {
+  const fingerprint = `${orderId}:${code}:`;
+  const [existing] = await tx
+    .select({ id: issues.id })
+    .from(issues)
+    .where(and(eq(issues.fingerprint, fingerprint), eq(issues.status, "open")));
+  if (existing) {
+    await tx.update(issues).set({ params, shipmentId, updatedAt: new Date() }).where(eq(issues.id, existing.id));
+    return;
+  }
+  await tx.insert(issues).values({
+    orderId,
+    shipmentId,
+    code,
+    severity: code === "DELIVERY_PROBLEM" ? "warning" : "error",
+    field: null,
+    params,
+    fingerprint,
+  });
+}
+
+async function resolveIssues(tx: DbOrTx, orderId: string, codes: string[], actorId: string, resolution: string) {
+  await tx
+    .update(issues)
+    .set({ status: "resolved", resolvedAt: new Date(), resolvedBy: actorId, resolution, updatedAt: new Date() })
+    .where(and(eq(issues.orderId, orderId), eq(issues.status, "open"), inArray(issues.code, codes)));
+}
+
+async function applyOrderSteps(tx: DbOrTx, ctx: ServiceContext, order: OrderRow, steps: OrderStatus[], source: string) {
+  let version = order.version;
+  let from = order.status;
+  for (const status of steps) {
+    version += 1;
+    await tx.update(orders).set({ status, version, updatedAt: ctx.now() }).where(eq(orders.id, order.id));
+    await writeAudit(tx, ctx.actor, "order.status_changed", { type: "order", id: order.id }, { from, to: status, source });
+    from = status;
+  }
+}
+
+export interface ApplyTrackingResult {
+  changed: boolean;
+  newlyHandedOver: boolean;
+  orderStatus: OrderStatus;
+}
+
+/**
+ * Застосовує знімок відстеження до відправлення (одна транзакція, compare-and-set за станом created).
+ * Повертає, чи відбулася фактична передача вперше (тоді викликається передача трек-номера в Shopify).
+ */
+export async function applyTrackingSnapshot(
+  ctx: ServiceContext,
+  shipmentId: string,
+  snapshot: TrackingSnapshot,
+  carrierName: string,
+): Promise<ApplyTrackingResult | null> {
+  return ctx.db.transaction(async (tx) => {
+    const [shipment] = await tx.select().from(shipments).where(eq(shipments.id, shipmentId)).for("update");
+    if (!shipment) throw new NotFoundError("shipment");
+    if (shipment.status !== "created") return null;
+    const now = ctx.now();
+
+    if (snapshot.events.length > 0) {
+      await tx
+        .insert(shipmentTrackingEvents)
+        .values(
+          snapshot.events.map((e) => ({
+            shipmentId,
+            status: e.status,
+            code: e.code ?? "",
+            occurredAt: e.occurredAt,
+            location: e.location ? e.location.slice(0, 200) : null,
+            description: e.description ? e.description.slice(0, 300) : null,
+          })),
+        )
+        .onConflictDoNothing();
+    }
+
+    const handover = shipment.handedOverAt ?? (HANDOVER_TRACKING_STATUSES.includes(snapshot.status) || snapshot.events.some((e) => HANDOVER_TRACKING_STATUSES.includes(e.status))
+      ? (firstHandoverTime(snapshot) ?? now)
+      : null);
+    const deliveredAt = shipment.deliveredAt ?? (snapshot.status === "delivered" ? (snapshot.statusAt ?? now) : null);
+    const changed = shipment.carrierStatusCode !== snapshot.carrierStatusCode || shipment.trackingStatus !== snapshot.status;
+
+    await tx
+      .update(shipments)
+      .set({
+        trackingStatus: snapshot.status,
+        carrierStatusCode: snapshot.carrierStatusCode,
+        carrierStatusText: snapshot.carrierStatusText ? snapshot.carrierStatusText.slice(0, 200) : null,
+        carrierStatusAt: snapshot.statusAt,
+        lastTrackedAt: now,
+        handedOverAt: handover,
+        deliveredAt,
+        updatedAt: now,
+      })
+      .where(and(eq(shipments.id, shipmentId), eq(shipments.status, "created")));
+    if (changed) {
+      await tx.insert(shipmentEvents).values({
+        shipmentId,
+        type: "tracking_status",
+        message: null,
+        data: { status: snapshot.status, code: snapshot.carrierStatusCode },
+      });
+    }
+
+    const order = await loadOrderRow(tx, shipment.orderId, { forUpdate: true });
+    let orderStatus = order.status;
+    if (order.status !== "cancelled") {
+      // Якщо перевізник фактично прийняв посилку — фіксуємо передачу навіть при статусі «створено» зараз.
+      const target = orderStatusForTracking(snapshot.status) ?? (handover && !isShipped(order.status) ? "handed_to_carrier" : null);
+      const steps = planOrderTransitions(order.status, target);
+      await applyOrderSteps(tx, ctx, order, steps, "tracking");
+      orderStatus = steps.at(-1) ?? order.status;
+    }
+
+    if (PROBLEM_TRACKING_STATUSES.includes(snapshot.status)) {
+      await openTrackingIssue(tx, order.id, shipmentId, "DELIVERY_PROBLEM", {
+        carrier: carrierName,
+        code: snapshot.carrierStatusCode ?? "—",
+        status: snapshot.carrierStatusText ?? snapshot.status,
+      });
+    } else if (["in_transit", "customs", "out_for_delivery", "delivered"].includes(snapshot.status)) {
+      await resolveIssues(tx, order.id, ["DELIVERY_PROBLEM"], ctx.actor.id, "tracking_recovered");
+    }
+    if (snapshot.status === "cancelled" && !handover) {
+      await openTrackingIssue(tx, order.id, shipmentId, "CARRIER_SHIPMENT_DELETED", {
+        carrier: carrierName,
+        waybill: shipment.waybillNumber ?? "—",
+      });
+    }
+
+    const newlyHandedOver = !shipment.handedOverAt && Boolean(handover);
+    if (newlyHandedOver) {
+      await tx.insert(shipmentEvents).values({ shipmentId, type: "handed_over", message: "tracking", data: { code: snapshot.carrierStatusCode } });
+      await writeAudit(tx, ctx.actor, "shipment.handed_over", { type: "shipment", id: shipmentId }, { orderId: order.id, source: "tracking" });
+    }
+    return { changed, newlyHandedOver, orderStatus };
+  });
+}
+
+/** Передача трек-номера в Shopify після фактичної передачі (якщо увімкнено в налаштуваннях). */
+export async function requestShopifyFulfillment(ctx: ServiceContext, shipmentId: string): Promise<string> {
+  const tracking = await getSetting(ctx.db, "tracking");
+  if (!tracking.pushToShopify) return "disabled";
+  const [row] = await ctx.db
+    .select({ shipment: shipments, shopifyOrderId: orders.shopifyOrderId })
+    .from(shipments)
+    .innerJoin(orders, eq(orders.id, shipments.orderId))
+    .where(eq(shipments.id, shipmentId));
+  if (!row || row.shipment.status !== "created" || !row.shipment.handedOverAt || row.shipment.shopifyFulfilledAt) return "skipped";
+  const result = await ctx.shopify.requestFulfillment({ shopifyOrderId: row.shopifyOrderId, shipmentId });
+  return result.status === "skipped" ? `skipped:${result.reason}` : result.status;
+}
+
+/**
+ * Ручне підтвердження передачі перевізнику (менеджер передав посилку у відділенні),
+ * коли перевізник не підтримує відстеження або статус ще не оновився.
+ */
+export async function markHandedOver(ctx: ServiceContext, shipmentId: string): Promise<void> {
+  requirePermission(ctx.actor, "waybills.manage");
+  await ctx.db.transaction(async (tx) => {
+    const [shipment] = await tx.select().from(shipments).where(eq(shipments.id, shipmentId)).for("update");
+    if (!shipment) throw new NotFoundError("shipment");
+    if (shipment.status !== "created") throw new DomainError("waybill.notActive", 409);
+    const order = await loadOrderRow(tx, shipment.orderId, { forUpdate: true });
+    if (shipment.handedOverAt || isShipped(order.status)) throw new DomainError("shipment.alreadyHandedOver", 409);
+    const steps = planOrderTransitions(order.status, "handed_to_carrier");
+    if (steps.length === 0) throw new DomainError("order.notEditable", 409, { status: order.status });
+    await tx
+      .update(shipments)
+      .set({ handedOverAt: ctx.now(), updatedAt: ctx.now() })
+      .where(and(eq(shipments.id, shipmentId), eq(shipments.status, "created"), isNull(shipments.handedOverAt)));
+    await applyOrderSteps(tx, ctx, order, steps, "manual");
+    await tx.insert(shipmentEvents).values({ shipmentId, type: "handed_over", message: "manual", data: null });
+    await writeAudit(tx, ctx.actor, "shipment.handed_over", { type: "shipment", id: shipmentId }, { orderId: order.id, source: "manual" });
+  });
+  await requestShopifyFulfillment(ctx, shipmentId);
+}
+
+function trackable(adapter: CarrierAdapter | undefined): adapter is CarrierAdapter & Required<Pick<CarrierAdapter, "getTracking">> {
+  return Boolean(adapter?.capabilities.tracking && adapter.getTracking);
+}
+
+export interface PollSummary {
+  checked: number;
+  updated: number;
+  handedOver: number;
+  failedCarriers: string[];
+}
+
+async function trackShipments(ctx: ServiceContext, rows: ShipmentRow[]): Promise<PollSummary> {
+  const summary: PollSummary = { checked: 0, updated: 0, handedOver: 0, failedCarriers: [] };
+  const byCarrier = new Map<string, ShipmentRow[]>();
+  for (const r of rows) byCarrier.set(r.carrierCode, [...(byCarrier.get(r.carrierCode) ?? []), r]);
+  for (const [code, list] of byCarrier) {
+    const adapter = ctx.carriers.get(code);
+    if (!trackable(adapter)) continue;
+    const numbers = [...new Set(list.map((s) => s.waybillNumber).filter((n): n is string => Boolean(n)))];
+    let snapshots: TrackingSnapshot[];
+    try {
+      snapshots = await adapter.getTracking(numbers, { signal: AbortSignal.timeout(TRACKING_TIMEOUT_MS) });
+    } catch (e) {
+      summary.failedCarriers.push(code);
+      logger.warn("tracking.carrier_failed", { carrier: code, count: numbers.length, error: e });
+      continue;
+    }
+    const byNumber = new Map(snapshots.map((s) => [s.waybillNumber, s]));
+    for (const shipment of list) {
+      summary.checked++;
+      const snapshot = shipment.waybillNumber ? byNumber.get(shipment.waybillNumber) : undefined;
+      if (!snapshot) {
+        await ctx.db
+          .update(shipments)
+          .set({ lastTrackedAt: ctx.now() })
+          .where(and(eq(shipments.id, shipment.id), eq(shipments.status, "created")));
+        continue;
+      }
+      const result = await applyTrackingSnapshot(ctx, shipment.id, snapshot, adapter.displayName);
+      if (result?.changed) summary.updated++;
+      if (result?.newlyHandedOver) {
+        summary.handedOver++;
+        await requestShopifyFulfillment(ctx, shipment.id).catch((e) => logger.warn("tracking.fulfillment_request_failed", { error: e }));
+      }
+    }
+  }
+  return summary;
+}
+
+/** Відправлення, які ще потребують відстеження. */
+export async function shipmentsDueForTracking(db: DbOrTx, now: Date, limit = POLL_BATCH_LIMIT, minAgeMs = MIN_POLL_AGE_MS) {
+  const before = new Date(now.getTime() - minAgeMs);
+  const rows = await db
+    .select({ shipment: shipments })
+    .from(shipments)
+    .innerJoin(orders, eq(orders.id, shipments.orderId))
+    .where(
+      and(
+        eq(shipments.status, "created"),
+        isNotNull(shipments.waybillNumber),
+        or(isNull(shipments.trackingStatus), notInArray(shipments.trackingStatus, [...FINAL_TRACKING_STATUSES])),
+        notInArray(orders.status, ["delivered", "returned", "cancelled"]),
+        or(isNull(shipments.lastTrackedAt), lt(shipments.lastTrackedAt, before)),
+      ),
+    )
+    .orderBy(sql`${shipments.lastTrackedAt} asc nulls first`, asc(shipments.createdAt))
+    .limit(limit);
+  return rows.map((r) => r.shipment);
+}
+
+/** Повторно ставить у чергу передачу трек-номерів, якщо попередня постановка не відбулася (збій між кроками). */
+async function ensurePendingFulfillments(ctx: ServiceContext): Promise<number> {
+  const rows = await ctx.db
+    .select({ id: shipments.id })
+    .from(shipments)
+    .innerJoin(orders, eq(orders.id, shipments.orderId))
+    .where(
+      and(
+        eq(shipments.status, "created"),
+        isNotNull(shipments.handedOverAt),
+        isNull(shipments.shopifyFulfilledAt),
+        isNotNull(orders.shopifyOrderId),
+        eq(orders.source, "shopify"),
+      ),
+    )
+    .limit(50);
+  let queued = 0;
+  for (const r of rows) if ((await requestShopifyFulfillment(ctx, r.id)) === "queued") queued++;
+  return queued;
+}
+
+/** Одне опитування (фонове завдання). Помилки перевізника не зупиняють інших перевізників. */
+export async function pollTracking(ctx: ServiceContext, opts: { limit?: number } = {}): Promise<PollSummary> {
+  const rows = await shipmentsDueForTracking(ctx.db, ctx.now(), opts.limit ?? POLL_BATCH_LIMIT);
+  const summary = await trackShipments(ctx, rows);
+  if (ctx.mode === "production") await ensurePendingFulfillments(ctx);
+  logger.info("tracking.poll", { ...summary, failedCarriers: summary.failedCarriers.join(",") });
+  return summary;
+}
+
+/** Ручне оновлення статусу одного відправлення з картки замовлення. */
+export async function refreshShipmentTracking(ctx: ServiceContext, shipmentId: string): Promise<PollSummary> {
+  requirePermission(ctx.actor, "waybills.create");
+  const [shipment] = await ctx.db.select().from(shipments).where(eq(shipments.id, shipmentId));
+  if (!shipment) throw new NotFoundError("shipment");
+  if (shipment.status !== "created" || !shipment.waybillNumber) throw new DomainError("waybill.notActive", 409);
+  if (!trackable(ctx.carriers.get(shipment.carrierCode))) throw new DomainError("tracking.notSupported", 409);
+  const summary = await trackShipments(ctx, [shipment]);
+  if (summary.failedCarriers.length > 0) throw new DomainError("tracking.carrierUnavailable", 503);
+  return summary;
+}
+
+/** Планує наступне опитування (одне очікуване завдання завдяки dedupeKey). */
+export async function scheduleTrackingPoll(db: DbOrTx, runAt: Date): Promise<boolean> {
+  return enqueueJob(db, JOB.trackingPoll, {}, { dedupeKey: JOB.trackingPoll, runAt, maxAttempts: 3 });
+}
+
+/** Обробник завдання tracking.poll: спершу планує наступне (ланцюжок не обривається при збої), потім опитує. */
+export async function runTrackingPollJob(ctx: ServiceContext): Promise<PollSummary | null> {
+  const settings = await getSetting(ctx.db, "tracking");
+  await scheduleTrackingPoll(ctx.db, new Date(ctx.now().getTime() + settings.intervalMinutes * 60_000));
+  if (!settings.enabled) return null;
+  return pollTracking(ctx);
+}

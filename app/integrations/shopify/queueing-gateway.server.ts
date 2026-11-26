@@ -29,4 +29,18 @@ export class QueueingShopifyGateway implements ShopifyGateway {
   updateOrderContact(shopifyOrderId: string | null) {
     return this.queue(shopifyOrderId);
   }
+
+  /** Одне завдання на відправлення; обробник сам перевіряє, чи виконання вже створено (ідемпотентність). */
+  async requestFulfillment(input: { shopifyOrderId: string | null; shipmentId: string }): Promise<ShopifySyncResult> {
+    if (!input.shopifyOrderId) return { status: "skipped", reason: "not_linked" };
+    const shop = await this.shop();
+    if (!shop) return { status: "skipped", reason: "not_linked" };
+    await enqueueJob(
+      this.db,
+      JOB.fulfillShipment,
+      { shop, shopifyOrderId: input.shopifyOrderId, shipmentId: input.shipmentId },
+      { dedupeKey: `fulfill:${input.shipmentId}`, maxAttempts: 8 },
+    );
+    return { status: "queued" };
+  }
 }

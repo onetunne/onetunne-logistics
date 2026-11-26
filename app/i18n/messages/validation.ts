@@ -81,6 +81,15 @@ const messages: MessageModule = {
     "issue.CARRIER_RESULT_UNKNOWN.title": "Результат створення невідомий",
     "issue.CARRIER_RESULT_UNKNOWN.help":
       "Невідомо, чи створив перевізник накладну: зв'язок обірвався до отримання відповіді. Система перевірила відправлення за нашим референсом або не змогла цього перевірити, тому повторне створення заблоковано, щоб уникнути дубліката. Перевірте в кабінеті перевізника: якщо накладна існує — прив'яжіть її номер до замовлення, якщо ні — підтвердьте, що її не створено.",
+    "issue.SHOPIFY_FULFILLMENT_FAILED.title": "Трек-номер не передано в Shopify",
+    "issue.SHOPIFY_FULFILLMENT_FAILED.help":
+      "Посилку передано перевізнику, але виконання з трек-номером у Shopify не створено після кількох спроб ({message}). Перевірте дозволи застосунку (write_merchant_managed_fulfillment_orders) і повторіть на сторінці «Синхронізація Shopify».",
+    "issue.DELIVERY_PROBLEM.title": "Проблема з доставкою",
+    "issue.DELIVERY_PROBLEM.help":
+      "{carrier} повідомляє: «{status}» (код {code}). Перевірте відправлення в кабінеті перевізника та за потреби зв’яжіться з клієнтом.",
+    "issue.CARRIER_SHIPMENT_DELETED.title": "Накладну видалено у перевізника",
+    "issue.CARRIER_SHIPMENT_DELETED.help":
+      "За даними відстеження {carrier} накладну {waybill} видалено, хоча в застосунку вона активна. Перевірте в кабінеті перевізника; якщо накладну справді видалено — скасуйте її в застосунку та створіть нову.",
     "issue.SHOPIFY_COUNTRY_NOT_SHIPPED.title": "Країни немає в зонах доставки Shopify",
     "issue.SHOPIFY_COUNTRY_NOT_SHIPPED.help":
       "Shopify приймає адресу замовлення лише для країн із зон доставки магазину; для {country} її немає (зараз: {shipsTo}). Активний ринок (Markets) сам цього не додає. Додайте {country} до зони доставки: Shopify → Налаштування → Доставка → профіль доставки → зона, потім збережіть адресу ще раз.",
@@ -202,6 +211,15 @@ const messages: MessageModule = {
     "issue.CARRIER_RESULT_UNKNOWN.title": "Creation result unknown",
     "issue.CARRIER_RESULT_UNKNOWN.help":
       "It is unknown whether the carrier created the waybill: the connection dropped before a response arrived. The system checked for the shipment by our reference or could not check, so re-creation is blocked to avoid a duplicate. Check the carrier's portal: if the waybill exists, link its number to the order; if not, confirm that it was not created.",
+    "issue.SHOPIFY_FULFILLMENT_FAILED.title": "Tracking number not sent to Shopify",
+    "issue.SHOPIFY_FULFILLMENT_FAILED.help":
+      "The parcel was handed to the carrier, but a Shopify fulfillment with the tracking number was not created after several attempts ({message}). Check the app permissions (write_merchant_managed_fulfillment_orders) and retry on the “Shopify sync” page.",
+    "issue.DELIVERY_PROBLEM.title": "Delivery problem",
+    "issue.DELIVERY_PROBLEM.help":
+      "{carrier} reports: “{status}” (code {code}). Check the shipment in the carrier portal and contact the customer if needed.",
+    "issue.CARRIER_SHIPMENT_DELETED.title": "Waybill deleted at the carrier",
+    "issue.CARRIER_SHIPMENT_DELETED.help":
+      "According to {carrier} tracking, waybill {waybill} was deleted although it is active in the app. Check the carrier portal; if it was really deleted, cancel it in the app and create a new one.",
     "issue.SHOPIFY_COUNTRY_NOT_SHIPPED.title": "Country is not in Shopify shipping zones",
     "issue.SHOPIFY_COUNTRY_NOT_SHIPPED.help":
       "Shopify accepts an order address only for countries in the store’s shipping zones; {country} is not there (currently: {shipsTo}). An active market (Markets) does not add it by itself. Add {country} to a shipping zone: Shopify → Settings → Shipping and delivery → shipping profile → zone, then save the address again.",
