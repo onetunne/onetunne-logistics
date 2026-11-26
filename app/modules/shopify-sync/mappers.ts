@@ -47,6 +47,8 @@ export interface MappedVariant {
   hsCode: string | null;
   countryOfOrigin: string | null;
   customsDescription: string | null;
+  customsDescriptionLocal: string | null;
+  material: string | null;
   imageUrl: string | null;
   inventoryAvailable: number | null;
   inventoryItemId: string | null;
@@ -76,6 +78,8 @@ function mapVariant(v: GqlVariant, product: GqlProduct, productImage: string | n
     hsCode: blank(v.inventoryItem?.harmonizedSystemCode),
     countryOfOrigin: blank(v.inventoryItem?.countryCodeOfOrigin)?.toUpperCase() ?? null,
     customsDescription: blank(product.customsDescription?.value),
+    customsDescriptionLocal: blank(product.customsDescriptionUk?.value),
+    material: blank(product.material?.value),
     imageUrl: v.image?.url ?? productImage,
     // Доступна для продажу кількість (сума по локаціях). Якщо Shopify не відстежує залишок — null, а не 0.
     inventoryAvailable: v.inventoryItem?.tracked === false ? null : typeof v.inventoryQuantity === "number" ? v.inventoryQuantity : null,

@@ -31,7 +31,8 @@ import { automationDecision, validateOrderInTx, validationOptions } from "~/modu
 import { REQUIRED_SHIPPER_FIELDS, type AllSettings } from "~/modules/settings/schema";
 import { getSettings } from "~/modules/settings/settings.server";
 import { computeParcelWeights } from "~/modules/shipments/weight";
-import { normalizeHsCode, validateOrder } from "~/modules/validation";
+import { validateOrder } from "~/modules/validation";
+import { buildCommercialInvoice, toCustomsDeclaration, toCustomsItems } from "~/modules/customs/invoice";
 import {
   CarrierError,
   type CarrierAdapter,
@@ -144,6 +145,7 @@ export function buildShipmentRequest(
   items: Awaited<ReturnType<typeof loadLineItems>>,
   settings: AllSettings,
   reference: string,
+  issuedAt?: Date,
 ): CreateShipmentRequest & { packageCode: string } {
   const pkg =
     settings.packaging.packages.find((p) => p.code === settings.packaging.defaultPackageCode) ??
@@ -154,6 +156,7 @@ export function buildShipmentRequest(
     volumetricDivisor: settings.packaging.volumetricDivisor,
   });
   const declared = addMoney("0.00", ...items.map((i) => multiplyMoney(i.unitPrice, i.quantity)));
+  const invoice = buildCommercialInvoice({ order, items, settings, issuedAt: issuedAt ?? new Date() });
   const s = settings.shipper;
   return {
     reference,
@@ -173,6 +176,9 @@ export function buildShipmentRequest(
         address2: s.address2 || null,
       },
       branchCode: s.carrierBranch || null,
+      taxId: s.taxId || null,
+      eori: s.eori || null,
+      ioss: s.ioss || null,
     },
     recipient: {
       name: [order.shipFirstName, order.shipLastName].filter(Boolean).join(" "),
@@ -197,15 +203,8 @@ export function buildShipmentRequest(
         ...weights,
       },
     ],
-    customsItems: items.map((i) => ({
-      sku: i.variant?.sku ?? i.sku,
-      description: i.variant?.customsDescription ?? "",
-      hsCode: normalizeHsCode(i.variant?.hsCode ?? "") ?? "",
-      countryOfOrigin: (i.variant?.countryOfOrigin ?? "").toUpperCase(),
-      quantity: i.quantity,
-      unitValue: { amount: i.unitPrice, currency: i.currency },
-      weightGrams: i.variant?.weightGrams ?? 0,
-    })),
+    customsItems: toCustomsItems(invoice),
+    customs: toCustomsDeclaration(invoice),
     declaredValue: { amount: declared, currency: order.currency },
   };
 }
@@ -218,7 +217,8 @@ function requestSnapshot(req: CreateShipmentRequest & { packageCode: string }) {
     packageCode: req.packageCode,
     destinationCountry: req.recipient.address.countryCode,
     parcels: req.parcels,
-    customsItems: req.customsItems.map((c) => ({ ...c, description: c.description })),
+    customsItems: req.customsItems,
+    customs: req.customs ?? null,
     declaredValue: req.declaredValue,
   };
 }
@@ -287,7 +287,7 @@ export async function createWaybill(
     let shipment: ShipmentRow;
     let request: CreateShipmentRequest & { packageCode: string };
     if (last && last.status === "failed") {
-      request = buildShipmentRequest(freshOrder, items, settings, last.carrierReference);
+      request = buildShipmentRequest(freshOrder, items, settings, last.carrierReference, ctx.now());
       const [row] = await tx
         .update(shipments)
         .set({
@@ -308,7 +308,7 @@ export async function createWaybill(
       shipment = row!;
     } else {
       const generation = (last?.generation ?? 0) + 1;
-      request = buildShipmentRequest(freshOrder, items, settings, referenceFor(freshOrder, generation));
+      request = buildShipmentRequest(freshOrder, items, settings, referenceFor(freshOrder, generation), ctx.now());
       const [row] = await tx
         .insert(shipments)
         .values({

@@ -49,6 +49,6 @@ describe("NovaGlobalAdapter (placeholder)", () => {
     expect(adapter.quoteRates).toBeUndefined();
     expect(adapter.checkAvailability).toBeUndefined();
     expect(adapter.getTracking).toBeUndefined();
-    expect(adapter.getDocuments).toBeUndefined();
+    expect(adapter.getDocument).toBeUndefined();
   });
 });

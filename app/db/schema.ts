@@ -188,6 +188,10 @@ export const productVariants = pgTable(
     hsCode: text("hs_code"),
     countryOfOrigin: char("country_of_origin", { length: 2 }),
     customsDescription: text("customs_description"),
+    /** Митний опис українською (метаполе logistics.customs_description_uk). */
+    customsDescriptionLocal: text("customs_description_local"),
+    /** Основний матеріал англійською (метаполе logistics.material). */
+    material: text("material"),
     imageUrl: text("image_url"),
     inventoryAvailable: integer("inventory_available"),
     /** Shopify InventoryItem GID — для оновлення залишків за webhook inventory_levels/update. */
@@ -357,11 +361,27 @@ export const shipments = pgTable(
     currency: char("currency", { length: 3 }),
     requestSnapshot: jsonb("request_snapshot"),
     lastError: text("last_error"),
+    /** Тариф/послуга перевізника, обрана при створенні (напр. deliveryType Nova Post). */
+    serviceCode: text("service_code"),
+    // --- Відстеження (етап 3) ---
+    /** Нормалізований статус відстеження (TrackingStatus). */
+    trackingStatus: text("tracking_status"),
+    carrierStatusCode: text("carrier_status_code"),
+    carrierStatusText: text("carrier_status_text"),
+    carrierStatusAt: timestamp("carrier_status_at", { withTimezone: true }),
+    lastTrackedAt: timestamp("last_tracked_at", { withTimezone: true }),
+    /** Фактична передача перевізнику (за даними відстеження або підтвердженням менеджера). */
+    handedOverAt: timestamp("handed_over_at", { withTimezone: true }),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    // --- Передача трек-номера в Shopify ---
+    shopifyFulfillmentId: text("shopify_fulfillment_id"),
+    shopifyFulfilledAt: timestamp("shopify_fulfilled_at", { withTimezone: true }),
     createdBy: text("created_by").notNull(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   (t) => [
+    index("shipments_tracking_idx").on(t.status, t.lastTrackedAt),
     uniqueIndex("shipments_one_active_per_order_uq")
       .on(t.orderId)
       .where(sql`${t.status} in ('creating', 'created', 'unknown')`),
@@ -384,6 +404,28 @@ export const shipmentEvents = pgTable(
     createdAt: createdAt(),
   },
   (t) => [index("shipment_events_shipment_idx").on(t.shipmentId, t.createdAt)],
+);
+
+/** Події відстеження від перевізника (без персональних даних). Дедуплікація за кодом і часом. */
+export const shipmentTrackingEvents = pgTable(
+  "shipment_tracking_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    shipmentId: uuid("shipment_id")
+      .notNull()
+      .references(() => shipments.id, { onDelete: "cascade" }),
+    status: text("status").notNull(),
+    /** Код статусу перевізника ("" — немає коду). */
+    code: text("code").notNull().default(""),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    location: text("location"),
+    description: text("description"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("shipment_tracking_events_uq").on(t.shipmentId, t.occurredAt, t.code),
+    index("shipment_tracking_events_shipment_idx").on(t.shipmentId, t.occurredAt),
+  ],
 );
 
 /**

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { EXPORT_REASONS, INCOTERMS } from "~/integrations/carriers/types";
 
 /**
  * Схеми налаштувань (зберігаються у таблиці settings, версіонуються у settings_history).
@@ -34,6 +35,11 @@ export const shipperSchema = z.object({
   warehouseName: trimmed(120),
   /** Відділення/пункт прийому перевізника. */
   carrierBranch: trimmed(120),
+  // Етап 3 (митні документи). Значення за замовчуванням — для сумісності зі збереженими налаштуваннями.
+  /** ЄДРПОУ (юрособа) або ІПН (ФОП). */
+  taxId: z.string().trim().regex(/^(\d{8}|\d{10})?$/, "8 or 10 digits").default(""),
+  eori: z.string().trim().toUpperCase().regex(/^([A-Z]{2}[A-Z0-9]{1,15})?$/, "EORI").default(""),
+  ioss: z.string().trim().toUpperCase().regex(/^(IM\d{10})?$/, "IOSS: IM + 10 digits").default(""),
 });
 
 export const packageSchema = z.object({
@@ -78,11 +84,74 @@ export const testCarrierSchema = z.object({
   simulation: z.enum(TEST_CARRIER_SIMULATIONS),
 });
 
+/** Митні дані за замовчуванням для комерційного інвойсу. */
+export const customsSchema = z.object({
+  incoterm: z.enum(INCOTERMS),
+  exportReason: z.enum(EXPORT_REASONS),
+  invoiceType: z.enum(["commercial", "proforma"]),
+});
+
+/** Параметри Nova Post API v1.0 (договір, тариф). */
+export const NOVA_POST_PAYER_TYPES = ["Sender", "Recipient", "ThirdPerson"] as const;
+export const novaPostSchema = z.object({
+  /** Хто оплачує доставку. */
+  payerType: z.enum(NOVA_POST_PAYER_TYPES),
+  /** Номер договору (безготівкова оплата / договірні тарифи; обов'язковий для ThirdPerson). */
+  payerContractNumber: z.string().trim().max(50),
+  /** Тип тарифу (deliveryType) з розрахунку Nova Post; порожньо — тариф за замовчуванням перевізника. */
+  deliveryType: z.string().trim().max(64),
+  /**
+   * Валюта сум, які повертає розрахунок Nova Post (у відповіді API валюта не вказана; за договором клієнта з України — UAH).
+   */
+  tariffCurrency: z.string().trim().toUpperCase().regex(/^[A-Z]{3}$/),
+});
+
+/** Розрахунок доставки в Shopify Checkout (CarrierService). */
+export const ROUNDING_MODES = ["none", "up_whole", "up_99"] as const;
+export const checkoutRatesSchema = z.object({
+  /** Вимкнено — застосунок повертає порожній список тарифів (Shopify показує лише власні тарифи магазину). */
+  enabled: z.boolean(),
+  /** Націнка у відсотках до вартості перевізника (0–200). */
+  markupPercent: z.number().min(0).max(200),
+  /** Фіксована надбавка у валюті магазину, десятковий рядок. */
+  markupFixed: z.string().trim().regex(/^\d{1,7}(\.\d{1,2})?$/, "0.00"),
+  rounding: z.enum(ROUNDING_MODES),
+  /**
+   * Курси для перерахунку вартості перевізника у валюту кошика: скільки одиниць валюти перевізника (UAH)
+   * коштує 1 одиниця валюти. Вносить власник; без курсу тариф не показується.
+   */
+  fxRates: z
+    .array(
+      z.object({
+        currency: z.string().trim().toUpperCase().regex(/^[A-Z]{3}$/),
+        rate: z.string().trim().regex(/^\d{1,6}(\.\d{1,6})?$/, "0.000000"),
+      }),
+    )
+    .max(20),
+  /** Назва тарифу в Checkout (порожньо — назва послуги перевізника). */
+  serviceName: trimmed(80),
+});
+
+/** Відстеження посилок і передача трек-номерів у Shopify. */
+export const trackingSchema = z.object({
+  enabled: z.boolean(),
+  /** Інтервал автоматичного опитування перевізника, хв. */
+  intervalMinutes: z.number().int().min(30).max(1440),
+  /** Створювати виконання (fulfillment) з трек-номером у Shopify після фактичної передачі перевізнику. */
+  pushToShopify: z.boolean(),
+  /** Чи надсилати клієнту лист Shopify про відправлення. За замовчуванням — ні. */
+  notifyCustomer: z.boolean(),
+});
+
 export const settingsSchemas = {
   automation: automationSchema,
   shipper: shipperSchema,
   packaging: packagingSchema,
   testCarrier: testCarrierSchema,
+  customs: customsSchema,
+  novaPost: novaPostSchema,
+  checkoutRates: checkoutRatesSchema,
+  tracking: trackingSchema,
 } as const;
 
 export type SettingsKey = keyof typeof settingsSchemas;
@@ -106,6 +175,9 @@ export const DEFAULT_SETTINGS: AllSettings = {
     address2: "",
     warehouseName: "",
     carrierBranch: "",
+    taxId: "",
+    eori: "",
+    ioss: "",
   },
   packaging: {
     defaultPackageCode: "mailer_m",
@@ -117,6 +189,10 @@ export const DEFAULT_SETTINGS: AllSettings = {
     ],
   },
   testCarrier: { simulation: "none" },
+  customs: { incoterm: "DAP", exportReason: "sale", invoiceType: "commercial" },
+  novaPost: { payerType: "Sender", payerContractNumber: "", deliveryType: "", tariffCurrency: "UAH" },
+  checkoutRates: { enabled: false, markupPercent: 0, markupFixed: "0.00", rounding: "none", fxRates: [], serviceName: "" },
+  tracking: { enabled: true, intervalMinutes: 60, pushToShopify: true, notifyCustomer: false },
 };
 
 /** Перелік обов'язкових полів відправника для створення накладної. */

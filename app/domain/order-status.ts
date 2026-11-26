@@ -25,8 +25,10 @@ export const ORDER_TRANSITIONS: Readonly<Record<OrderStatus, readonly OrderStatu
   paid: ["awaiting_review", "needs_correction", "cancelled"],
   awaiting_review: ["needs_correction", "waybill_created", "cancelled"],
   needs_correction: ["awaiting_review", "cancelled"],
-  waybill_created: ["awaiting_picking", "awaiting_review", "needs_correction", "cancelled"],
-  awaiting_picking: ["packed", "awaiting_review", "cancelled"],
+  // → handed_to_carrier: фактичну передачу підтвердив перевізник (відстеження) або менеджер
+  // (комплектація/пакування — етап 5, тому проміжні статуси можуть бути пропущені).
+  waybill_created: ["awaiting_picking", "handed_to_carrier", "awaiting_review", "needs_correction", "cancelled"],
+  awaiting_picking: ["packed", "handed_to_carrier", "awaiting_review", "cancelled"],
   packed: ["handed_to_carrier", "awaiting_picking", "cancelled"],
   handed_to_carrier: ["in_transit", "customs", "delivered", "delivery_problem", "returned"],
   in_transit: ["customs", "delivered", "delivery_problem", "returned"],

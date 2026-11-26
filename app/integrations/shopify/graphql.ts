@@ -1,7 +1,8 @@
 /**
  * Запити GraphQL Admin API (версія 2026-10). Поля звірено з офіційною документацією shopify.dev
  * (Order, LineItem, ProductVariant, Product, InventoryItem, MailingAddress, OrderInput, MailingAddressInput).
- * Митний опис: метаполе товару `logistics.customs_description` (див. docs/shopify-test-server.md).
+ * Митний опис: метаполе товару `logistics.customs_description` (див. docs/shopify-test-server.md);
+ * необов'язкові `logistics.customs_description_uk` (опис українською) і `logistics.material` (матеріал англійською).
  */
 
 const MONEY = "shopMoney { amount currencyCode }";
@@ -46,6 +47,8 @@ const productFields = (variantsFirst: number) => `
   id title handle status updatedAt
   featuredMedia { preview { image { url } } }
   customsDescription: metafield(namespace: "logistics", key: "customs_description") { value }
+  customsDescriptionUk: metafield(namespace: "logistics", key: "customs_description_uk") { value }
+  material: metafield(namespace: "logistics", key: "material") { value }
   variants(first: ${variantsFirst}) {
     pageInfo { hasNextPage }
     nodes {
@@ -180,6 +183,9 @@ export interface GqlProduct {
   updatedAt: string;
   featuredMedia: { preview: { image: { url: string } | null } | null } | null;
   customsDescription: { value: string } | null;
+  /** Етап 3: необов'язкові метаполя для митних документів (відсутні в старих відповідях/тестах). */
+  customsDescriptionUk?: { value: string } | null;
+  material?: { value: string } | null;
   variants: { pageInfo?: { hasNextPage: boolean }; nodes: GqlVariant[] };
 }
 

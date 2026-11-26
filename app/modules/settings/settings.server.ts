@@ -19,6 +19,10 @@ const PERMISSION_FOR_KEY: Record<SettingsKey, Permission> = {
   shipper: "settings.manage",
   packaging: "settings.manage",
   testCarrier: "settings.manage",
+  customs: "settings.manage",
+  novaPost: "settings.manage",
+  checkoutRates: "settings.manage",
+  tracking: "settings.manage",
 };
 
 export interface VersionedSettings {
