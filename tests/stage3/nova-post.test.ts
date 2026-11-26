@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { NovaPostClient, safeErrorText } from "~/integrations/carriers/nova-post/client.server";
 import { buildCalculationRequest, summarizeCalculation } from "~/integrations/carriers/nova-post/calculations";
-import { checkNovaPostKey } from "~/integrations/carriers/nova-post/key-check.server";
+import { checkNovaPostKey, formatKeyCheckLines } from "~/integrations/carriers/nova-post/key-check.server";
 import { CarrierError } from "~/integrations/carriers/types";
 
 const KEY = "test-key-1234567890abcdef";
@@ -83,6 +83,18 @@ describe("delivery cost calculation request", () => {
 });
 
 describe("key compatibility check (read-only)", () => {
+  it("tries the invoice variant when the minimal calculation is rejected", async () => {
+    const { fn, calls } = mockFetch((url, init) => {
+      if (url.includes("/clients/authorization")) return { status: 200, body: { jwt: "eyJa.eyJb.c" } };
+      const body = JSON.parse(String(init?.body));
+      return body.invoice ? { status: 200, body: { services: [{ deliveryType: "standard", cost: 500 }] } } : { status: 422, body: { errors: { invoice: "required" } } };
+    });
+    const r = await checkNovaPostKey(KEY, BASE, fn);
+    expect(r.attempts.map((a) => [a.variant, a.status])).toEqual([["minimal", 422], ["with_invoice", 200]]);
+    expect(calls.filter((c) => c.url.includes("/shipments/calculations"))).toHaveLength(2);
+    expect(formatKeyCheckLines(r)).toHaveLength(4);
+  });
+
   it("authorizes and calculates UA → DE without creating shipments", async () => {
     const { fn, calls } = mockFetch((url) =>
       url.includes("/clients/authorization")
@@ -90,7 +102,8 @@ describe("key compatibility check (read-only)", () => {
         : { status: 200, body: { services: [{ deliveryType: "standard", cost: 410 }], scheduledDeliveryDate: null } },
     );
     const r = await checkNovaPostKey(KEY, BASE, fn);
-    expect(r).toMatchObject({ authorized: true, calculationStatus: 200, calculation: { services: 1 } });
+    expect(r).toMatchObject({ authorized: true, attempts: [{ variant: "minimal", status: 200, summary: { services: 1 } }] });
+    expect(formatKeyCheckLines(r).join("\n")).toContain("NOVA-CHECK 3. Розрахунок UA→DE (без інвойсу): OK");
     expect(calls.map((c) => `${c.init?.method} ${c.url.replace(BASE, "").split("?")[0]}`)).toEqual([
       "GET /clients/authorization",
       "POST /shipments/calculations",
@@ -101,7 +114,8 @@ describe("key compatibility check (read-only)", () => {
   it("reports an incompatible key without throwing", async () => {
     const { fn } = mockFetch(() => ({ status: 401, body: {} }));
     const r = await checkNovaPostKey(KEY, BASE, fn);
-    expect(r).toMatchObject({ authorized: false, calculationStatus: null });
+    expect(r).toMatchObject({ authorized: false, attempts: [] });
     expect(r.authError).toContain("auth");
+    expect(formatKeyCheckLines(r)[1]).toContain("ПОМИЛКА");
   });
 });

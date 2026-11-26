@@ -14,6 +14,13 @@ export interface CalculationInput {
   parcels: Array<{ weightGrams: number; lengthMm: number; widthMm: number; heightMm: number; insuranceCost?: number }>;
   payerType?: "Sender" | "Recipient";
   deliveryTypes?: Array<"standard" | "economy" | "express">;
+  /** Дані інвойсу для розрахунку мита (необов'язково). */
+  invoice?: {
+    incoterm: "DAP" | "DDP";
+    currency: string;
+    cost: number;
+    items: Array<{ hsCode: string; amount: number; cost: number }>;
+  };
 }
 
 const clean = <T extends Record<string, unknown>>(o: T) =>
@@ -23,6 +30,7 @@ export function buildCalculationRequest(input: CalculationInput) {
   return clean({
     payerType: input.payerType ?? "Sender",
     deliveryTypes: input.deliveryTypes,
+    invoice: input.invoice,
     sender: clean({
       countryCode: input.senderCountry,
       divisionNumber: input.senderDivisionNumber ?? undefined,
