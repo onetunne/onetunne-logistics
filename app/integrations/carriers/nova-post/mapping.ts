@@ -39,6 +39,7 @@ export const NOVA_POST_CODE = "nova_post";
 /** Документовані значення deliveryType для POST /shipments і deliveryTypes для розрахунку. */
 export const NOVA_POST_DELIVERY_TYPES = ["standard", "economy", "express"] as const;
 export type NovaPostDeliveryType = (typeof NOVA_POST_DELIVERY_TYPES)[number];
+export const isNovaPostDeliveryType = (v: string): v is NovaPostDeliveryType => (NOVA_POST_DELIVERY_TYPES as readonly string[]).includes(v);
 
 export type NovaPostPayerType = "Sender" | "Recipient" | "ThirdPerson";
 
@@ -62,6 +63,17 @@ const IOSS_MAX_EUR_MINOR = 15000n;
 const INVOICE_MAX_MINOR = 999999999n;
 /** Макс. габарит, мм (помилка API: «must be less than or equal to 32767»). */
 const MAX_DIMENSION_MM = 32767;
+/** addressParts.region обов'язковий, якщо країна відправника АБО одержувача — США, Ірландія чи Канада. */
+const REGION_REQUIRED_COUNTRIES: ReadonlySet<string> = new Set(["US", "IE", "CA"]);
+/**
+ * recipient.registrationAddressRecipient (адреса реєстрації одержувача) обов'язковий для країн з особливими
+ * митними вимогами — документація називає Німеччину, Словаччину, Угорщину й Францію («such as» — перелік може бути неповним).
+ */
+export const REGISTRATION_ADDRESS_COUNTRIES: ReadonlySet<string> = new Set(["DE", "SK", "HU", "FR"]);
+/** hsCode: рівно 10 цифр, якщо країна відправника або одержувача — Молдова чи Канада; інакше 8–10 цифр. */
+const HS_CODE_10_DIGIT_COUNTRIES: ReadonlySet<string> = new Set(["MD", "CA"]);
+/** Коди, для яких документація вимагає measurementCode = kg, кількість ≤ 10 і лише один такий товар в інвойсі. */
+const HS_CODES_MEASURED_IN_KG = ["210690", "630900"] as const;
 
 // --- Типи тіла запиту POST /shipments ---
 
@@ -69,8 +81,18 @@ export interface NovaPostAddressParts {
   city?: string;
   region?: string;
   street?: string;
+  building?: string;
   postCode?: string;
   note?: string;
+}
+
+/** recipient.registrationAddressRecipient: увага — індекс тут `zipCode`, а не `postCode`. */
+export interface NovaPostRegistrationAddress {
+  city?: string;
+  street?: string;
+  zipCode?: string;
+  building?: string;
+  state?: string;
 }
 
 export interface NovaPostPartyBody {
@@ -84,6 +106,7 @@ export interface NovaPostPartyBody {
   countryCode?: string;
   divisionNumber?: string;
   addressParts?: NovaPostAddressParts;
+  registrationAddressRecipient?: NovaPostRegistrationAddress;
 }
 
 export interface NovaPostParcelBody {
@@ -129,7 +152,7 @@ export interface NovaPostCreateShipmentBody {
   status: "ReadyToShip";
   clientOrder: string;
   note: string;
-  deliveryType?: string;
+  deliveryType?: NovaPostDeliveryType;
   payerType: NovaPostPayerType;
   payerContractNumber?: string;
   parcels: NovaPostParcelBody[];
@@ -236,6 +259,8 @@ class RequestProblems {
 
 interface TextRule {
   required?: boolean;
+  /** Пояснення для менеджера замість «required» (що саме заповнити). */
+  requiredMessage?: string;
   max?: number;
   min?: number;
   pattern?: RegExp;
@@ -245,7 +270,7 @@ interface TextRule {
 function text(value: string | null | undefined, path: string, problems: RequestProblems, rule: TextRule = {}): string | undefined {
   const v = (value ?? "").trim();
   if (!v) {
-    if (rule.required) problems.add(path, "required");
+    if (rule.required) problems.add(path, rule.requiredMessage ?? "required");
     return undefined;
   }
   const len = charLength(v);
@@ -340,22 +365,68 @@ function invoiceDateTime(date: string, problems: RequestProblems): string | unde
   return `${d}T00:00:00.000000Z`;
 }
 
-function addressParts(address: CarrierAddress, path: string, problems: RequestProblems): NovaPostAddressParts {
+const BUILDING_REQUIRED =
+  'house/building number is required as a separate field: write address line 1 as "Street 12" or "12 Street" (one number only)';
+
+interface AddressRules {
+  /** Країна відправника або одержувача — US/IE/CA (документація: region обов'язковий). */
+  regionRequired: boolean;
+}
+
+/**
+ * Адреса без відділення. Документація (рядки addressParts.*): city, street, postCode і building обов'язкові, якщо
+ * немає divisionNumber/divisionID; значення вкладених полів не повинні дублювати одне одного — тому вулиця й номер
+ * будинку передаються ЛИШЕ окремо (CarrierAddress.street/building, однозначне розділення address1). Не розділено →
+ * помилка до запиту (поле address1), а не address1 у двох полях.
+ */
+function addressParts(address: CarrierAddress, path: string, problems: RequestProblems, rules: AddressRules): NovaPostAddressParts {
+  const country = (address.countryCode ?? "").trim().toUpperCase();
+  const building = (address.building ?? "").trim();
   return compact({
     city: text(address.city, `${path}.city`, problems, { required: true, max: 100 }),
-    region: text(address.province, `${path}.region`, problems, { max: 100 }),
-    // Номер будинку НЕ відокремлюємо від вулиці: розбір address1 неоднозначний для різних країн.
-    // Документація вимагає addressParts.building для доставки на адресу; якщо перевізник відхилить запит,
-    // помилка поля building зіставляється з shipping.address1 (менеджер бачить, що саме виправити).
-    street: text(address.address1, `${path}.street`, problems, { required: true, max: 100 }),
-    postCode: text(address.postalCode, `${path}.postCode`, problems, { max: 10 }),
+    region: text(address.province, `${path}.region`, problems, {
+      required: rules.regionRequired,
+      requiredMessage: "region/state is required for shipments from or to the USA, Ireland or Canada",
+      max: 100,
+      // США: двобуквений код штату ISO 3166-2:US (напр. "WA").
+      pattern: country === "US" ? /^[A-Z]{2}$/ : undefined,
+    }),
+    street: text(building ? address.street?.trim() || address.address1 : address.address1, `${path}.street`, problems, { required: true, max: 100 }),
+    building: text(building, `${path}.building`, problems, { required: true, requiredMessage: BUILDING_REQUIRED, max: 100 }),
+    postCode: text(address.postalCode, `${path}.postCode`, problems, { required: true, max: 10 }),
     // address2 (квартира/офіс/примітка) передається як примітка: flat має ліміт 10 символів і не завжди є номером.
     note: text(address.address2, `${path}.note`, problems, { max: 100 }),
   });
 }
 
+/**
+ * recipient.registrationAddressRecipient для DE/SK/HU/FR — з адреси РЕЄСТРАЦІЇ одержувача (CarrierParty.registrationAddress).
+ * Адресу доставки замість неї НЕ підставляємо: чи це допустимо, має підтвердити власник. Немає → помилка до запиту.
+ */
+function registrationAddress(p: CarrierParty, problems: RequestProblems): NovaPostRegistrationAddress | undefined {
+  const path = "recipient.registrationAddressRecipient";
+  const reg = p.registrationAddress;
+  if (!reg) {
+    problems.add(
+      path,
+      "Nova Post requires the recipient's registered address for shipments to Germany, Slovakia, Hungary and France; it is not available for this order yet",
+    );
+    return undefined;
+  }
+  return compact({
+    city: text(reg.city, `${path}.city`, problems, { required: true, max: 100 }),
+    street: text(reg.street?.trim() || reg.address1, `${path}.street`, problems, { required: true, max: 100 }),
+    zipCode: text(reg.postalCode, `${path}.zipCode`, problems, { required: true, max: 10 }),
+    building: text(reg.building, `${path}.building`, problems, { required: true, requiredMessage: BUILDING_REQUIRED, max: 100 }),
+    state: text(reg.province, `${path}.state`, problems, { max: 100 }),
+  });
+}
+
 interface PartyOptions {
   ioss: boolean;
+  /** Документація: email обов'язковий для відправлень через кордон ЄС або за межі ЄС (тобто будь-яке міжнародне з України). */
+  emailRequired: boolean;
+  regionRequired: boolean;
 }
 
 function party(p: CarrierParty, path: "sender" | "recipient", problems: RequestProblems, opts: PartyOptions): NovaPostPartyBody {
@@ -364,7 +435,11 @@ function party(p: CarrierParty, path: "sender" | "recipient", problems: RequestP
     name: text(p.name, `${path}.name`, problems, { required: true, max: 100 }),
     // Телефон — як є (E.164 після перевірки замовлення). Ліміт 50 — з переліку помилок API.
     phone: text(p.phone, `${path}.phone`, problems, { required: true, max: 50 }),
-    email: text(p.email, `${path}.email`, problems, { max: 255 }),
+    email: text(p.email, `${path}.email`, problems, {
+      required: opts.emailRequired,
+      requiredMessage: "email is required for international shipments",
+      max: 255,
+    }),
     companyName: text(p.company, `${path}.companyName`, problems, { max: 100 }),
     companyTin: text(p.taxId, `${path}.companyTin`, problems, { max: 20 }),
     eoriCode: text(p.eori, `${path}.eoriCode`, problems, { min: 3, max: 17 }),
@@ -372,8 +447,33 @@ function party(p: CarrierParty, path: "sender" | "recipient", problems: RequestP
     countryCode: text((p.address.countryCode ?? "").toUpperCase(), `${path}.countryCode`, problems, { required: true, pattern: /^[A-Z]{2}$/ }),
     // Відділення (divisionNumber, напр. "32521/1") АБО адреса: документація вимагає одне з двох.
     divisionNumber: branch || undefined,
-    addressParts: branch ? undefined : addressParts(p.address, `${path}.addressParts`, problems),
+    addressParts: branch ? undefined : addressParts(p.address, `${path}.addressParts`, problems, { regionRequired: opts.regionRequired }),
+    registrationAddressRecipient:
+      path === "recipient" && REGISTRATION_ADDRESS_COUNTRIES.has((p.address.countryCode ?? "").trim().toUpperCase())
+        ? registrationAddress(p, problems)
+        : undefined,
   });
+}
+
+/**
+ * hsCode (документація): нецифрові символи прибираються перед перевіркою; MD або CA (відправник чи одержувач) —
+ * рівно 10 цифр, інші країни — 8–10 цифр. Коди 210690/630900 вимагають measurementCode = kg і кількість у кг —
+ * такий формат інвойсу ми не формуємо (кількість у нас — штуки), тому відмова до запиту з поясненням.
+ */
+function hsCode(raw: string | null | undefined, path: string, problems: RequestProblems, tenDigits: boolean): string | undefined {
+  const value = (raw ?? "").trim();
+  if (!value) {
+    problems.add(path, "required");
+    return undefined;
+  }
+  const digits = value.replace(/\D/g, "");
+  if (tenDigits ? digits.length !== 10 : digits.length < 8 || digits.length > 10) {
+    problems.add(path, tenDigits ? "HS code must have exactly 10 digits for Moldova or Canada" : "HS code must have 8 to 10 digits (UKT ZED)");
+  }
+  if (HS_CODES_MEASURED_IN_KG.some((code) => digits.startsWith(code))) {
+    problems.add(path, "HS codes 210690/630900 must be declared in kilograms (measurementCode kg); not supported, create this waybill manually");
+  }
+  return digits || undefined;
 }
 
 function buildInvoice(
@@ -381,6 +481,7 @@ function buildInvoice(
   customs: CustomsDeclaration,
   totalParcelGrams: number,
   toEu: boolean,
+  tenDigitHs: boolean,
   problems: RequestProblems,
 ): NovaPostInvoiceBody {
   const currency = text(customs.totalValue.currency, "invoice.currency", problems, { required: true, pattern: /^[A-Z]{3}$/ });
@@ -396,7 +497,7 @@ function buildInvoice(
     if (!Number.isInteger(item.quantity) || item.quantity < 1) problems.add(`${path}.amount`, "quantity must be a positive integer");
     return compact({
       customerId: text(item.sku, `${path}.customerId`, problems),
-      hsCode: text(item.hsCode, `${path}.hsCode`, problems, { required: true, max: 255 }),
+      hsCode: hsCode(item.hsCode, `${path}.hsCode`, problems, tenDigitHs),
       name: text(item.descriptionLocal?.trim() || item.description, `${path}.name`, problems, { required: true, max: 512 }),
       nameEng: text(item.description, `${path}.nameEng`, problems, { required: true, max: 512 }),
       // Без матеріалу перевізник підставляє власне значення за замовчуванням (документація) — тому лише якщо відомий.
@@ -406,7 +507,8 @@ function buildInvoice(
       producerAndModel: text(item.producerAndModel, `${path}.producerAndModel`, problems, { max: 255 }),
       actualWeight: weights?.[i] ?? 0,
       // Перелік допустимих measurementCode не документований; "pieces" — значення з офіційного прикладу запиту
-      // (чек-лист «Sender's Registration Address for UA–World Direction»). Кількість у нас — штуки.
+      // (чек-лист «Sender's Registration Address for UA–World Direction»). Кількість у нас — штуки
+      // (коди 210690/630900, що вимагають kg, відхиляються вище — hsCode()).
       measurementCode: "pieces",
       amount: item.quantity,
       cost: moneyNumber(item.unitValue.amount, `${path}.cost`, problems),
@@ -437,6 +539,25 @@ function iossApplicable(req: CreateShipmentRequest, toEu: boolean, international
 }
 
 /**
+ * deliveryType: тариф запиту (serviceCode обраної пропозиції) → тариф з налаштувань → не передається (перевізник
+ * визначає сам). Передаються ЛИШЕ документовані значення standard/economy/express (помилка API «The selected delivery
+ * type is invalid»); UUID тарифу з відповіді розрахунку сюди не потрапляє — інше значення → відмова до запиту.
+ */
+function resolveDeliveryType(serviceCode: string | null | undefined, configured: string | null | undefined, problems: RequestProblems): NovaPostDeliveryType | undefined {
+  const fromRequest = (serviceCode ?? "").trim().toLowerCase();
+  if (fromRequest) {
+    if (isNovaPostDeliveryType(fromRequest)) return fromRequest;
+    problems.add("serviceCode", "selected tariff is not a Nova Post delivery type (standard, economy, express)");
+    return undefined;
+  }
+  const fromSettings = (configured ?? "").trim().toLowerCase();
+  if (!fromSettings) return undefined;
+  if (isNovaPostDeliveryType(fromSettings)) return fromSettings;
+  problems.add("deliveryType", "Nova Post tariff in settings must be standard, economy or express");
+  return undefined;
+}
+
+/**
  * CreateShipmentRequest → тіло POST /shipments. Кидає CarrierError("rejected") з усіма знайденими проблемами
  * (поле зіставлене з нашою моделлю), якщо дані не відповідають документованим вимогам. Мережі не торкається.
  */
@@ -454,7 +575,7 @@ export function buildCreateShipmentBody(req: CreateShipmentRequest, settings: No
   if (!["Sender", "Recipient", "ThirdPerson"].includes(settings.payerType)) problems.add("payerType", "unsupported payer type");
   const payerContractNumber = text(settings.payerContractNumber, "payerContractNumber", problems, { min: 2, max: 20 });
   if (settings.payerType === "ThirdPerson" && !payerContractNumber) problems.add("payerContractNumber", "required for payer type ThirdPerson");
-  const deliveryType = (req.serviceCode ?? "").trim() || (settings.deliveryType ?? "").trim() || undefined;
+  const deliveryType = resolveDeliveryType(req.serviceCode, settings.deliveryType, problems);
 
   if (international && !req.customs) problems.add("invoice", "customs data required for an international shipment");
   if (international && req.customs && req.customsItems.length === 0) problems.add("invoice.items", "customs items required for an international shipment");
@@ -490,9 +611,11 @@ export function buildCreateShipmentBody(req: CreateShipmentRequest, settings: No
   });
   const totalParcelGrams = parcels.reduce((sum, p) => sum + p.actualWeight, 0);
 
-  const sender = party(req.sender, "sender", problems, { ioss: iossApplicable(req, toEu, international) });
-  const recipient = party(req.recipient, "recipient", problems, { ioss: false });
-  const invoice = international && req.customs ? buildInvoice(req, req.customs, totalParcelGrams, toEu, problems) : undefined;
+  const regionRequired = REGION_REQUIRED_COUNTRIES.has(senderCountry) || REGION_REQUIRED_COUNTRIES.has(recipientCountry);
+  const sender = party(req.sender, "sender", problems, { ioss: iossApplicable(req, toEu, international), emailRequired: international, regionRequired });
+  const recipient = party(req.recipient, "recipient", problems, { ioss: false, emailRequired: international, regionRequired });
+  const tenDigitHs = HS_CODE_10_DIGIT_COUNTRIES.has(senderCountry) || HS_CODE_10_DIGIT_COUNTRIES.has(recipientCountry);
+  const invoice = international && req.customs ? buildInvoice(req, req.customs, totalParcelGrams, toEu, tenDigitHs, problems) : undefined;
 
   if (problems.details.length > 0) {
     const summary = problems.details.map((d) => d.message).join("; ");
@@ -550,6 +673,7 @@ const ERROR_FIELD_MAP: Readonly<Record<string, string>> = {
   "sender.addressparts.street": "shipper.address1",
   "sender.addressparts.building": "shipper.address1",
   "sender.addressparts.note": "shipper.address2",
+  "sender.addressparts.flat": "shipper.address2",
   payertype: "novaPost.payerType",
   payercontractnumber: "novaPost.payerContractNumber",
   deliverytype: "novaPost.deliveryType",
@@ -725,24 +849,23 @@ export interface QuoteMappingOptions {
 }
 
 /**
- * Відповідь розрахунку → RateQuote[] (одна пропозиція на тариф deliveryType). Кілька рядків одного тарифу —
- * сума `cost` (як summarizeCalculation). `cost` — «вартість доставки без мит після персональних знижок».
- * serviceCode — назва тарифу standard/economy/express (саме ці значення документовані для deliveryType у POST /shipments;
- * UUID з відповіді розрахунку там не документований) — інакше UUID.
+ * Відповідь розрахунку → RateQuote[] (одна пропозиція на тариф). Кілька рядків одного тарифу — сума `cost`
+ * (як summarizeCalculation). `cost` — «вартість доставки без мит після персональних знижок».
+ * serviceCode — код тарифу з `deliveryTypeName` (документовано: standard/economy/express — саме ці значення приймає
+ * deliveryType у POST /shipments). `deliveryType` відповіді — UUID тарифу, у POST /shipments він не документований,
+ * тому рядки без документованого deliveryTypeName пропускаються: пропозиція, за якою не можна створити накладну
+ * з тим самим тарифом, покупцю не показується.
  * Мита: DDP → senderPayerFeesCustomsCost, DAP → recipientPayerFeesCustomsCost; чи повторюються вони в кожному рядку
  * тарифу — не документовано, тому беремо максимум, а не суму.
  */
 export function mapCalculationToQuotes(result: NovaPostCalculationResult | null, opts: QuoteMappingOptions): RateQuote[] {
   const services = Array.isArray(result?.services) ? result.services : [];
-  const groups = new Map<string, { code: string; name: string; cost: bigint; hasCost: boolean; duties: bigint | null }>();
+  const groups = new Map<NovaPostDeliveryType, { code: NovaPostDeliveryType; name: string; cost: bigint; hasCost: boolean; duties: bigint | null }>();
   for (const s of services) {
     if (!isObject(s)) continue;
-    const typeName = typeof s.deliveryTypeName === "string" ? s.deliveryTypeName.trim() : "";
-    const typeId = typeof s.deliveryType === "string" ? s.deliveryType.trim() : "";
-    const key = typeId || typeName || (typeof s.serviceName === "string" ? s.serviceName.trim() : "") || "default";
-    const code = (NOVA_POST_DELIVERY_TYPES as readonly string[]).includes(typeName) ? typeName : typeId || typeName || key;
-    const name = typeName || (typeof s.serviceName === "string" && s.serviceName.trim()) || typeId || "Nova Post";
-    const g = groups.get(key) ?? { code, name, cost: 0n, hasCost: false, duties: null };
+    const code = typeof s.deliveryTypeName === "string" ? s.deliveryTypeName.trim().toLowerCase() : "";
+    if (!isNovaPostDeliveryType(code)) continue;
+    const g = groups.get(code) ?? { code, name: code, cost: 0n, hasCost: false, duties: null };
     const cost = amountToMinor(s.cost);
     if (cost !== null) {
       g.cost += cost;
@@ -750,7 +873,7 @@ export function mapCalculationToQuotes(result: NovaPostCalculationResult | null,
     }
     const duties = amountToMinor(opts.incoterm === "DDP" ? s.senderPayerFeesCustomsCost : s.recipientPayerFeesCustomsCost);
     if (duties !== null) g.duties = g.duties === null || duties > g.duties ? duties : g.duties;
-    groups.set(key, g);
+    groups.set(code, g);
   }
   const date = typeof result?.scheduledDeliveryDate === "string" ? /^(\d{4}-\d{2}-\d{2})/.exec(result.scheduledDeliveryDate)?.[1] ?? null : null;
   const quotes: RateQuote[] = [];
@@ -794,13 +917,15 @@ export function buildTrackingSnapshots(response: NovaPostFullTracking | null, nu
       const occurredAt = parseDate(r.date);
       if (!occurredAt) continue;
       const code = r.code === null || r.code === undefined || String(r.code).trim() === "" ? null : String(r.code).trim();
+      // Місце події — settlementName («населений пункт, де відбувається подія») і divisionName («склад події»).
+      // countryCode запису НЕ використовується: документація описує його як країну ВІДПРАВНИКА, а не країну події.
       const settlement = typeof r.settlementName === "string" ? r.settlementName.trim() : "";
-      const country = typeof r.countryCode === "string" ? r.countryCode.trim() : "";
+      const division = typeof r.divisionName === "string" ? r.divisionName.trim() : "";
       events.push({
         status: mapNovaPostTrackingCode(code),
         code,
         occurredAt,
-        location: [settlement, country].filter(Boolean).join(", ") || null,
+        location: [settlement, division].filter(Boolean).join(", ") || null,
         description: (typeof r.eventName === "string" && r.eventName.trim()) || (typeof r.event === "string" && r.event.trim()) || null,
       });
     }

@@ -146,7 +146,10 @@ describe("settings page render", () => {
     for (const key of [
       "settings.automation.title",
       "settings.shipper.title",
+      "settings.customs.title",
       "settings.packaging.title",
+      "settings.checkoutRates.title",
+      "settings.tracking.title",
       "settings.testCarrier.title",
       "settings.integrations.title",
       "settings.integrations.secrets",
@@ -159,7 +162,7 @@ describe("settings page render", () => {
     }
     expect(DICTIONARIES.uk["settings.demo.confirm"]).toContain("Скинути");
     // Немає неперекладених ключів.
-    expect(html).not.toMatch(/>\s*(settings|demo|common)\.[a-zA-Z_.]+\s*</);
+    expect(html).not.toMatch(/>\s*(settings|demo|common|carrierService)\.[a-zA-Z_.]+\s*</);
     expect(html).toContain('name="expectedVersion"');
   });
 
@@ -231,7 +234,20 @@ describe("settings actions", () => {
   });
 
   it("staff cannot change settings or reset demo data", async () => {
-    for (const intent of ["saveAutomation", "saveShipper", "savePackaging", "saveTestCarrier", "resetDemo"]) {
+    for (const intent of [
+      "saveAutomation",
+      "saveShipper",
+      "saveCustoms",
+      "savePackaging",
+      "saveNovaPost",
+      "saveCheckoutRates",
+      "previewRates",
+      "enableCheckout",
+      "disableCheckout",
+      "saveTracking",
+      "saveTestCarrier",
+      "resetDemo",
+    ]) {
       expect(await act({ intent, expectedVersion: "1" }, "staff"), intent).toMatchObject({ ok: false, error: "error.forbidden", intent });
     }
   });

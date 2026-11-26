@@ -35,11 +35,10 @@ import {
   type TrackingSnapshot,
 } from "../types";
 import { buildCalculationRequest, type CalculationInput } from "./calculations";
-import type { NovaPostClient, NovaPostResponse } from "./client.server";
+import { isTransientGatewayMessage, type NovaPostClient, type NovaPostResponse } from "./client.server";
 import {
   EU_COUNTRY_CODES,
   NOVA_POST_CODE,
-  NOVA_POST_DELIVERY_TYPES,
   buildCreateShipmentBody,
   buildPrintQuery,
   buildTrackingSnapshots,
@@ -47,6 +46,7 @@ import {
   convertMoney,
   documentFileName,
   isDeletedListItem,
+  isNovaPostDeliveryType,
   looksLikePdf,
   mapCalculationToQuotes,
   parseNovaPostErrors,
@@ -55,7 +55,6 @@ import {
   type NovaPostCalculationResult,
   type NovaPostCreateShipmentBody,
   type NovaPostCreatedResponse,
-  type NovaPostDeliveryType,
   type NovaPostFullTracking,
   type NovaPostPayerType,
   type NovaPostShipmentList,
@@ -102,18 +101,50 @@ export interface NovaPostAdapterOptions {
 
 const DOCUMENT_KINDS: readonly CarrierDocumentKind[] = ["label", "invoice", "customs_declaration"];
 
+type ErrorDetails = ReturnType<typeof parseNovaPostErrors>;
+
+function hasMessage(details: ErrorDetails, needle: string): boolean {
+  return details.some((d) => d.message.toLowerCase().includes(needle));
+}
+
+/**
+ * Документовані тимчасові збої шлюзу (сторінка API errors, без прив'язки до методу): 422 «Cid profile timeout»
+ * (тимчасовий збій отримання профілю клієнта під час авторизації) і 400 «Internal TypeError error» (внутрішня помилка
+ * обробки на боці сервісу). Це НЕ відмова в даних.
+ */
+function isTransientGatewayError(details: ErrorDetails): boolean {
+  return details.some((d) => isTransientGatewayMessage(d.message));
+}
+
+/** 422 «Cid profile not found» — профіль клієнта для токена не знайдено (помилка облікового запису, не даних). */
+function isProfileError(details: ErrorDetails): boolean {
+  return hasMessage(details, "cid profile not found");
+}
+
+/** Ключі загального повідомлення у {"errors": {...}} — не поле запиту. */
+const GENERIC_ERROR_KEYS = new Set(["", "errormessage", "message", "error"]);
+
+/**
+ * 400 від POST /shipments доводить, що запит відхилено ДО обробки, лише якщо тіло містить помилки полів
+ * або документоване «Invalid JSON format». Інший документований 400 — «Internal TypeError error» (внутрішня помилка
+ * сервісу) — не гарантує, що відправлення не збережено.
+ */
+function isClientSide400(details: ErrorDetails): boolean {
+  return details.some(
+    (d) => (d.carrierCode !== undefined && !GENERIC_ERROR_KEYS.has(d.carrierCode.trim().toLowerCase())) || /^invalid json format\.?$/i.test(d.message.trim()),
+  );
+}
+
 /** Класифікація відповіді методу читання/зміни (не створення). */
 function readError(action: string, res: NovaPostResponse<unknown> | { status: number; errorBody: unknown; errorText: string | null }): CarrierError {
   const details = parseNovaPostErrors(res.errorBody, res.errorText);
   const text = summarizeErrorDetails(details);
   const message = `Nova Post ${action} failed (${res.status})${text ? `: ${text}` : ""}`;
-  if (res.status === 401 || res.status === 403) return new CarrierError("auth", NOVA_POST_CODE, message, details);
-  if (res.status === 429 || res.status >= 500 || res.status < 400) return new CarrierError("unavailable", NOVA_POST_CODE, message, details);
+  if (res.status === 401 || res.status === 403 || isProfileError(details)) return new CarrierError("auth", NOVA_POST_CODE, message, details);
+  if (res.status === 429 || res.status >= 500 || res.status < 400 || isTransientGatewayError(details)) {
+    return new CarrierError("unavailable", NOVA_POST_CODE, message, details);
+  }
   return new CarrierError("rejected", NOVA_POST_CODE, message, details);
-}
-
-function hasMessage(details: ReturnType<typeof parseNovaPostErrors>, needle: string): boolean {
-  return details.some((d) => d.message.toLowerCase().includes(needle));
 }
 
 export class NovaPostAdapter implements CarrierAdapter {
@@ -180,16 +211,7 @@ export class NovaPostAdapter implements CarrierAdapter {
       }
       return created;
     }
-    const details = parseNovaPostErrors(res.errorBody, res.errorText);
-    const text = summarizeErrorDetails(details);
-    const message = `Nova Post create shipment failed (${res.status})${text ? `: ${text}` : ""}`;
-    if (res.status === 401 || res.status === 403) throw new CarrierError("auth", NOVA_POST_CODE, message, details);
-    // 429 — ліміт запитів: запит не оброблено.
-    if (res.status === 429) throw new CarrierError("unavailable", NOVA_POST_CODE, message, details);
-    // 408 і 5xx (у т.ч. 502 «timeout error», 503 «Connection time-out»): чи створено відправлення — не документовано → звірка.
-    if (res.status === 408 || res.status >= 500 || res.status < 400) throw new CarrierError("unknown_outcome", NOVA_POST_CODE, message, details);
-    // 400/404/409/422 та інші 4xx — запит відхилено, накладна не створена.
-    throw new CarrierError("rejected", NOVA_POST_CODE, message, details);
+    throw classifyCreateFailure(res.status, parseNovaPostErrors(res.errorBody, res.errorText));
   }
 
   /**
@@ -200,6 +222,9 @@ export class NovaPostAdapter implements CarrierAdapter {
    */
   async findShipmentByReference(reference: string, opts?: CarrierCallOptions): Promise<LookupResult> {
     let cancelledMatch: NovaPostShipmentListItem | null = null;
+    // true — переглянуто ВСІ сторінки (до числового last_page). Лише тоді видалений збіг означає «скасовано»:
+    // активне відправлення з тим самим clientOrder могло лишитися на непереглянутій сторінці.
+    let scannedAll = false;
     for (let page = 1; page <= NOVA_POST_LOOKUP_MAX_PAGES; page++) {
       const res = await this.client.request<NovaPostShipmentList>("GET", "/shipments", undefined, {
         query: { limit: NOVA_POST_LOOKUP_PAGE_SIZE, page },
@@ -217,10 +242,15 @@ export class NovaPostAdapter implements CarrierAdapter {
         if (!shipment) throw new CarrierError("unavailable", NOVA_POST_CODE, "Nova Post lookup: matching shipment has no id/number");
         return { found: true, cancelled: false, shipment };
       }
-      const lastPage = typeof res.body.last_page === "number" ? res.body.last_page : page;
-      if (items.length === 0 || page >= lastPage) break;
+      const lastPage = typeof res.body.last_page === "number" && Number.isInteger(res.body.last_page) ? res.body.last_page : null;
+      if (lastPage !== null && page >= lastPage) {
+        scannedAll = true;
+        break;
+      }
+      // Без last_page або порожня сторінка до last_page — зупиняємось, але перегляд НЕ вважається повним.
+      if (lastPage === null || items.length === 0) break;
     }
-    if (cancelledMatch) {
+    if (cancelledMatch && scannedAll) {
       const shipment = toCreatedShipment(cancelledMatch, this.now());
       if (shipment) return { found: true, cancelled: true, shipment };
     }
@@ -239,6 +269,8 @@ export class NovaPostAdapter implements CarrierAdapter {
     if (res.status >= 200 && res.status < 300) return { cancelled: true };
     const details = parseNovaPostErrors(res.errorBody, res.errorText);
     if (res.status === 404) throw new CarrierError("rejected", NOVA_POST_CODE, "shipment not found at Nova Post", details);
+    // Тимчасовий збій шлюзу / профілю — не відмова перевізника скасувати.
+    if (isTransientGatewayError(details) || isProfileError(details)) throw readError("cancel shipment", res);
     if ([400, 409, 422].includes(res.status)) {
       if (hasMessage(details, "shipment_was_deleted")) return { cancelled: true };
       return { cancelled: false };
@@ -293,23 +325,16 @@ export class NovaPostAdapter implements CarrierAdapter {
   }
 
   /**
-   * Розрахунок вартості (POST /shipments/calculations). Суми у відповіді без валюти → settings.novaPost.tariffCurrency.
-   * insuranceCost документовано «у валюті країни відправника» (поля валюти для розрахунку немає): для клієнта з України
-   * це гривня = валюта тарифу, тому оголошена вартість перераховується у tariffCurrency за курсами checkoutRates.fxRates.
+   * Розрахунок вартості (POST /shipments/calculations). Суми у відповіді без валюти → settings.novaPost.tariffCurrency
+   * (лише для читання відповіді). insuranceCost документовано «у валюті країни відправника» (поля валюти для розрахунку
+   * немає) — це окреме від tariffCurrency поняття: оголошена вартість перераховується саме у валюту країни відправника.
    */
   async quoteRates(req: RateRequest, opts?: CarrierCallOptions): Promise<RateQuote[]> {
     const settings = await this.settings();
     const np = settings.novaPost;
     const incoterm = req.incoterm ?? settings.customs.incoterm;
     if (req.parcels.length === 0) throw new CarrierError("rejected", NOVA_POST_CODE, "Nova Post calculation: at least one parcel is required");
-    const insured = convertMoney(req.declaredValue, np.tariffCurrency, settings.checkoutRates?.fxRates);
-    if (!insured) {
-      throw new CarrierError(
-        "not_configured",
-        NOVA_POST_CODE,
-        `Nova Post calculation: no exchange rate ${req.declaredValue.currency} → ${np.tariffCurrency} for the declared value`,
-      );
-    }
+    const insured = insuranceInSenderCurrency(req, np.tariffCurrency, settings.checkoutRates?.fxRates);
     const insuranceMinor = toMinor(insured.amount);
     const parcelsCount = BigInt(req.parcels.length);
     // Документація: insuranceCost строго більше 0.
@@ -318,7 +343,7 @@ export class NovaPostAdapter implements CarrierAdapter {
     }
     const branch = settings.shipper?.carrierBranch?.trim() || null;
     const contract = (np.payerContractNumber ?? "").trim() || null;
-    const deliveryType = (np.deliveryType ?? "").trim();
+    const deliveryType = (np.deliveryType ?? "").trim().toLowerCase();
     const international = req.origin.countryCode.toUpperCase() !== req.destination.countryCode.toUpperCase();
     const toEu = EU_COUNTRY_CODES.has(req.destination.countryCode.toUpperCase());
     const invoice = international ? rateInvoice(req, incoterm, toEu) : undefined;
@@ -348,7 +373,7 @@ export class NovaPostAdapter implements CarrierAdapter {
       senderCompanyTin: np.payerType === "Sender" && settings.shipper?.taxId && settings.shipper.companyName ? settings.shipper.taxId : null,
       senderCompanyName: np.payerType === "Sender" && settings.shipper?.taxId && settings.shipper.companyName ? settings.shipper.companyName : null,
       // Тариф з налаштувань (якщо задано документоване значення); інакше перевізник обирає сам.
-      deliveryTypes: (NOVA_POST_DELIVERY_TYPES as readonly string[]).includes(deliveryType) ? [deliveryType as NovaPostDeliveryType] : undefined,
+      deliveryTypes: isNovaPostDeliveryType(deliveryType) ? [deliveryType] : undefined,
       invoice,
     };
     if (input.parcels.some((p) => p.lengthMm <= 0 || p.widthMm <= 0 || p.heightMm <= 0 || p.weightGrams <= 0)) {
@@ -368,6 +393,58 @@ export class NovaPostAdapter implements CarrierAdapter {
   trackingInfo(trackingNumber: string): ShopifyTrackingInfo {
     return { company: "Nova Poshta", number: trackingNumber, url: null };
   }
+}
+
+/**
+ * Помилка POST /shipments → CarrierError. Головне питання — чи МІГ перевізник зберегти відправлення:
+ * - 401/403, 422 «Cid profile not found» → auth; 429, 422 «Cid profile timeout» → unavailable (запит не оброблено);
+ * - 408, 5xx (502 «timeout error», 503 «Connection time-out»), 409 (не документований для цього методу — «конфлікт» може
+ *   означати, що відправлення вже існує) і 400 без доказу помилки клієнта (документований 400 «Internal TypeError error» —
+ *   внутрішня помилка сервісу) → unknown_outcome: звірка, а не повтор з тим самим reference;
+ * - 400 з помилками полів або «Invalid JSON format», 404, 422 та інші 4xx → rejected (накладна не створена).
+ */
+function classifyCreateFailure(status: number, details: ErrorDetails): CarrierError {
+  const text = summarizeErrorDetails(details);
+  const message = `Nova Post create shipment failed (${status})${text ? `: ${text}` : ""}`;
+  if (status === 401 || status === 403 || (status === 422 && isProfileError(details))) return new CarrierError("auth", NOVA_POST_CODE, message, details);
+  if (status === 429 || (status === 422 && hasMessage(details, "cid profile timeout"))) return new CarrierError("unavailable", NOVA_POST_CODE, message, details);
+  if (status === 408 || status === 409 || status >= 500 || status < 400 || (status === 400 && !isClientSide400(details))) {
+    return new CarrierError("unknown_outcome", NOVA_POST_CODE, message, details);
+  }
+  return new CarrierError("rejected", NOVA_POST_CODE, message, details);
+}
+
+/** Валюта країни відправника для insuranceCost розрахунку. Адаптер працює з ендпоінтом для клієнтів з України. */
+const SENDER_COUNTRY_CURRENCY: Readonly<Record<string, string>> = { UA: "UAH" };
+
+/**
+ * Оголошена вартість → валюта країни відправника. Курси checkoutRates.fxRates задані відносно tariffCurrency
+ * («одиниць валюти перевізника за 1 одиницю валюти»), тому перерахунок можливий, лише коли вартість уже у валюті
+ * відправника або tariffCurrency = валюта відправника. Інакше — not_configured (без запиту), а не сума в чужій валюті.
+ */
+function insuranceInSenderCurrency(
+  req: RateRequest,
+  tariffCurrency: string,
+  fxRates: ReadonlyArray<{ currency: string; rate: string }> | undefined,
+): { amount: string; currency: string } {
+  const origin = req.origin.countryCode.trim().toUpperCase();
+  const senderCurrency = SENDER_COUNTRY_CURRENCY[origin];
+  if (!senderCurrency) {
+    throw new CarrierError("not_configured", NOVA_POST_CODE, `Nova Post calculation: sender-country currency for ${origin || "?"} is not known`);
+  }
+  const declared = req.declaredValue;
+  const converted =
+    declared.currency === senderCurrency || tariffCurrency === senderCurrency ? convertMoney(declared, senderCurrency, fxRates) : null;
+  if (!converted) {
+    throw new CarrierError(
+      "not_configured",
+      NOVA_POST_CODE,
+      tariffCurrency === senderCurrency || declared.currency === senderCurrency
+        ? `Nova Post calculation: no exchange rate ${declared.currency} → ${senderCurrency} for the declared value`
+        : `Nova Post calculation: the declared value must be converted to ${senderCurrency} (sender-country currency), but exchange rates are set against ${tariffCurrency}`,
+    );
+  }
+  return converted;
 }
 
 /**

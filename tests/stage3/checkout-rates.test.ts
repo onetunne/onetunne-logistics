@@ -17,6 +17,7 @@ import {
   checkoutRatesCacheSize,
   clearCheckoutRatesCache,
   computeCheckoutRates,
+  SHOPIFY_RATE_PHONE_REQUIRED,
   parseRateRequest,
   previewCheckoutRates,
   shopifyServiceCode,
@@ -30,13 +31,14 @@ import {
   currencyMinorDigits,
   markupFixedToCents,
   markupPercentToBasisPoints,
+  minimumDeclaredAmount,
   parseDecimal,
   priceCheckoutRate,
   subunitsToDecimal,
   type PricingSettings,
 } from "~/modules/rates/pricing";
 import { DEFAULT_SETTINGS, type AllSettings } from "~/modules/settings/schema";
-import { updateSetting } from "~/modules/settings/settings.server";
+import { getSettings, updateSetting } from "~/modules/settings/settings.server";
 import type { ServiceContext } from "~/server/types";
 import { OWNER, STAFF, openTestDatabase } from "../helpers";
 
@@ -158,6 +160,26 @@ describe("pricing: markup and rounding", () => {
     expect(ok(priceCheckoutRate(price("0"), "UAH", P({ markupFixed: "1.00", rounding: "up_99" }))).amount).toBe("1.99");
   });
 
+  it("fixed markup is in the FX base currency and is converted into each cart currency", () => {
+    const fxRates = [
+      { currency: "EUR", rate: "45" },
+      { currency: "JPY", rate: "0.27" },
+    ];
+    const opts = { fxBaseCurrency: "UAH" };
+    // 900 UAH / 45 = 20.00 EUR; +45 UAH = +1.00 EUR
+    expect(ok(priceCheckoutRate(price("900"), "EUR", P({ markupFixed: "45.00", fxRates }), opts)).amount).toBe("21.00");
+    // 900 / 0.27 = 3333.33 JPY; +45 / 0.27 = +166.67 JPY → 3500 JPY exactly (one rounding of the exact sum)
+    expect(ok(priceCheckoutRate(price("900"), "JPY", P({ markupFixed: "45.00", fxRates }), opts)).cents).toBe(350000n);
+    // the same "45.00" in the base currency itself
+    expect(ok(priceCheckoutRate(price("900"), "UAH", P({ markupFixed: "45.00", fxRates }), opts)).amount).toBe("945.00");
+    // quote in a non-base currency (cross rate): fixed markup still in UAH
+    expect(ok(priceCheckoutRate(price("10", "EUR"), "EUR", P({ markupFixed: "45.00", fxRates }), opts)).amount).toBe("11.00");
+    // tiny fixed markup rounds UP, never down: 1 UAH = 0.0222… EUR → 20.03
+    expect(ok(priceCheckoutRate(price("900"), "EUR", P({ markupFixed: "1.00", fxRates }), opts)).amount).toBe("20.03");
+    // without an FX base the fixed markup is in the carrier price currency (no conversion needed)
+    expect(ok(priceCheckoutRate(price("10"), "UAH", P({ markupFixed: "2.50" }))).amount).toBe("12.50");
+  });
+
   it("single rounding step: conversion + percent rounded once (no double ceil)", () => {
     // 1 UAH / 3 = 0.3333…; ×1.5 = 0.5 exactly → 0.50 (double ceil would give 0.51)
     const p = ok(priceCheckoutRate(price("1"), "EUR", P({ markupPercent: 50, fxRates: [{ currency: "EUR", rate: "3" }] })));
@@ -208,6 +230,19 @@ describe("pricing: markup and rounding", () => {
     expect(subunitsToDecimal(1000n, "JPY")).toBe("1000.00");
     expect(subunitsToDecimal(1234n, "KWD")).toBe("1.24");
     expect(subunitsToDecimal(0n, "EUR")).toBe("0.00");
+  });
+
+  it("minimumDeclaredAmount: 1 base unit converted and rounded UP to a whole cart unit", () => {
+    const fx = [
+      { currency: "EUR", rate: "45" },
+      { currency: "JPY", rate: "0.27" },
+      { currency: "VND", rate: "0.0016" },
+    ];
+    expect(minimumDeclaredAmount("EUR", fx, "UAH")).toBe("1.00");
+    expect(minimumDeclaredAmount("UAH", fx, "UAH")).toBe("1.00");
+    expect(minimumDeclaredAmount("JPY", fx, "UAH")).toBe("4.00"); // 1 / 0.27 = 3.7
+    expect(minimumDeclaredAmount("VND", fx, "UAH")).toBe("625.00");
+    expect(minimumDeclaredAmount("USD", fx, "UAH")).toBeNull();
   });
 
   it("canPriceInCurrency: pre-check before calling the carrier", () => {
@@ -276,7 +311,8 @@ describe("parseRateRequest", () => {
     if (!r.ok) return;
     expect(r.request.rate.currency).toBe("USD");
     expect(r.request.rate.items[0]).toMatchObject({ quantity: 1, grams: 1000, price: 1999, variant_id: "258644705304", product_id: "48447225880" });
-    expect(r.request.rate.order_totals?.total_price).toBe(1849);
+    // order_totals не використовується (весь кошик, валюта магазину) і тому не розбирається
+    expect(r.request.rate).not.toHaveProperty("order_totals");
     expect(r.request.rate.destination).not.toHaveProperty("name");
     expect(r.request.rate.destination).not.toHaveProperty("phone");
     expect(r.request.rate).not.toHaveProperty("customer");
@@ -388,7 +424,8 @@ async function setCheckout(over: Partial<AllSettings["checkoutRates"]>) {
 const ENABLED = {
   enabled: true,
   markupPercent: 10,
-  markupFixed: "1.00",
+  /** У базовій валюті таблиці курсів (UAH): 45 UAH = 1.00 EUR за курсом 45. */
+  markupFixed: "45.00",
   rounding: "up_99" as const,
   fxRates: [{ currency: "EUR", rate: "45.000000" }],
   serviceName: "",
@@ -441,7 +478,7 @@ describe("computeCheckoutRates", () => {
     await setCheckout(ENABLED);
     const c = fakeCarrier(async () => [quote()]);
     const r = await computeCheckoutRates(deps(c.registry), request());
-    // 900 UAH / 45 = 20.00 EUR → ×1.10 = 22.00 → +1.00 = 23.00 → up_99 = 23.99
+    // 900 UAH / 45 = 20.00 EUR → ×1.10 = 22.00 → +45 UAH (1.00 EUR) = 23.00 → up_99 = 23.99
     expect(r).toEqual({
       status: 200,
       body: {
@@ -452,10 +489,12 @@ describe("computeCheckoutRates", () => {
             service_code: "fake_post_standard",
             currency: "EUR",
             total_price: "2399",
+            phone_required: true,
           },
         ],
       },
     });
+    expect(SHOPIFY_RATE_PHONE_REQUIRED).toBe(true);
     expect(c.calls).toHaveLength(1);
     const req = c.calls[0]!;
     // 500 g × 2 + 70 g тари (mailer_m) = 1070 → 1100; об'ємна 35×25×8/5000 = 1.4 кг
@@ -477,11 +516,39 @@ describe("computeCheckoutRates", () => {
     expect(req.incoterm).toBe("DAP");
   });
 
-  it("declared value falls back to Σ price × quantity without order_totals", async () => {
+  it("declared value = Σ price × quantity of this request's items, never order_totals (split cart)", async () => {
     await setCheckout(ENABLED);
     const c = fakeCarrier(async () => [quote()]);
+    // без order_totals
     await computeCheckoutRates(deps(c.registry), request({ order_totals: null }));
     expect(c.calls[0]!.declaredValue).toEqual({ amount: "50.00", currency: "EUR" });
+    // кошик поділено між складами: order_totals (весь кошик) більші за товари цього запиту → не завищуємо
+    clearCheckoutRatesCache();
+    await computeCheckoutRates(deps(c.registry), request({ order_totals: { subtotal_price: 250000, total_price: 240000, discount_amount: 10000 } }));
+    expect(c.calls[1]!.declaredValue).toEqual({ amount: "50.00", currency: "EUR" });
+  });
+
+  it("zero cart total (100 % discount) or free items → declared value never 0", async () => {
+    await setCheckout(ENABLED);
+    const info = vi.spyOn(logger, "info");
+    const c = fakeCarrier(async (req) => {
+      // як Nova Post: insuranceCost має бути > 0
+      if (Number(req.declaredValue.amount) <= 0) throw new CarrierError("rejected", "fake_post", "declared value must be greater than 0");
+      return [quote()];
+    });
+    // знижка 100 %: total_price = 0, але товари мають ціну
+    const discounted = await computeCheckoutRates(deps(c.registry), request({ order_totals: { subtotal_price: 5000, total_price: 0, discount_amount: 5000 } }));
+    expect(discounted.status).toBe(200);
+    expect(discounted.body.rates).toHaveLength(1);
+    expect(c.calls[0]!.declaredValue).toEqual({ amount: "50.00", currency: "EUR" });
+
+    // безкоштовні товари: мінімум 1 UAH у валюті кошика, округлено до цілої одиниці → 1.00 EUR
+    const free = await computeCheckoutRates(deps(c.registry), request({}, [{ quantity: 2, grams: 500, price: 0, variant_id: 1 }]));
+    expect(free.status).toBe(200);
+    expect(free.body.rates).toHaveLength(1);
+    expect(c.calls[1]!.declaredValue).toEqual({ amount: "1.00", currency: "EUR" });
+    const entry = info.mock.calls.filter((x) => x[0] === "checkout_rates.request").at(-1);
+    expect(entry?.[1]).toMatchObject({ outcome: "ok", declaredValueMinimum: true });
   });
 
   it("several quotes: sorted by price, custom service name disambiguated, duplicate codes keep the cheapest", async () => {
@@ -520,6 +587,16 @@ describe("computeCheckoutRates", () => {
     expect(c.calls[0]!.items).toHaveLength(1);
     expect(c.calls[0]!.parcels[0]!.actualWeightGrams).toBe(2100); // 2000 + 70 → 2100
     expect(c.calls[0]!.declaredValue.amount).toBe("10.00");
+    // order_totals із вартістю товару без доставки — ігнорується
+    clearCheckoutRatesCache();
+    await computeCheckoutRates(
+      deps(c.registry),
+      request({ order_totals: { subtotal_price: 10999, total_price: 10999, discount_amount: 0 } }, [
+        { quantity: 1, grams: 2000, price: 1000, requires_shipping: true, variant_id: 1 },
+        { quantity: 1, grams: 0, price: 9999, requires_shipping: false, variant_id: 2 },
+      ]),
+    );
+    expect(c.calls[1]!.declaredValue.amount).toBe("10.00");
   });
 
   it("no shippable items → empty rates", async () => {
@@ -602,7 +679,7 @@ describe("computeCheckoutRates", () => {
     // валюта тарифу (UAH) — без курсу
     expect((await computeCheckoutRates(deps(c.registry), request({ currency: "UAH" }))).body.rates[0]).toMatchObject({
       currency: "UAH",
-      total_price: "99199", // 900 × 1.1 + 1 = 991.00 → up_99 = 991.99
+      total_price: "103599", // 900 × 1.1 + 45 = 1035.00 → up_99 = 1035.99
     });
   });
 
@@ -654,8 +731,12 @@ describe("computeCheckoutRates", () => {
     await computeCheckoutRates(d, request({}, [{ quantity: 2, grams: 900, price: 2500, variant_id: 1 }]));
     expect(c.calls).toHaveLength(2);
 
-    // інша оголошена вартість → новий запит
-    await computeCheckoutRates(d, request({ order_totals: { total_price: 7000 } }));
+    // інша оголошена вартість (ціни товарів) → новий запит
+    await computeCheckoutRates(d, request({}, [{ quantity: 2, grams: 500, price: 3500, variant_id: 1 }]));
+    expect(c.calls).toHaveLength(3);
+    // лише order_totals змінилися → той самий запит до перевізника (підсумки не використовуються)
+    await computeCheckoutRates(d, request({}, [{ quantity: 2, grams: 500, price: 3500, variant_id: 1 }]));
+    await computeCheckoutRates(d, request({ order_totals: { subtotal_price: 1, total_price: 1, discount_amount: 0 } }, [{ quantity: 2, grams: 500, price: 3500, variant_id: 1 }]));
     expect(c.calls).toHaveLength(3);
 
     // markup змінюється без нового запиту до перевізника (кешуються ціни перевізника, не Checkout)
@@ -671,6 +752,43 @@ describe("computeCheckoutRates", () => {
     clearCheckoutRatesCache();
     await computeCheckoutRates(d, request());
     expect(c.calls).toHaveLength(5);
+  });
+
+  it("cache: carrier settings outside the request (Nova Post payer/tariff, sender branch, tax ID, FX rates) → new carrier call", async () => {
+    await setCheckout(ENABLED);
+    const c = fakeCarrier(async () => [quote()]);
+    const d = deps(c.registry);
+    const save = async <K extends "novaPost" | "shipper" | "customs">(key: K, value: AllSettings[K]) => {
+      const r = await updateSetting(handle.db, OWNER, key, value);
+      if (!r.ok) throw new Error(JSON.stringify(r.fieldErrors));
+    };
+    await computeCheckoutRates(d, request());
+    await computeCheckoutRates(d, request());
+    expect(c.calls).toHaveLength(1);
+
+    const np = DEFAULT_SETTINGS.novaPost;
+    await save("novaPost", { ...np, payerType: np.payerType === "Sender" ? "Recipient" : "Sender" });
+    await computeCheckoutRates(d, request());
+    expect(c.calls).toHaveLength(2);
+    await save("novaPost", { ...np, payerType: np.payerType === "Sender" ? "Recipient" : "Sender", deliveryType: "express" });
+    await computeCheckoutRates(d, request());
+    expect(c.calls).toHaveLength(3);
+
+    const shipper = (await getSettings(handle.db)).shipper;
+    await save("shipper", { ...shipper, carrierBranch: "32521/1" });
+    await computeCheckoutRates(d, request());
+    expect(c.calls).toHaveLength(4);
+    await save("shipper", { ...shipper, carrierBranch: "32521/1", taxId: "12345678" });
+    await computeCheckoutRates(d, request());
+    expect(c.calls).toHaveLength(5);
+
+    // курси (перерахунок оголошеної вартості у валюту тарифу) → новий запит; націнка — ні
+    await setCheckout({ ...ENABLED, fxRates: [{ currency: "EUR", rate: "46.000000" }] });
+    await computeCheckoutRates(d, request());
+    expect(c.calls).toHaveLength(6);
+    await setCheckout({ ...ENABLED, fxRates: [{ currency: "EUR", rate: "46.000000" }], markupPercent: 0 });
+    await computeCheckoutRates(d, request());
+    expect(c.calls).toHaveLength(6);
   });
 
   it("logs no personal data", async () => {

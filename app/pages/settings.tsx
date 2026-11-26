@@ -1,4 +1,5 @@
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
+import type { ZodType } from "zod";
 import {
   Form,
   useActionData,
@@ -11,19 +12,37 @@ import { ActionBanner, type ActionResult } from "~/components/action-banner";
 import { TestBadge } from "~/components/status-badge";
 import { resetDemoData } from "~/db/seed/seed.server";
 import { can, requirePermission } from "~/domain/permissions";
-import type { CarrierCapabilities } from "~/integrations/carriers/types";
+import { EXPORT_REASONS, INCOTERMS, type CarrierCapabilities } from "~/integrations/carriers/types";
 import { NOVA_GLOBAL_CODE } from "~/integrations/carriers/nova-global";
-import { useLocale, useT, type TFunction } from "~/i18n";
-import { formatWeight } from "~/lib/format";
+import { NOVA_POST_ENDPOINTS } from "~/integrations/carriers/nova-post/client.server";
+import { NOVA_POST_CODE, NOVA_POST_DELIVERY_TYPES } from "~/integrations/carriers/nova-post/mapping";
+import { hasKey, useLocale, useT, type TFunction } from "~/i18n";
+import { getEnv } from "~/lib/env.server";
+import { formatDate, formatMoney, formatWeight } from "~/lib/format";
+import { logger } from "~/lib/logger.server";
+import {
+  DEFAULT_CARRIER_SERVICE_NAME,
+  disableCarrierService,
+  enableCarrierService,
+  getCarrierServiceStatus,
+  type CarrierServiceUnavailable,
+} from "~/modules/rates/carrier-service.server";
+import { previewCheckoutRates, type CheckoutRatesPreview } from "~/modules/rates/checkout-rates.server";
 import {
   AUTOMATION_MODES,
+  checkoutRatesSchema,
+  customsSchema,
+  NOVA_POST_PAYER_TYPES,
+  novaPostSchema,
   REQUIRED_SHIPPER_FIELDS,
+  ROUNDING_MODES,
   shipperSchema,
   TEST_CARRIER_SIMULATIONS,
   type SettingsKey,
   type SettingsValue,
 } from "~/modules/settings/schema";
 import { loadSettings, updateSetting, type UpdateSettingResult } from "~/modules/settings/settings.server";
+import { currentShop } from "~/modules/shopify-sync/sync.server";
 import { getRequestContext } from "~/server/context.server";
 import { formString, toActionError } from "~/server/http.server";
 import type { RequestContext } from "~/server/types";
@@ -35,6 +54,7 @@ import {
   Checkbox,
   ConfirmSubmitButton,
   DataTable,
+  Divider,
   FormLayout,
   Grid,
   InlineCode,
@@ -56,12 +76,45 @@ import {
 type Shipper = SettingsValue<"shipper">;
 type ShipperField = keyof Shipper;
 type Package = SettingsValue<"packaging">["packages"][number];
+type FxRate = SettingsValue<"checkoutRates">["fxRates"][number];
 
-const INTENTS = ["saveAutomation", "saveShipper", "savePackaging", "saveTestCarrier", "resetDemo"] as const;
+const INTENTS = [
+  "saveAutomation",
+  "saveShipper",
+  "saveCustoms",
+  "savePackaging",
+  "saveNovaPost",
+  "saveCheckoutRates",
+  "previewRates",
+  "enableCheckout",
+  "disableCheckout",
+  "saveTracking",
+  "saveTestCarrier",
+  "resetDemo",
+] as const;
 type Intent = (typeof INTENTS)[number];
 
+/** Максимум рядків у таблиці курсів (як у checkoutRatesSchema). */
+const MAX_FX_RATES = 20;
+const INVOICE_TYPES = customsSchema.shape.invoiceType.options;
+
+/** Результат тестового розрахунку для сторінки (те саме, що бачить Shopify, плюс пояснення). */
+export type CheckoutPreviewView = Pick<CheckoutRatesPreview, "enabled" | "carrier" | "parcel" | "reason" | "errorKind" | "quotes"> & {
+  rateCount: number;
+};
+
 /** Результат дії з позначкою форми, якій він належить (банер показується лише в ній). */
-export type SettingsActionResult = ActionResult & { intent: string };
+export type SettingsActionResult = ActionResult & { intent: string; preview?: CheckoutPreviewView };
+
+type CapabilityFlags = Pick<CarrierCapabilities, "rates" | "documents" | "tracking" | "createShipment" | "cancelShipment">;
+
+/** Стан підключення до Checkout (CarrierService) для сторінки. Жодних адрес callback і токенів. */
+export type CheckoutConnectionState =
+  | { kind: "demo" }
+  | { kind: "ownerOnly" }
+  | { kind: "unavailable"; reason: CarrierServiceUnavailable["reason"]; scope: string | null; shop: string | null }
+  | { kind: "error"; shop: string | null }
+  | { kind: "status"; registered: boolean; active: boolean; callbackUrlCurrent: boolean; shop: string | null };
 
 // ---------------------------------------------------------------- loader
 
@@ -75,18 +128,30 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const { values, versions } = await loadSettings(ctx.db);
   const isDemo = ctx.mode === "demo";
   const defaultCarrierCode = ctx.carriers.getDefault()?.code ?? null;
+  const canManage = can(ctx.actor, "settings.manage");
+  const novaPostAdapter = ctx.carriers.get(NOVA_POST_CODE);
+  // Розділ Nova Post: завжди в робочій версії; у демо — лише якщо такий перевізник зареєстрований.
+  const showNovaPost = ctx.mode === "production" || novaPostAdapter !== undefined;
 
   return {
     mode: ctx.mode,
     can: {
       automation: can(ctx.actor, "automation.manage"),
-      manage: can(ctx.actor, "settings.manage"),
+      manage: canManage,
       demoReset: isDemo && can(ctx.actor, "demo.reset"),
     },
     options: {
       modes: [...AUTOMATION_MODES],
       simulations: [...TEST_CARRIER_SIMULATIONS],
       requiredShipperFields: [...REQUIRED_SHIPPER_FIELDS] as ShipperField[],
+      incoterms: [...INCOTERMS],
+      exportReasons: [...EXPORT_REASONS],
+      invoiceTypes: [...INVOICE_TYPES],
+      payerTypes: [...NOVA_POST_PAYER_TYPES],
+      // "" — автоматично (тариф визначає перевізник).
+      deliveryTypes: ["", ...NOVA_POST_DELIVERY_TYPES],
+      roundingModes: [...ROUNDING_MODES],
+      maxFxRates: MAX_FX_RATES,
     },
     automation: { value: values.automation, version: versions.automation },
     shipper: {
@@ -94,21 +159,100 @@ export async function loader({ request }: LoaderFunctionArgs) {
       version: versions.shipper,
       missing: REQUIRED_SHIPPER_FIELDS.filter((f) => !String(values.shipper[f] ?? "").trim()) as ShipperField[],
     },
+    customs: { value: values.customs, version: versions.customs },
     packaging: { value: values.packaging, version: versions.packaging },
+    novaPost: showNovaPost
+      ? {
+          value: values.novaPost,
+          version: versions.novaPost,
+          registered: novaPostAdapter !== undefined,
+          shipmentsEnabled: novaPostAdapter?.capabilities.createShipment === true,
+        }
+      : null,
+    checkoutRates: {
+      value: values.checkoutRates,
+      version: versions.checkoutRates,
+      /** Базова валюта таблиці курсів — валюта тарифів Nova Post (як у checkout-rates.server). */
+      baseCurrency: values.novaPost.tariffCurrency,
+    },
+    checkoutConnection: await checkoutConnectionState(ctx, canManage),
+    /** Назва сервісу розрахунку доставки в Shopify (для інструкції «додайте тариф у зону доставки»). */
+    checkoutServiceName: DEFAULT_CARRIER_SERVICE_NAME,
+    tracking: { value: values.tracking, version: versions.tracking },
     testCarrier: isDemo ? { value: values.testCarrier, version: versions.testCarrier } : null,
     integrations: {
       // Лише булеві ознаки та публічні назви — жодних значень змінних середовища.
       shopifyConnected: ctx.mode === "production",
-      carriers: ctx.carriers.list().map((c) => ({
-        code: c.code,
-        displayName: c.displayName,
-        mode: c.mode,
-        isDefault: c.code === defaultCarrierCode,
-        capabilities: { ...c.capabilities },
-      })),
+      carriers: ctx.carriers
+        .list()
+        .filter((c) => c.code !== NOVA_POST_CODE)
+        .map((c) => ({
+          code: c.code,
+          displayName: c.displayName,
+          mode: c.mode,
+          isDefault: c.code === defaultCarrierCode,
+          capabilities: { ...c.capabilities },
+        })),
       novaGlobalRegistered: ctx.carriers.get(NOVA_GLOBAL_CODE) !== undefined,
+      novaPost: novaPostIntegration(ctx, defaultCarrierCode),
     },
   };
+}
+
+/** Стан Nova Post для розділу «Інтеграції»: лише ознаки (ключ задано/ні) і хост API, без значень. */
+function novaPostIntegration(ctx: RequestContext, defaultCarrierCode: string | null) {
+  const adapter = ctx.carriers.get(NOVA_POST_CODE);
+  let apiKeyConfigured: boolean | null = null;
+  let apiHost: string | null = null;
+  // У демо змінні середовища Nova Post не читаються: демо ніколи не звертається до перевізника.
+  if (ctx.mode === "production") {
+    const env = getEnv();
+    apiKeyConfigured = Boolean(env.NOVA_POSHTA_API_KEY);
+    apiHost = urlHost(env.NOVA_POSHTA_API_BASE ?? NOVA_POST_ENDPOINTS.ua);
+  }
+  const capabilities: CapabilityFlags | null = adapter
+    ? {
+        rates: adapter.capabilities.rates,
+        documents: adapter.capabilities.documents,
+        tracking: adapter.capabilities.tracking,
+        createShipment: adapter.capabilities.createShipment,
+        cancelShipment: adapter.capabilities.cancelShipment,
+      }
+    : null;
+  return {
+    registered: adapter !== undefined,
+    isDefault: adapter !== undefined && adapter.code === defaultCarrierCode,
+    apiKeyConfigured,
+    apiHost,
+    capabilities,
+  };
+}
+
+function urlHost(url: string): string | null {
+  try {
+    return new URL(url).host;
+  } catch {
+    return null;
+  }
+}
+
+async function checkoutConnectionState(ctx: RequestContext, canManage: boolean): Promise<CheckoutConnectionState> {
+  if (ctx.mode !== "production") return { kind: "demo" };
+  if (!canManage) return { kind: "ownerOnly" };
+  let shop: string | null = null;
+  try {
+    shop = (await currentShop(ctx.db))?.shop ?? null;
+    const status = await getCarrierServiceStatus(ctx);
+    if (!status.ok) {
+      return { kind: "unavailable", reason: status.reason, scope: status.reason === "missing_scope" ? status.scope : null, shop };
+    }
+    const { registered, active, callbackUrlCurrent } = status.value;
+    return { kind: "status", registered, active, callbackUrlCurrent, shop };
+  } catch (error) {
+    // Стан необов'язковий для сторінки: помилка Shopify не блокує налаштування.
+    logger.warn("settings.carrier_service_status_failed", { error });
+    return { kind: "error", shop };
+  }
 }
 
 // ---------------------------------------------------------------- action
@@ -129,7 +273,9 @@ function isIntent(value: string): value is Intent {
   return (INTENTS as readonly string[]).includes(value);
 }
 
-async function runIntent(ctx: RequestContext, intent: Intent, form: FormData): Promise<ActionResult> {
+type IntentResult = ActionResult & { preview?: CheckoutPreviewView };
+
+async function runIntent(ctx: RequestContext, intent: Intent, form: FormData): Promise<IntentResult> {
   switch (intent) {
     case "saveAutomation": {
       requirePermission(ctx.actor, "automation.manage");
@@ -146,6 +292,17 @@ async function runIntent(ctx: RequestContext, intent: Intent, form: FormData): P
       const input = Object.fromEntries(fields.map((f) => [f, formString(form, f)]));
       return saved(await updateSetting(ctx.db, ctx.actor, "shipper", input, version));
     }
+    case "saveCustoms": {
+      requirePermission(ctx.actor, "settings.manage");
+      const version = expectedVersion(form);
+      if (version === null) return { ok: false, error: "error.generic" };
+      const input = {
+        incoterm: formString(form, "incoterm"),
+        exportReason: formString(form, "exportReason"),
+        invoiceType: formString(form, "invoiceType"),
+      };
+      return saved(await updateSetting(ctx.db, ctx.actor, "customs", input, version));
+    }
     case "savePackaging": {
       requirePermission(ctx.actor, "settings.manage");
       const version = expectedVersion(form);
@@ -160,6 +317,99 @@ async function runIntent(ctx: RequestContext, intent: Intent, form: FormData): P
         volumetricDivisor: divisor === "" ? Number.NaN : Number(divisor),
       };
       return saved(await updateSetting(ctx.db, ctx.actor, "packaging", input, version));
+    }
+    case "saveNovaPost": {
+      requirePermission(ctx.actor, "settings.manage");
+      const version = expectedVersion(form);
+      if (version === null) return { ok: false, error: "error.generic" };
+      const input = {
+        payerType: formString(form, "payerType"),
+        payerContractNumber: formString(form, "payerContractNumber"),
+        deliveryType: formString(form, "deliveryType"),
+        tariffCurrency: formString(form, "tariffCurrency"),
+      };
+      const extra = novaPostFieldErrors(input);
+      if (Object.keys(extra).length > 0) return invalid({ ...schemaFieldErrors(novaPostSchema, input), ...extra });
+      return saved(await updateSetting(ctx.db, ctx.actor, "novaPost", input, version));
+    }
+    case "saveCheckoutRates": {
+      requirePermission(ctx.actor, "settings.manage");
+      const version = expectedVersion(form);
+      if (version === null) return { ok: false, error: "error.generic" };
+      const { values } = await loadSettings(ctx.db);
+      const fx = parseFxRateRows(form, values.novaPost.tariffCurrency);
+      const input = {
+        enabled: form.get("enabled") === "on",
+        markupPercent: decimalNumber(formString(form, "markupPercent")),
+        markupFixed: decimalString(formString(form, "markupFixed")),
+        rounding: formString(form, "rounding"),
+        fxRates: fx.rows,
+        serviceName: formString(form, "serviceName"),
+      };
+      if (Object.keys(fx.errors).length > 0) {
+        return invalid({ ...remapFxErrors(schemaFieldErrors(checkoutRatesSchema, input), fx.index), ...fx.errors });
+      }
+      const result = await updateSetting(ctx.db, ctx.actor, "checkoutRates", input, version);
+      return result.ok ? saved(result) : invalid(remapFxErrors(result.fieldErrors, fx.index));
+    }
+    case "previewRates": {
+      requirePermission(ctx.actor, "settings.manage");
+      const preview = await previewCheckoutRates(ctx, {
+        countryCode: formString(form, "countryCode"),
+        postalCode: formString(form, "postalCode"),
+        city: formString(form, "city"),
+        province: formString(form, "province"),
+        weightGrams: integerNumber(formString(form, "weightGrams")),
+        value: decimalString(formString(form, "value")),
+        currency: formString(form, "currency"),
+      });
+      return {
+        ok: true,
+        message: "settings.checkoutRates.preview.ok",
+        params: { count: preview.rates.length },
+        preview: {
+          enabled: preview.enabled,
+          carrier: preview.carrier,
+          parcel: preview.parcel,
+          reason: preview.reason,
+          errorKind: preview.errorKind,
+          quotes: preview.quotes,
+          rateCount: preview.rates.length,
+        },
+      };
+    }
+    case "enableCheckout": {
+      requirePermission(ctx.actor, "settings.manage");
+      const r = await enableCarrierService(ctx);
+      if (!r.ok) return connectionUnavailable(r);
+      return {
+        ok: true,
+        message: `settings.checkoutConnection.enable.${r.value.result}`,
+        tone: r.value.result === "unchanged" ? "info" : "success",
+      };
+    }
+    case "disableCheckout": {
+      requirePermission(ctx.actor, "settings.manage");
+      const r = await disableCarrierService(ctx);
+      if (!r.ok) return connectionUnavailable(r);
+      return {
+        ok: true,
+        message: `settings.checkoutConnection.disable.${r.value.result}`,
+        tone: r.value.result === "deactivated" || r.value.result === "deleted" ? "success" : "info",
+      };
+    }
+    case "saveTracking": {
+      requirePermission(ctx.actor, "settings.manage");
+      const version = expectedVersion(form);
+      if (version === null) return { ok: false, error: "error.generic" };
+      const input = {
+        enabled: form.get("enabled") === "on",
+        intervalMinutes: integerNumber(formString(form, "intervalMinutes")),
+        pushToShopify: form.get("pushToShopify") === "on",
+        notifyCustomer: form.get("notifyCustomer") === "on",
+        trackingUrlTemplate: formString(form, "trackingUrlTemplate"),
+      };
+      return saved(await updateSetting(ctx.db, ctx.actor, "tracking", input, version));
     }
     case "saveTestCarrier": {
       if (ctx.mode !== "demo") throw new Response("Not Found", { status: 404 });
@@ -185,9 +435,103 @@ function expectedVersion(form: FormData): number | null {
 }
 
 function saved<K extends SettingsKey>(result: UpdateSettingResult<K>): ActionResult {
-  return result.ok
-    ? { ok: true, message: "result.settings.saved" }
-    : { ok: false, error: "error.validation", fieldErrors: result.fieldErrors };
+  return result.ok ? { ok: true, message: "result.settings.saved" } : invalid(result.fieldErrors);
+}
+
+function invalid(fieldErrors: Record<string, string>): ActionResult {
+  return { ok: false, error: "error.validation", fieldErrors };
+}
+
+function connectionUnavailable(r: CarrierServiceUnavailable): ActionResult {
+  return {
+    ok: false,
+    error: `settings.checkoutConnection.reason.${r.reason}`,
+    params: r.reason === "missing_scope" ? { scope: r.scope } : undefined,
+  };
+}
+
+/** Помилки zod за полями (як у updateSetting) — коли збереження зупиняє перевірка сторінки. */
+function schemaFieldErrors(schema: ZodType, input: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  const parsed = schema.safeParse(input);
+  if (parsed.success) return out;
+  for (const issue of parsed.error.issues) out[issue.path.map(String).join(".") || "_"] ??= issue.message;
+  return out;
+}
+
+/**
+ * Додаткові правила Nova Post, яких немає в схемі: договір обов'язковий для ThirdPerson; довжина договору 2–20
+ * (обмеження API у mapping.ts — інакше накладну відхилить уже перевізник).
+ */
+function novaPostFieldErrors(input: { payerType: string; payerContractNumber: string }): Record<string, string> {
+  const errors: Record<string, string> = {};
+  const contract = input.payerContractNumber.trim();
+  if (input.payerType === "ThirdPerson" && contract === "") errors.payerContractNumber = "required";
+  else if (contract !== "" && (contract.length < 2 || contract.length > 20)) errors.payerContractNumber = "length";
+  return errors;
+}
+
+/** Десятковий рядок: кома як роздільник теж приймається (45,50 → 45.50). */
+function decimalString(raw: string): string {
+  return raw.trim().replace(",", ".");
+}
+
+/** Число з десятковою частиною; некоректний ввід → NaN (схема поверне помилку поля). */
+function decimalNumber(raw: string): number {
+  const v = decimalString(raw);
+  return /^\d{1,6}(\.\d{1,4})?$/.test(v) ? Number(v) : Number.NaN;
+}
+
+function integerNumber(raw: string): number {
+  const v = raw.trim();
+  return /^\d{1,9}$/.test(v) ? Number(v) : Number.NaN;
+}
+
+interface ParsedFxRates {
+  rows: FxRate[];
+  /** Індекс рядка у формі для кожного збереженого рядка (порожні рядки пропускаються). */
+  index: number[];
+  /** Помилки сторінки за шляхом fxRates.{рядок форми}.{поле}: duplicate | base | zero. */
+  errors: Record<string, string>;
+}
+
+/**
+ * Таблиця курсів із форми: пари полів fxCurrency/fxRate (у порядку рядків). Повністю порожні рядки пропускаються,
+ * код валюти — у верхньому регістрі, кома в курсі → крапка. Дублікати, валюта тарифів і нульовий курс — помилки рядка.
+ */
+function parseFxRateRows(form: FormData, baseCurrency: string): ParsedFxRates {
+  const text = (v: FormDataEntryValue | undefined) => (typeof v === "string" ? v : "");
+  const currencies = form.getAll("fxCurrency");
+  const rates = form.getAll("fxRate");
+  const rows: FxRate[] = [];
+  const index: number[] = [];
+  const errors: Record<string, string> = {};
+  const seen = new Set<string>();
+  const base = baseCurrency.trim().toUpperCase();
+  const count = Math.max(currencies.length, rates.length);
+  for (let i = 0; i < count; i++) {
+    const currency = text(currencies[i]).trim().toUpperCase();
+    const rate = decimalString(text(rates[i]));
+    if (currency === "" && rate === "") continue;
+    if (currency !== "" && seen.has(currency)) errors[`fxRates.${i}.currency`] = "duplicate";
+    else if (currency !== "" && currency === base) errors[`fxRates.${i}.currency`] = "base";
+    if (currency !== "") seen.add(currency);
+    if (/^0+(\.0+)?$/.test(rate)) errors[`fxRates.${i}.rate`] = "zero";
+    rows.push({ currency, rate });
+    index.push(i);
+  }
+  return { rows, index, errors };
+}
+
+/** Шляхи помилок схеми fxRates.{n}.* (n — індекс у збереженому масиві) → індекс рядка у формі. */
+function remapFxErrors(errors: Record<string, string>, index: number[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [path, message] of Object.entries(errors)) {
+    const m = /^fxRates\.(\d+)(\..+)?$/.exec(path);
+    const formRow = m ? index[Number(m[1])] : undefined;
+    out[m && formRow !== undefined ? `fxRates.${formRow}${m[2] ?? ""}` : path] = message;
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------- page
@@ -196,12 +540,30 @@ type LoaderData = Awaited<ReturnType<typeof loader>>;
 type CarrierInfo = LoaderData["integrations"]["carriers"][number];
 type FieldErrorFn = (name: string) => string | null;
 
-/** Повідомлення сервера (zod) не показуємо як є — перекладаємо за назвою поля. */
+/**
+ * Повідомлення сервера (zod) не показуємо як є — перекладаємо за назвою поля.
+ * Ключ «поле:код» — для помилок сторінки з конкретною причиною (напр. payerContractNumber:required).
+ */
 const FIELD_ERROR_KEYS: Readonly<Record<string, string>> = {
   email: "settings.error.email",
   countryCode: "settings.error.countryCode",
   defaultPackageCode: "settings.error.defaultPackage",
   volumetricDivisor: "settings.error.volumetricDivisor",
+  taxId: "settings.error.taxId",
+  eori: "settings.error.eori",
+  ioss: "settings.error.ioss",
+  payerContractNumber: "settings.novaPost.error.contractLength",
+  "payerContractNumber:required": "settings.novaPost.error.contractRequired",
+  "payerContractNumber:length": "settings.novaPost.error.contractLength",
+  deliveryType: "settings.novaPost.error.deliveryType",
+  tariffCurrency: "settings.error.currency",
+  currency: "settings.error.currency",
+  markupPercent: "settings.checkoutRates.error.markupPercent",
+  markupFixed: "settings.checkoutRates.error.markupFixed",
+  weightGrams: "settings.checkoutRates.error.weight",
+  value: "settings.checkoutRates.error.value",
+  intervalMinutes: "settings.tracking.error.interval",
+  trackingUrlTemplate: "settings.tracking.error.template",
 };
 
 interface ShipperFieldConfig {
@@ -210,8 +572,11 @@ interface ShipperFieldConfig {
   maxLength: number;
   help?: string;
   autoCapitalize?: string;
+  inputMode?: "numeric" | "text";
   /** На всю ширину у двоколонковій розкладці. */
   full?: boolean;
+  /** Митні реквізити — окремий підрозділ. */
+  customs?: boolean;
 }
 
 /** Порядок і параметри полів відправника (maxLength — як у shipperSchema). */
@@ -232,6 +597,9 @@ const SHIPPER_FIELDS: Record<ShipperField, ShipperFieldConfig> = {
   address2: { autoComplete: "address-line2", maxLength: 200, full: true },
   warehouseName: { autoComplete: "off", maxLength: 120 },
   carrierBranch: { autoComplete: "off", maxLength: 120, help: "settings.shipper.help.carrierBranch" },
+  taxId: { autoComplete: "off", maxLength: 10, inputMode: "numeric", help: "settings.shipper.help.taxId", customs: true },
+  eori: { autoComplete: "off", maxLength: 17, autoCapitalize: "characters", help: "settings.shipper.help.eori", customs: true },
+  ioss: { autoComplete: "off", maxLength: 12, autoCapitalize: "characters", help: "settings.shipper.help.ioss", customs: true },
 };
 const SHIPPER_FIELD_ORDER = Object.keys(SHIPPER_FIELDS) as ShipperField[];
 
@@ -246,6 +614,9 @@ const CAPABILITY_KEYS = [
   "tracking",
   "returns",
 ] as const satisfies readonly (keyof CarrierCapabilities)[];
+
+/** Можливості Nova Post у розділі «Інтеграції» (розрахунок, документи, відстеження, створення, скасування). */
+const NOVA_POST_CAPABILITY_KEYS = ["rates", "documents", "tracking", "createShipment", "cancelShipment"] as const satisfies readonly (keyof CapabilityFlags)[];
 
 export default function SettingsPage() {
   const data = useLoaderData<typeof loader>();
@@ -271,7 +642,20 @@ export default function SettingsPage() {
       <Stack gap={5}>
         <AutomationSection data={data} {...sectionProps("saveAutomation")} />
         <ShipperSection data={data} {...sectionProps("saveShipper")} />
+        <CustomsSection data={data} {...sectionProps("saveCustoms")} />
         <PackagingSection data={data} {...sectionProps("savePackaging")} />
+        {data.novaPost ? <NovaPostSection data={data} {...sectionProps("saveNovaPost")} /> : null}
+        <CheckoutRatesSection
+          data={data}
+          {...sectionProps("saveCheckoutRates")}
+          preview={sectionProps("previewRates")}
+          connection={{
+            result: resultFor("enableCheckout") ?? resultFor("disableCheckout"),
+            pendingEnable: pendingIntent === "enableCheckout",
+            pendingDisable: pendingIntent === "disableCheckout",
+          }}
+        />
+        <TrackingSection data={data} {...sectionProps("saveTracking")} />
         {data.testCarrier ? <TestCarrierSection data={data} {...sectionProps("saveTestCarrier")} /> : null}
         <IntegrationsSection data={data} />
         <Grid columns={{ xs: 1, lg: data.can.demoReset ? 2 : 1 }} gap={4}>
@@ -289,7 +673,11 @@ export default function SettingsPage() {
 
 function fieldErrorFn(t: TFunction, result: SettingsActionResult | undefined): FieldErrorFn {
   const errors = result && !result.ok ? result.fieldErrors : undefined;
-  return (name) => (errors?.[name] ? t(FIELD_ERROR_KEYS[name] ?? "settings.error.invalid") : null);
+  return (name) => {
+    const message = errors?.[name];
+    if (!message) return null;
+    return t(FIELD_ERROR_KEYS[`${name}:${message}`] ?? FIELD_ERROR_KEYS[name] ?? "settings.error.invalid");
+  };
 }
 
 interface SectionProps {
@@ -412,6 +800,37 @@ function ShipperSection({ data, result, pending, fieldError }: SectionProps) {
   const required = new Set<ShipperField>(data.options.requiredShipperFields);
   const fieldLabel = (f: ShipperField) => t(`settings.shipper.field.${f}`);
 
+  const renderField = (f: ShipperField) => {
+    const cfg = SHIPPER_FIELDS[f];
+    const help = [required.has(f) ? t("settings.shipper.requiredForWaybill") : null, cfg.help ? t(cfg.help) : null]
+      .filter(Boolean)
+      .join(" ");
+    const field = (
+      <TextField
+        key={f}
+        label={fieldLabel(f)}
+        name={f}
+        type={cfg.type}
+        defaultValue={value[f]}
+        autoComplete={cfg.autoComplete}
+        autoCapitalize={cfg.autoCapitalize}
+        inputMode={cfg.inputMode}
+        maxLength={cfg.maxLength}
+        helpText={help || undefined}
+        error={fieldError(f)}
+        disabled={!editable}
+        spellCheck={false}
+      />
+    );
+    return cfg.full ? (
+      <div key={f} className="ot-form-layout__full">
+        {field}
+      </div>
+    ) : (
+      field
+    );
+  };
+
   return (
     <Card title={t("settings.shipper.title")} description={t("settings.shipper.description")}>
       <Form method="post" key={version}>
@@ -430,37 +849,16 @@ function ShipperSection({ data, result, pending, fieldError }: SectionProps) {
           <Text variant="body-sm" tone="subdued">
             {t("settings.shipper.requiredNote")}
           </Text>
-          <FormLayout columns={2}>
-            {SHIPPER_FIELD_ORDER.map((f) => {
-              const cfg = SHIPPER_FIELDS[f];
-              const help = [required.has(f) ? t("settings.shipper.requiredForWaybill") : null, cfg.help ? t(cfg.help) : null]
-                .filter(Boolean)
-                .join(" ");
-              const field = (
-                <TextField
-                  key={f}
-                  label={fieldLabel(f)}
-                  name={f}
-                  type={cfg.type}
-                  defaultValue={value[f]}
-                  autoComplete={cfg.autoComplete}
-                  autoCapitalize={cfg.autoCapitalize}
-                  maxLength={cfg.maxLength}
-                  helpText={help || undefined}
-                  error={fieldError(f)}
-                  disabled={!editable}
-                  spellCheck={false}
-                />
-              );
-              return cfg.full ? (
-                <div key={f} className="ot-form-layout__full">
-                  {field}
-                </div>
-              ) : (
-                field
-              );
-            })}
-          </FormLayout>
+          <FormLayout columns={2}>{SHIPPER_FIELD_ORDER.filter((f) => !SHIPPER_FIELDS[f].customs).map(renderField)}</FormLayout>
+          <Stack gap={2}>
+            <Text as="h3" variant="heading-sm">
+              {t("settings.shipper.customsTitle")}
+            </Text>
+            <Text variant="body-sm" tone="subdued">
+              {t("settings.shipper.customsNote")}
+            </Text>
+          </Stack>
+          <FormLayout columns={2}>{SHIPPER_FIELD_ORDER.filter((f) => SHIPPER_FIELDS[f].customs).map(renderField)}</FormLayout>
           <SaveRow canSave={editable} pending={pending} version={version} />
         </Stack>
       </Form>
@@ -468,7 +866,58 @@ function ShipperSection({ data, result, pending, fieldError }: SectionProps) {
   );
 }
 
-// ---------------------------------------------------------------- 3. Упаковка
+// ---------------------------------------------------------------- 3. Митні документи
+
+function CustomsSection({ data, result, pending, fieldError }: SectionProps) {
+  const t = useT();
+  const { value, version } = data.customs;
+  const editable = data.can.manage;
+  return (
+    <Card title={t("settings.customs.title")} description={t("settings.customs.description")}>
+      <Form method="post" key={version}>
+        <Hidden intent="saveCustoms" version={version} />
+        <Stack gap={4}>
+          <ActionBanner data={result} />
+          <FormLayout columns={2}>
+            <div className="ot-form-layout__full">
+              <Select
+                label={t("settings.customs.incoterm")}
+                name="incoterm"
+                defaultValue={value.incoterm}
+                options={data.options.incoterms.map((v) => ({ value: v, label: t(`settings.customs.incoterm.${v}`) }))}
+                helpText={t("settings.customs.incotermHelp")}
+                error={fieldError("incoterm")}
+                disabled={!editable}
+              />
+            </div>
+            <Select
+              label={t("settings.customs.exportReason")}
+              name="exportReason"
+              defaultValue={value.exportReason}
+              options={data.options.exportReasons.map((v) => ({ value: v, label: t(`settings.customs.exportReason.${v}`) }))}
+              error={fieldError("exportReason")}
+              disabled={!editable}
+            />
+            <Select
+              label={t("settings.customs.invoiceType")}
+              name="invoiceType"
+              defaultValue={value.invoiceType}
+              options={data.options.invoiceTypes.map((v) => ({ value: v, label: t(`settings.customs.invoiceType.${v}`) }))}
+              error={fieldError("invoiceType")}
+              disabled={!editable}
+            />
+          </FormLayout>
+          <Banner tone="info" title={t("settings.customs.hsTitle")}>
+            {t("settings.customs.hsNote")}
+          </Banner>
+          <SaveRow canSave={editable} pending={pending} version={version} />
+        </Stack>
+      </Form>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------- 4. Упаковка
 
 function PackagingSection({ data, result, pending, fieldError }: SectionProps) {
   const t = useT();
@@ -559,7 +1008,707 @@ function PackagingSection({ data, result, pending, fieldError }: SectionProps) {
   );
 }
 
-// ---------------------------------------------------------------- 4. Тестовий перевізник (демо)
+// ---------------------------------------------------------------- 5. Nova Post
+
+function NovaPostSection({ data, result, pending, fieldError }: SectionProps) {
+  const t = useT();
+  if (!data.novaPost) return null;
+  return (
+    <Card title={t("settings.novaPost.title")} description={t("settings.novaPost.description")}>
+      <NovaPostForm
+        key={data.novaPost.version}
+        data={data}
+        result={result}
+        pending={pending}
+        fieldError={fieldError}
+        initialPayer={data.novaPost.value.payerType}
+      />
+    </Card>
+  );
+}
+
+function NovaPostForm({ data, result, pending, fieldError, initialPayer }: SectionProps & { initialPayer: string }) {
+  const t = useT();
+  const [payer, setPayer] = useState(initialPayer);
+  if (!data.novaPost) return null;
+  const { value, version, registered, shipmentsEnabled } = data.novaPost;
+  const editable = data.can.manage;
+  const deliveryLabel = (v: string) =>
+    v === "" ? t("settings.novaPost.deliveryType.auto") : hasKey(`settings.novaPost.deliveryType.${v}`) ? t(`settings.novaPost.deliveryType.${v}`) : v;
+  return (
+    <Form method="post">
+      <Hidden intent="saveNovaPost" version={version} />
+      <Stack gap={4}>
+        <ActionBanner data={result} />
+        {!registered ? <Banner tone="warning">{t("settings.novaPost.notRegistered")}</Banner> : null}
+        <FormLayout columns={2}>
+          <Select
+            label={t("settings.novaPost.payerType")}
+            name="payerType"
+            value={payer}
+            onChange={(e) => setPayer(e.currentTarget.value)}
+            options={data.options.payerTypes.map((v) => ({ value: v, label: t(`settings.novaPost.payerType.${v}`) }))}
+            error={fieldError("payerType")}
+            disabled={!editable}
+          />
+          <TextField
+            label={t("settings.novaPost.payerContractNumber")}
+            name="payerContractNumber"
+            defaultValue={value.payerContractNumber}
+            maxLength={50}
+            autoComplete="off"
+            spellCheck={false}
+            required={payer === "ThirdPerson"}
+            helpText={t("settings.novaPost.payerContractNumberHelp")}
+            error={fieldError("payerContractNumber")}
+            disabled={!editable}
+          />
+          <Select
+            label={t("settings.novaPost.deliveryType")}
+            name="deliveryType"
+            defaultValue={value.deliveryType}
+            options={data.options.deliveryTypes.map((v) => ({ value: v, label: deliveryLabel(v) }))}
+            helpText={t("settings.novaPost.deliveryTypeHelp")}
+            error={fieldError("deliveryType")}
+            disabled={!editable}
+          />
+          <TextField
+            label={t("settings.novaPost.tariffCurrency")}
+            name="tariffCurrency"
+            defaultValue={value.tariffCurrency}
+            maxLength={3}
+            autoComplete="off"
+            autoCapitalize="characters"
+            spellCheck={false}
+            helpText={t("settings.novaPost.tariffCurrencyHelp")}
+            error={fieldError("tariffCurrency")}
+            disabled={!editable}
+          />
+        </FormLayout>
+        <Stack gap={2}>
+          <Stack direction="horizontal" gap={2} align="center">
+            <Text as="h3" variant="heading-sm">
+              {t("settings.novaPost.creation.title")}
+            </Text>
+            <Badge tone={shipmentsEnabled ? "success" : "outline"}>
+              {shipmentsEnabled ? t("settings.novaPost.creation.enabled") : t("settings.novaPost.creation.disabled")}
+            </Badge>
+          </Stack>
+          <Text variant="body-sm" tone="subdued">
+            {shipmentsEnabled ? t("settings.novaPost.creation.enabledHelp") : t("settings.novaPost.creation.disabledHelp")}
+          </Text>
+        </Stack>
+        <SaveRow canSave={editable} pending={pending} version={version} />
+      </Stack>
+    </Form>
+  );
+}
+
+// ---------------------------------------------------------------- 6. Розрахунок доставки в Checkout
+
+interface CheckoutRatesSectionProps extends SectionProps {
+  preview: { result: SettingsActionResult | undefined; pending: boolean; fieldError: FieldErrorFn };
+  connection: { result: SettingsActionResult | undefined; pendingEnable: boolean; pendingDisable: boolean };
+}
+
+function CheckoutRatesSection({ data, result, pending, fieldError, preview, connection }: CheckoutRatesSectionProps) {
+  const t = useT();
+  return (
+    <Card title={t("settings.checkoutRates.title")} description={t("settings.checkoutRates.description")}>
+      <Stack gap={5}>
+        <CheckoutRatesForm key={data.checkoutRates.version} data={data} result={result} pending={pending} fieldError={fieldError} />
+        <Divider />
+        <CheckoutPreview data={data} {...preview} />
+        <Divider />
+        <CheckoutConnection data={data} {...connection} />
+      </Stack>
+    </Card>
+  );
+}
+
+function CheckoutRatesForm({ data, result, pending, fieldError }: SectionProps) {
+  const t = useT();
+  const { value, version, baseCurrency } = data.checkoutRates;
+  const editable = data.can.manage;
+  const errors = result && !result.ok ? (result.fieldErrors ?? {}) : {};
+  return (
+    <Form method="post">
+      <Hidden intent="saveCheckoutRates" version={version} />
+      <Stack gap={4}>
+        <ActionBanner data={result} />
+        {value.enabled ? <Banner tone="info">{t("settings.checkoutRates.enabledBanner")}</Banner> : null}
+        <Checkbox
+          label={t("settings.checkoutRates.enabled")}
+          name="enabled"
+          defaultChecked={value.enabled}
+          helpText={t("settings.checkoutRates.enabledHelp")}
+          error={fieldError("enabled")}
+          disabled={!editable}
+        />
+        <FormLayout columns={2}>
+          <TextField
+            label={t("settings.checkoutRates.markupPercent")}
+            name="markupPercent"
+            inputMode="decimal"
+            defaultValue={value.markupPercent}
+            maxLength={11}
+            suffix="%"
+            helpText={t("settings.checkoutRates.markupPercentHelp")}
+            error={fieldError("markupPercent")}
+            disabled={!editable}
+          />
+          <TextField
+            label={t("settings.checkoutRates.markupFixed")}
+            name="markupFixed"
+            inputMode="decimal"
+            defaultValue={value.markupFixed}
+            maxLength={10}
+            suffix={baseCurrency}
+            helpText={t("settings.checkoutRates.markupFixedHelp", { base: baseCurrency })}
+            error={fieldError("markupFixed")}
+            disabled={!editable}
+          />
+          <Select
+            label={t("settings.checkoutRates.rounding")}
+            name="rounding"
+            defaultValue={value.rounding}
+            options={data.options.roundingModes.map((v) => ({ value: v, label: t(`settings.checkoutRates.rounding.${v}`) }))}
+            error={fieldError("rounding")}
+            disabled={!editable}
+          />
+          <TextField
+            label={t("settings.checkoutRates.serviceName")}
+            name="serviceName"
+            defaultValue={value.serviceName}
+            maxLength={80}
+            autoComplete="off"
+            helpText={t("settings.checkoutRates.serviceNameHelp")}
+            error={fieldError("serviceName")}
+            disabled={!editable}
+          />
+        </FormLayout>
+        <FxRatesEditor
+          initial={value.fxRates}
+          editable={editable}
+          base={baseCurrency}
+          max={data.options.maxFxRates}
+          errors={errors}
+        />
+        <SaveRow canSave={editable} pending={pending} version={version} />
+      </Stack>
+    </Form>
+  );
+}
+
+const FX_ERROR_KEYS: Readonly<Record<string, string>> = {
+  "currency:duplicate": "settings.checkoutRates.error.fxDuplicate",
+  "currency:base": "settings.checkoutRates.error.fxBase",
+  currency: "settings.checkoutRates.error.fxCurrency",
+  rate: "settings.checkoutRates.error.fxRate",
+};
+
+/** Таблиця курсів: рядки «валюта + курс», додавання/видалення до max рядків. Порожні рядки не зберігаються. */
+function FxRatesEditor({
+  initial,
+  editable,
+  base,
+  max,
+  errors,
+}: {
+  initial: FxRate[];
+  editable: boolean;
+  base: string;
+  max: number;
+  errors: Record<string, string>;
+}) {
+  const t = useT();
+  const nextId = useRef(0);
+  const withId = (row: FxRate) => ({ ...row, id: nextId.current++ });
+  const [rows, setRows] = useState(() => (initial.length > 0 ? initial : [{ currency: "", rate: "" }]).map(withId));
+  const rowError = (i: number, field: "currency" | "rate") => {
+    const message = errors[`fxRates.${i}.${field}`];
+    if (!message) return null;
+    return t(FX_ERROR_KEYS[`${field}:${message}`] ?? FX_ERROR_KEYS[field] ?? "settings.error.invalid", { base });
+  };
+  const add = () => setRows((r) => (r.length >= max ? r : [...r, withId({ currency: "", rate: "" })]));
+  const remove = (id: number) =>
+    setRows((r) => {
+      const left = r.filter((row) => row.id !== id);
+      return left.length > 0 ? left : [withId({ currency: "", rate: "" })];
+    });
+  const tooMany = Object.keys(errors).includes("fxRates");
+
+  return (
+    <Stack gap={3}>
+      <Stack gap={1}>
+        <Text as="h3" variant="heading-sm">
+          {t("settings.checkoutRates.fx.title")}
+        </Text>
+        <Text variant="body-sm" tone="subdued">
+          {t("settings.checkoutRates.fx.help", { base })}
+        </Text>
+      </Stack>
+      {tooMany ? <Banner tone="critical">{t("settings.checkoutRates.error.fxTooMany", { max })}</Banner> : null}
+      {rows.map((row, i) => (
+        <Grid key={row.id} columns={{ xs: 1, md: editable ? 3 : 2 }} gap={3}>
+          <TextField
+            id={`fxCurrency-${row.id}`}
+            label={t("settings.checkoutRates.fx.currency")}
+            name="fxCurrency"
+            defaultValue={row.currency}
+            maxLength={3}
+            autoComplete="off"
+            autoCapitalize="characters"
+            spellCheck={false}
+            placeholder="EUR"
+            error={rowError(i, "currency")}
+            disabled={!editable}
+          />
+          <TextField
+            id={`fxRate-${row.id}`}
+            label={t("settings.checkoutRates.fx.rate", { base })}
+            name="fxRate"
+            inputMode="decimal"
+            defaultValue={row.rate}
+            maxLength={13}
+            autoComplete="off"
+            placeholder="45.50"
+            error={rowError(i, "rate")}
+            disabled={!editable}
+          />
+          {editable ? (
+            <Stack justify="end">
+              <Button onClick={() => remove(row.id)} aria-label={t("settings.checkoutRates.fx.removeLabel", { n: i + 1 })}>
+                {t("settings.checkoutRates.fx.remove")}
+              </Button>
+            </Stack>
+          ) : null}
+        </Grid>
+      ))}
+      {editable ? (
+        <Stack direction="horizontal" gap={3} align="center">
+          <Button onClick={add} disabled={rows.length >= max}>
+            {t("settings.checkoutRates.fx.add")}
+          </Button>
+          <Text variant="caption" tone="subdued">
+            {t("settings.checkoutRates.fx.limit", { max })}
+          </Text>
+        </Stack>
+      ) : null}
+    </Stack>
+  );
+}
+
+function CheckoutPreview({
+  data,
+  result,
+  pending,
+  fieldError,
+}: {
+  data: LoaderData;
+  result: SettingsActionResult | undefined;
+  pending: boolean;
+  fieldError: FieldErrorFn;
+}) {
+  const t = useT();
+  const preview = result?.ok ? result.preview : undefined;
+  return (
+    <Stack gap={3}>
+      <Stack gap={1}>
+        <Text as="h3" variant="heading-sm">
+          {t("settings.checkoutRates.preview.title")}
+        </Text>
+        <Text variant="body-sm" tone="subdued">
+          {t("settings.checkoutRates.preview.help")}
+        </Text>
+      </Stack>
+      {!data.can.manage ? (
+        <Text variant="body-sm" tone="subdued">
+          {t("settings.ownerOnly")}
+        </Text>
+      ) : (
+        <Form method="post">
+          <input type="hidden" name="intent" value="previewRates" />
+          <Stack gap={3}>
+            {preview ? null : <ActionBanner data={result} />}
+            <FormLayout columns={2}>
+              <TextField
+                id="preview-countryCode"
+                label={t("settings.checkoutRates.preview.countryCode")}
+                name="countryCode"
+                defaultValue="DE"
+                maxLength={2}
+                autoComplete="off"
+                autoCapitalize="characters"
+                spellCheck={false}
+                required
+                error={fieldError("countryCode")}
+              />
+              <TextField
+                id="preview-postalCode"
+                label={t("settings.checkoutRates.preview.postalCode")}
+                name="postalCode"
+                defaultValue="10115"
+                maxLength={20}
+                autoComplete="off"
+                spellCheck={false}
+                error={fieldError("postalCode")}
+              />
+              <TextField
+                id="preview-city"
+                label={t("settings.checkoutRates.preview.city")}
+                name="city"
+                defaultValue="Berlin"
+                maxLength={120}
+                autoComplete="off"
+                error={fieldError("city")}
+              />
+              <TextField
+                id="preview-province"
+                label={t("settings.checkoutRates.preview.province")}
+                name="province"
+                maxLength={120}
+                autoComplete="off"
+                error={fieldError("province")}
+              />
+              <TextField
+                id="preview-weightGrams"
+                label={t("settings.checkoutRates.preview.weightGrams")}
+                name="weightGrams"
+                type="number"
+                inputMode="numeric"
+                min={1}
+                max={1_000_000}
+                step={1}
+                defaultValue={500}
+                suffix="g"
+                required
+                helpText={t("settings.checkoutRates.preview.weightHelp")}
+                error={fieldError("weightGrams")}
+              />
+              <TextField
+                id="preview-value"
+                label={t("settings.checkoutRates.preview.value")}
+                name="value"
+                inputMode="decimal"
+                defaultValue="50.00"
+                maxLength={12}
+                required
+                error={fieldError("value")}
+              />
+              <TextField
+                id="preview-currency"
+                label={t("settings.checkoutRates.preview.currency")}
+                name="currency"
+                defaultValue="EUR"
+                maxLength={3}
+                autoComplete="off"
+                autoCapitalize="characters"
+                spellCheck={false}
+                required
+                error={fieldError("currency")}
+              />
+            </FormLayout>
+            <div>
+              <Button type="submit" loading={pending}>
+                {t("settings.checkoutRates.preview.button")}
+              </Button>
+            </div>
+          </Stack>
+        </Form>
+      )}
+      {preview ? <PreviewResult preview={preview} /> : null}
+    </Stack>
+  );
+}
+
+function PreviewResult({ preview }: { preview: CheckoutPreviewView }) {
+  const t = useT();
+  const locale = useLocale();
+  const money = (m: { amount: string; currency: string } | null) => (m ? formatMoney(m.amount, m.currency, locale) : "—");
+  const kind = preview.errorKind ? t(`settings.checkoutRates.errorKind.${preview.errorKind}`) : "—";
+  const delivery = (q: CheckoutPreviewView["quotes"][number]) => {
+    const parts: string[] = [];
+    if (q.minDeliveryDays !== null && q.maxDeliveryDays !== null) {
+      parts.push(
+        q.minDeliveryDays === q.maxDeliveryDays
+          ? t("settings.checkoutRates.preview.daysExact", { days: q.minDeliveryDays })
+          : t("settings.checkoutRates.preview.days", { min: q.minDeliveryDays, max: q.maxDeliveryDays }),
+      );
+    } else if (q.maxDeliveryDays !== null || q.minDeliveryDays !== null) {
+      parts.push(t("settings.checkoutRates.preview.daysExact", { days: q.maxDeliveryDays ?? q.minDeliveryDays }));
+    }
+    if (q.estimatedDeliveryDate) parts.push(t("settings.checkoutRates.preview.until", { date: formatDate(q.estimatedDeliveryDate, locale) }));
+    return parts.join(" · ") || "—";
+  };
+  return (
+    <Stack gap={3}>
+      {preview.reason ? (
+        <Banner tone="warning">{t(`settings.checkoutRates.reason.${preview.reason}`, { kind })}</Banner>
+      ) : (
+        <Banner tone="success">{t("settings.checkoutRates.preview.ok", { count: preview.rateCount })}</Banner>
+      )}
+      {!preview.enabled ? (
+        <Text variant="body-sm" tone="subdued">
+          {t("settings.checkoutRates.preview.disabledNote")}
+        </Text>
+      ) : null}
+      {preview.carrier ? (
+        <Text variant="body-sm">{t("settings.checkoutRates.preview.carrier", { carrier: preview.carrier.displayName })}</Text>
+      ) : null}
+      {preview.parcel ? (
+        <Text variant="body-sm">
+          {t("settings.checkoutRates.preview.parcel", {
+            actual: formatWeight(preview.parcel.actualWeightGrams, locale),
+            volumetric: formatWeight(preview.parcel.volumetricWeightGrams, locale),
+            chargeable: formatWeight(preview.parcel.chargeableWeightGrams, locale),
+          })}
+        </Text>
+      ) : null}
+      <DataTable<CheckoutPreviewView["quotes"][number]>
+        caption={t("settings.checkoutRates.preview.title")}
+        rows={preview.quotes}
+        rowKey={(q) => `${q.shopifyServiceCode}:${q.carrierPrice.amount}:${q.serviceName}`}
+        columns={[
+          {
+            key: "service",
+            header: t("settings.checkoutRates.preview.col.service"),
+            primary: true,
+            render: (q) => (
+              <Stack gap={1}>
+                <span>{q.serviceName || q.serviceCode}</span>
+                <InlineCode>{q.shopifyServiceCode}</InlineCode>
+              </Stack>
+            ),
+          },
+          {
+            key: "carrierPrice",
+            header: t("settings.checkoutRates.preview.col.carrierPrice"),
+            align: "end",
+            render: (q) => money(q.carrierPrice),
+          },
+          {
+            key: "converted",
+            header: t("settings.checkoutRates.preview.col.converted"),
+            align: "end",
+            render: (q) => money(q.convertedPrice),
+          },
+          {
+            key: "checkoutPrice",
+            header: t("settings.checkoutRates.preview.col.checkoutPrice"),
+            align: "end",
+            render: (q) =>
+              q.checkoutPrice ? (
+                <strong>{money(q.checkoutPrice)}</strong>
+              ) : (
+                <Text as="span" variant="body-sm" tone="critical">
+                  {t(`settings.checkoutRates.failure.${q.failure ?? "no_fx_rate"}`)}
+                </Text>
+              ),
+          },
+          {
+            key: "delivery",
+            header: t("settings.checkoutRates.preview.col.delivery"),
+            render: delivery,
+          },
+        ]}
+      />
+    </Stack>
+  );
+}
+
+function CheckoutConnection({
+  data,
+  result,
+  pendingEnable,
+  pendingDisable,
+}: {
+  data: LoaderData;
+  result: SettingsActionResult | undefined;
+  pendingEnable: boolean;
+  pendingDisable: boolean;
+}) {
+  const t = useT();
+  const state = data.checkoutConnection;
+  const header = (
+    <Stack gap={1}>
+      <Text as="h3" variant="heading-sm">
+        {t("settings.checkoutConnection.title")}
+      </Text>
+      <Text variant="body-sm" tone="subdued">
+        {t("settings.checkoutConnection.help")}
+      </Text>
+    </Stack>
+  );
+  if (state.kind === "demo") {
+    return (
+      <Stack gap={3}>
+        {header}
+        <Banner tone="info">{t("settings.checkoutConnection.demo")}</Banner>
+      </Stack>
+    );
+  }
+  if (state.kind === "ownerOnly") {
+    return (
+      <Stack gap={3}>
+        {header}
+        <Text variant="body-sm" tone="subdued">
+          {t("settings.ownerOnly")}
+        </Text>
+      </Stack>
+    );
+  }
+
+  let badge: ReactNode = null;
+  let text: string;
+  if (state.kind === "unavailable") {
+    text = t(`settings.checkoutConnection.reason.${state.reason}`, { scope: state.scope ?? "" });
+  } else if (state.kind === "error") {
+    text = t("settings.checkoutConnection.state.error");
+  } else if (!state.registered) {
+    badge = <Badge tone="outline">{t("settings.checkoutConnection.badge.notRegistered")}</Badge>;
+    text = t("settings.checkoutConnection.state.notRegistered");
+  } else if (!state.callbackUrlCurrent) {
+    badge = <Badge tone="warning">{state.active ? t("settings.checkoutConnection.badge.active") : t("settings.checkoutConnection.badge.inactive")}</Badge>;
+    text = t("settings.checkoutConnection.state.stale");
+  } else if (state.active) {
+    badge = <Badge tone="success">{t("settings.checkoutConnection.badge.active")}</Badge>;
+    text = t("settings.checkoutConnection.state.active");
+  } else {
+    badge = <Badge tone="outline">{t("settings.checkoutConnection.badge.inactive")}</Badge>;
+    text = t("settings.checkoutConnection.state.inactive");
+  }
+  const actionable = state.kind === "status" || state.kind === "error";
+  const canDisable = state.kind === "error" || (state.kind === "status" && state.registered && state.active);
+
+  return (
+    <Stack gap={3}>
+      {header}
+      <ActionBanner data={result} />
+      {state.kind === "unavailable" ? (
+        <Banner tone="warning">{text}</Banner>
+      ) : (
+        <Status badges={badge} text={text} />
+      )}
+      {actionable ? (
+        <Stack direction="horizontal" gap={3}>
+          <Form method="post">
+            <input type="hidden" name="intent" value="enableCheckout" />
+            <ConfirmSubmitButton
+              variant="primary"
+              title={t("settings.checkoutConnection.enable.title")}
+              message={
+                <Stack gap={2}>
+                  <Text>{t("settings.checkoutConnection.enable.shop", { shop: state.shop ?? "—" })}</Text>
+                  <Text>{t("settings.checkoutConnection.enable.plan")}</Text>
+                  <Text>{t("settings.checkoutConnection.enable.zone", { name: data.checkoutServiceName })}</Text>
+                  <Text>{t("settings.checkoutConnection.enable.toggle")}</Text>
+                </Stack>
+              }
+              confirmLabel={t("settings.checkoutConnection.enable.confirm")}
+              cancelLabel={t("common.cancel")}
+              loading={pendingEnable}
+            >
+              {t("settings.checkoutConnection.enable.button")}
+            </ConfirmSubmitButton>
+          </Form>
+          {canDisable ? (
+            <Form method="post">
+              <input type="hidden" name="intent" value="disableCheckout" />
+              <ConfirmSubmitButton
+                variant="critical"
+                title={t("settings.checkoutConnection.disable.title")}
+                message={t("settings.checkoutConnection.disable.message")}
+                confirmLabel={t("settings.checkoutConnection.disable.confirm")}
+                cancelLabel={t("common.cancel")}
+                loading={pendingDisable}
+              >
+                {t("settings.checkoutConnection.disable.button")}
+              </ConfirmSubmitButton>
+            </Form>
+          ) : null}
+        </Stack>
+      ) : null}
+    </Stack>
+  );
+}
+
+// ---------------------------------------------------------------- 7. Відстеження та Shopify
+
+function TrackingSection({ data, result, pending, fieldError }: SectionProps) {
+  const t = useT();
+  const { value, version } = data.tracking;
+  const editable = data.can.manage;
+  return (
+    <Card title={t("settings.tracking.title")} description={t("settings.tracking.description")}>
+      <Form method="post" key={version}>
+        <Hidden intent="saveTracking" version={version} />
+        <Stack gap={4}>
+          <ActionBanner data={result} />
+          {value.notifyCustomer ? <Banner tone="warning">{t("settings.tracking.notifyWarning")}</Banner> : null}
+          <FormLayout columns={2}>
+            <Checkbox
+              label={t("settings.tracking.enabled")}
+              name="enabled"
+              defaultChecked={value.enabled}
+              helpText={t("settings.tracking.enabledHelp")}
+              error={fieldError("enabled")}
+              disabled={!editable}
+            />
+            <TextField
+              label={t("settings.tracking.intervalMinutes")}
+              name="intervalMinutes"
+              type="number"
+              inputMode="numeric"
+              min={30}
+              max={1440}
+              step={1}
+              defaultValue={value.intervalMinutes}
+              suffix={t("settings.tracking.intervalUnit")}
+              helpText={t("settings.tracking.intervalHelp")}
+              error={fieldError("intervalMinutes")}
+              disabled={!editable}
+            />
+            <Checkbox
+              label={t("settings.tracking.pushToShopify")}
+              name="pushToShopify"
+              defaultChecked={value.pushToShopify}
+              helpText={t("settings.tracking.pushToShopifyHelp")}
+              error={fieldError("pushToShopify")}
+              disabled={!editable}
+            />
+            <Checkbox
+              label={t("settings.tracking.notifyCustomer")}
+              name="notifyCustomer"
+              defaultChecked={value.notifyCustomer}
+              helpText={t("settings.tracking.notifyCustomerHelp")}
+              error={fieldError("notifyCustomer")}
+              disabled={!editable}
+            />
+            <div className="ot-form-layout__full">
+              <TextField
+                label={t("settings.tracking.trackingUrlTemplate")}
+                name="trackingUrlTemplate"
+                type="url"
+                defaultValue={value.trackingUrlTemplate}
+                maxLength={300}
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="https://…{number}"
+                helpText={t("settings.tracking.trackingUrlTemplateHelp")}
+                error={fieldError("trackingUrlTemplate")}
+                disabled={!editable}
+              />
+            </div>
+          </FormLayout>
+          <SaveRow canSave={editable} pending={pending} version={version} />
+        </Stack>
+      </Form>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------- 8. Тестовий перевізник (демо)
 
 function TestCarrierSection({ data, result, pending, fieldError }: SectionProps) {
   const t = useT();
@@ -640,7 +1789,7 @@ function TestCarrierForm({
   );
 }
 
-// ---------------------------------------------------------------- 5. Інтеграції
+// ---------------------------------------------------------------- 9. Інтеграції
 
 function IntegrationsSection({ data }: { data: LoaderData }) {
   const t = useT();
@@ -673,6 +1822,11 @@ function IntegrationsSection({ data }: { data: LoaderData }) {
       label: c.mode === "test" ? t("demo.testCarrier") : c.displayName,
       value: <CarrierStatus carrier={c} />,
     })),
+    {
+      key: "carrier-nova-post",
+      label: "Nova Post",
+      value: <NovaPostStatus info={integrations.novaPost} mode={data.mode} />,
+    },
     ...(integrations.novaGlobalRegistered
       ? []
       : [
@@ -713,7 +1867,7 @@ function IntegrationsSection({ data }: { data: LoaderData }) {
     <Card title={t("settings.integrations.title")} description={t("settings.integrations.description")}>
       <Stack gap={4}>
         <Banner tone="info">{t("settings.integrations.secrets")}</Banner>
-        {integrations.carriers.length === 0 ? (
+        {integrations.carriers.length === 0 && !integrations.novaPost.registered ? (
           <Text variant="body-sm" tone="critical">
             {t("settings.integrations.carriers.none")}
           </Text>
@@ -724,34 +1878,42 @@ function IntegrationsSection({ data }: { data: LoaderData }) {
   );
 }
 
-function Status({ badges, text, extra }: { badges: ReactNode; text: string; extra?: string }) {
+function Status({ badges, text, extra }: { badges: ReactNode; text: string; extra?: string | string[] }) {
+  const extras = extra === undefined ? [] : Array.isArray(extra) ? extra : [extra];
   return (
     <Stack gap={1} align="start">
-      <Stack gap={2} direction="horizontal" align="center">
-        {badges}
-      </Stack>
+      {badges ? (
+        <Stack gap={2} direction="horizontal" align="center">
+          {badges}
+        </Stack>
+      ) : null}
       <Text variant="body-sm" tone="subdued">
         {text}
       </Text>
-      {extra ? (
-        <Text variant="body-sm" tone="subdued">
-          {extra}
+      {extras.map((line) => (
+        <Text key={line} variant="body-sm" tone="subdued">
+          {line}
         </Text>
-      ) : null}
+      ))}
     </Stack>
   );
+}
+
+function capabilityList(t: TFunction, keys: readonly string[]): string {
+  return keys.length > 0
+    ? t("settings.integrations.carrier.capabilities", {
+        list: keys.map((k) => t(`settings.integrations.capability.${k}`)).join(", "),
+      })
+    : t("settings.integrations.carrier.noCapabilities");
 }
 
 /** Чесний стан перевізника: тестовий (sandbox), не налаштований (етап 3) або підключений. */
 function CarrierStatus({ carrier }: { carrier: CarrierInfo }) {
   const t = useT();
-  const enabled = CAPABILITY_KEYS.filter((k) => carrier.capabilities[k]);
-  const capabilities =
-    enabled.length > 0
-      ? t("settings.integrations.carrier.capabilities", {
-          list: enabled.map((k) => t(`settings.integrations.capability.${k}`)).join(", "),
-        })
-      : t("settings.integrations.carrier.noCapabilities");
+  const capabilities = capabilityList(
+    t,
+    CAPABILITY_KEYS.filter((k) => carrier.capabilities[k]),
+  );
   const defaultBadge = carrier.isDefault ? (
     <Badge tone="neutral">{t("settings.integrations.status.default")}</Badge>
   ) : null;
@@ -798,7 +1960,61 @@ function CarrierStatus({ carrier }: { carrier: CarrierInfo }) {
   );
 }
 
-// ---------------------------------------------------------------- 7. Демо-дані
+/** Nova Post: зареєстровано/ні, ключ задано/ні (без значення), хост API, можливості й дозвіл створення. */
+function NovaPostStatus({ info, mode }: { info: LoaderData["integrations"]["novaPost"]; mode: LoaderData["mode"] }) {
+  const t = useT();
+  const details: string[] = [];
+  if (info.apiKeyConfigured !== null) {
+    details.push(
+      t("settings.integrations.novaPost.apiKey", {
+        state: t(info.apiKeyConfigured ? "settings.integrations.novaPost.key.set" : "settings.integrations.novaPost.key.missing"),
+      }),
+    );
+  }
+  if (info.apiHost) details.push(t("settings.integrations.novaPost.host", { host: info.apiHost }));
+
+  if (!info.registered) {
+    if (mode === "demo") {
+      return (
+        <Status
+          badges={<Badge tone="outline">{t("settings.integrations.status.notConnected")}</Badge>}
+          text={t("settings.integrations.novaPost.demo")}
+        />
+      );
+    }
+    return (
+      <Status
+        badges={<Badge tone="warning">{t("settings.integrations.status.notConfigured")}</Badge>}
+        text={t(info.apiKeyConfigured ? "settings.integrations.novaPost.keyNotRegistered" : "settings.integrations.novaPost.noKey")}
+        extra={details}
+      />
+    );
+  }
+
+  const caps = info.capabilities;
+  const enabled = caps ? NOVA_POST_CAPABILITY_KEYS.filter((k) => caps[k]) : [];
+  details.push(capabilityList(t, enabled));
+  details.push(
+    t("settings.integrations.novaPost.creation", {
+      state: t(caps?.createShipment ? "settings.integrations.novaPost.creation.on" : "settings.integrations.novaPost.creation.off"),
+    }),
+  );
+  return (
+    <Status
+      badges={
+        <>
+          <Badge tone="success">{t("settings.integrations.status.connected")}</Badge>
+          {info.isDefault ? <Badge tone="neutral">{t("settings.integrations.status.default")}</Badge> : null}
+          {caps?.createShipment ? null : <Badge tone="outline">{t("settings.integrations.status.creationDisabled")}</Badge>}
+        </>
+      }
+      text={t("settings.integrations.novaPost.registered")}
+      extra={details}
+    />
+  );
+}
+
+// ---------------------------------------------------------------- 10. Демо-дані
 
 function DemoDataSection({ result, pending }: { result: SettingsActionResult | undefined; pending: boolean }) {
   const t = useT();

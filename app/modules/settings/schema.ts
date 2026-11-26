@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { EXPORT_REASONS, INCOTERMS } from "~/integrations/carriers/types";
+import { NOVA_POST_DELIVERY_TYPES } from "~/integrations/carriers/nova-post/mapping";
 
 /**
  * Схеми налаштувань (зберігаються у таблиці settings, версіонуються у settings_history).
@@ -98,8 +99,11 @@ export const novaPostSchema = z.object({
   payerType: z.enum(NOVA_POST_PAYER_TYPES),
   /** Номер договору (безготівкова оплата / договірні тарифи; обов'язковий для ThirdPerson). */
   payerContractNumber: z.string().trim().max(50),
-  /** Тип тарифу (deliveryType) з розрахунку Nova Post; порожньо — тариф за замовчуванням перевізника. */
-  deliveryType: z.string().trim().max(64),
+  /**
+   * Тариф Nova Post (deliveryType у POST /shipments, deliveryTypes у розрахунку): лише документовані коди
+   * standard / economy / express (НЕ UUID тарифу з відповіді розрахунку); порожньо — тариф визначає перевізник.
+   */
+  deliveryType: z.enum(["", ...NOVA_POST_DELIVERY_TYPES]),
   /**
    * Валюта сум, які повертає розрахунок Nova Post (у відповіді API валюта не вказана; за договором клієнта з України — UAH).
    */

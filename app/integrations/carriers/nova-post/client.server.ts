@@ -74,9 +74,22 @@ export function redactSecrets(text: string, apiKey: string): string {
   return out.replace(/eyJ[\w-]+\.[\w-]+\.[\w-]+/g, "[jwt]");
 }
 
-/** Текст помилки без секретів (ключ у query, JWT). */
+/** Ліміт тексту помилки в повідомленнях і журналах. */
+const ERROR_TEXT_LIMIT = 400;
+
+/**
+ * Текст помилки без секретів (ключ у query, JWT). Спершу прибираються секрети з ПОВНОГО тексту, потім обрізання:
+ * обрізаний раніше ключ/JWT (на межі ліміту) вже не впізнати. Хвіст, схожий на початок JWT, на межі обрізання прибирається.
+ */
 export function safeErrorText(text: string, apiKey: string): string {
-  return redactSecrets(text.slice(0, 400), apiKey);
+  const redacted = redactSecrets(text, apiKey);
+  if (redacted.length <= ERROR_TEXT_LIMIT) return redacted;
+  return redacted.slice(0, ERROR_TEXT_LIMIT).replace(/eyJ[\w-]*(?:\.[\w-]*)?$/, "[jwt]");
+}
+
+/** Документовані тимчасові збої шлюзу (сторінка API errors): запит не оброблено, повтор безпечний. */
+export function isTransientGatewayMessage(text: string | null | undefined): boolean {
+  return /cid profile timeout|internal typeerror error/i.test(text ?? "");
 }
 
 /**
@@ -174,7 +187,8 @@ export class NovaPostClient {
     try {
       return await read(res);
     } catch (e) {
-      // Для 4xx статус уже однозначний (запит відхилено) — тіло не обов'язкове.
+      // 4xx: статус отримано — тіло помилки необов'язкове (порожнє тіло адаптер класифікує сам; для POST /shipments
+      // 400/409 без доказу помилки клієнта — unknown_outcome).
       if (res.status >= 400 && res.status < 500) return empty;
       throw networkError(e, kind === "unknown_outcome" ? "unknown_outcome" : "unavailable");
     }
@@ -188,7 +202,11 @@ export class NovaPostClient {
     const text = await this.readBody(res, "unavailable", (r) => r.text(), "");
     if (res.status === 401 || res.status === 403) throw new CarrierError("auth", CARRIER, `Nova Post authorization failed (${res.status})`);
     if (!res.ok) {
-      throw new CarrierError(res.status >= 500 || res.status === 429 ? "unavailable" : "rejected", CARRIER, `Nova Post authorization error (${res.status}): ${safeErrorText(text, this.opts.apiKey)}`);
+      // Збій авторизації НІКОЛИ не "rejected": "rejected" означає, що перевізник відхилив дані відправлення.
+      // Тимчасові (5xx, 429, 408, «Cid profile timeout», «Internal TypeError error») → "unavailable", інші → "auth".
+      const safe = safeErrorText(text, this.opts.apiKey);
+      const transient = res.status >= 500 || res.status === 429 || res.status === 408 || isTransientGatewayMessage(redactSecrets(text, this.opts.apiKey));
+      throw new CarrierError(transient ? "unavailable" : "auth", CARRIER, `Nova Post authorization error (${res.status}): ${safe}`);
     }
     const parsed = parseJson(text);
     const token = parsed && typeof parsed === "object" ? (parsed as { jwt?: unknown }).jwt : undefined;

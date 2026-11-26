@@ -62,6 +62,11 @@ export interface CarrierParty {
   /** EORI (ЄС), IOSS (ЄС, посилки до 150 EUR) — якщо відомі. */
   eori?: string | null;
   ioss?: string | null;
+  /**
+   * Адреса реєстрації (не доставки), якщо відома. Nova Post вимагає її для одержувачів у DE/SK/HU/FR
+   * (recipient.registrationAddressRecipient). null/відсутня — адаптер не підставляє адресу доставки сам.
+   */
+  registrationAddress?: CarrierAddress | null;
 }
 
 export interface Money {

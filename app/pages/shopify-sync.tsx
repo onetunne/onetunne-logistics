@@ -16,9 +16,21 @@ import {
   type ShippingCountries,
 } from "~/modules/shopify-sync/sync.server";
 import { ActionBanner, type ActionResult } from "~/components/action-banner";
+import { hasScope } from "~/modules/rates/carrier-service.server";
 import { getRequestContext } from "~/server/context.server";
 import { formString, toActionError } from "~/server/http.server";
-import { Badge, Banner, Button, Card, ConfirmSubmitButton, KeyValueList, Page, Stack, Text, TextField } from "~/ui";
+import { Badge, Banner, Button, Card, ConfirmSubmitButton, InlineCode, KeyValueList, Page, Stack, Text, TextField } from "~/ui";
+
+/**
+ * Дозволи Shopify, потрібні на етапі 3 (shopify.app.toml): передача трек-номера (fulfillment) і CarrierService.
+ * Інструкція з додавання — docs/shopify-test-server.md, «Етап 3».
+ */
+export const STAGE3_SCOPES = ["write_merchant_managed_fulfillment_orders", "write_shipping"] as const;
+
+/** Тип фонового завдання → ключ JOB (для перекладу shopify.jobs.type.<ключ>); невідомий тип → null. */
+function jobTypeKey(type: string): string | null {
+  return Object.entries(JOB).find(([, value]) => value === type)?.[0] ?? null;
+}
 
 /** Стан підключення до Shopify, синхронізації, імпорту і фонової черги (лише власник). */
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -29,7 +41,17 @@ export async function loader({ request }: LoaderFunctionArgs) {
     throw new Response("Forbidden", { status: 403 });
   }
   if (ctx.mode === "demo")
-    return { mode: ctx.mode, shop: null, jobs: null, defaultSince: "", limit60: "", stock: [], shipping: null, failedOrders: [] };
+    return {
+      mode: ctx.mode,
+      shop: null,
+      jobs: null,
+      defaultSince: "",
+      limit60: "",
+      stock: [],
+      shipping: null,
+      failedOrders: [],
+      stage3Scopes: [],
+    };
   const shop = await currentShop(ctx.db);
   const since = new Date(Date.now() - 60 * 86400_000).toISOString().slice(0, 10);
   // Залишки для звірки з Shopify (доступні для продажу, сума по локаціях).
@@ -63,7 +85,19 @@ export async function loader({ request }: LoaderFunctionArgs) {
     .innerJoin(orders, eq(issues.orderId, orders.id))
     .where(and(eq(issues.status, "open"), eq(issues.code, "SHOPIFY_SYNC_FAILED")))
     .limit(20);
-  return { mode: ctx.mode, shop, jobs: await jobStats(ctx.db), defaultSince: since, limit60: since, stock, shipping, failedOrders };
+  const jobs = await jobStats(ctx.db);
+  return {
+    mode: ctx.mode,
+    shop,
+    jobs: { ...jobs, problems: jobs.problems.map((p) => ({ ...p, typeKey: jobTypeKey(p.type) })) },
+    defaultSince: since,
+    limit60: since,
+    stock,
+    shipping,
+    failedOrders,
+    // Надані дозволи — з запису встановлення (оновлюється webhook app/scopes_update).
+    stage3Scopes: STAGE3_SCOPES.map((scope) => ({ scope, granted: hasScope(shop?.scopes, scope) })),
+  };
 }
 
 export async function action({ request }: ActionFunctionArgs): Promise<ActionResult> {
@@ -143,6 +177,7 @@ export default function ShopifySyncPage() {
     failed?: string[];
   } | null;
   const hasAllOrders = (data.shop?.scopes ?? "").split(",").includes("read_all_orders");
+  const missingScopes = data.stage3Scopes.filter((s) => !s.granted);
   return (
     <Page title={t("shopify.title")} subtitle={t("shopify.subtitle")}>
       <Stack gap={4}>
@@ -164,6 +199,33 @@ export default function ShopifySyncPage() {
               },
             ]}
           />
+        </Card>
+        <Card title={t("shopify.scopes.title")} description={t("shopify.scopes.help")}>
+          <Stack gap={3}>
+            <KeyValueList
+              items={data.stage3Scopes.map((s) => ({
+                key: s.scope,
+                label: <InlineCode>{s.scope}</InlineCode>,
+                value: (
+                  <Stack gap={1} align="start">
+                    <Badge tone={s.granted ? "success" : "critical"}>
+                      {s.granted ? t("shopify.scopes.granted") : t("shopify.scopes.missing")}
+                    </Badge>
+                    <Text variant="body-sm" tone="subdued">
+                      {t(`shopify.scopes.purpose.${s.scope}`)}
+                    </Text>
+                  </Stack>
+                ),
+              }))}
+            />
+            {missingScopes.length > 0 ? (
+              <Banner tone="warning">{t("shopify.scopes.instructions")}</Banner>
+            ) : (
+              <Text variant="body-sm" tone="success">
+                {t("shopify.scopes.allGranted")}
+              </Text>
+            )}
+          </Stack>
         </Card>
         <Card title={t("shopify.products.title")} description={t("shopify.products.help")}>
           <Form method="post">
@@ -250,7 +312,7 @@ export default function ShopifySyncPage() {
             </Stack>
             {data.jobs?.problems.map((p) => (
               <Text key={p.id} variant="body-sm" tone={p.status === "dead" ? "critical" : "subdued"}>
-                {p.type} · {t(`shopify.jobs.${p.status}`)} · {t("shopify.jobs.attempts", { n: p.attempts })} · {p.lastError ?? ""}
+                {p.typeKey ? t(`shopify.jobs.type.${p.typeKey}`) : p.type} · {t(`shopify.jobs.${p.status}`)} · {t("shopify.jobs.attempts", { n: p.attempts })} · {p.lastError ?? ""}
               </Text>
             ))}
             {(data.jobs?.stats.dead ?? 0) > 0 ? (

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ActionFunctionArgs } from "react-router";
+import { createRequestHandler, type ActionFunctionArgs, type ServerBuild } from "react-router";
 import { eq } from "drizzle-orm";
 import type { DatabaseHandle } from "~/db/client.server";
 import { auditLog, settings, settingsHistory, shopInstallations } from "~/db/schema";
@@ -222,6 +222,25 @@ describe("carrier service registration", () => {
     expect((await carrierServiceStatus(f.admin, PARAMS)).callbackUrlCurrent).toBe(true);
   });
 
+  it("after a secret rotation, disable and remove find the same stale service as status", async () => {
+    const stale = carrierServiceCallbackUrl(APP_URL, carrierServiceToken("old-secret-value", SHOP));
+    const svc = { id: "gid://shopify/DeliveryCarrierService/8", name: "ONE TUNNE Logistics", callbackUrl: stale, active: true, supportsServiceDiscovery: true };
+    const f = fakeCarrierAdmin([OTHER_APP, svc]);
+    expect(await carrierServiceStatus(f.admin, PARAMS)).toMatchObject({ registered: true, active: true, id: svc.id, callbackUrlCurrent: false });
+    expect(await deactivateCarrierService(f.admin, PARAMS)).toEqual({ id: svc.id, result: "deactivated" });
+    expect(f.mutations().at(-1)).toEqual({ op: "OtCarrierServiceUpdate", variables: { input: { id: svc.id, active: false } } });
+    expect(await unregisterCarrierService(f.admin, PARAMS)).toEqual({ deletedId: svc.id, result: "deleted" });
+    expect(f.services).toEqual([OTHER_APP]);
+
+    // власна назва: та сама для статусу, вимкнення й видалення; чужа назва з іншим шляхом не чіпається
+    const named = fakeCarrierAdmin([OTHER_APP, { ...svc, name: "Доставка ONE TUNNE" }]);
+    const params = { ...PARAMS, name: "Доставка ONE TUNNE" };
+    expect(await deactivateCarrierService(named.admin, PARAMS)).toEqual({ id: null, result: "not_found" });
+    expect(await deactivateCarrierService(named.admin, params)).toEqual({ id: svc.id, result: "deactivated" });
+    expect(await unregisterCarrierService(named.admin, params)).toEqual({ deletedId: svc.id, result: "deleted" });
+    expect(named.services).toEqual([OTHER_APP]);
+  });
+
   it("surfaces Shopify userErrors without leaking the callback token", async () => {
     const f = fakeCarrierAdmin();
     f.failWith([{ field: ["callbackUrl"], message: `Callback url ${OUR_URL} is not reachable`, code: "CARRIER_SERVICE_CREATE_FAILED" }]);
@@ -425,14 +444,70 @@ describe("route /carrier-service/:token", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("Content-Type")).toContain("application/json");
     expect(await res.json()).toEqual({
-      rates: [{ service_name: "Standard", description: "Fake Post · Standard", service_code: "fake_post_standard", currency: "EUR", total_price: "2000" }],
+      rates: [
+        {
+          service_name: "Standard",
+          description: "Fake Post · Standard",
+          service_code: "fake_post_standard",
+          currency: "EUR",
+          total_price: "2000",
+          phone_required: true,
+        },
+      ],
     });
     expect(carrierCalls).toHaveLength(1);
   });
 
-  it("works without an Origin header and ignores a foreign Origin (server-to-server)", async () => {
-    const res = await call({ headers: { Origin: "https://shopify.example" } });
-    expect(res.status).toBe(200);
+  it("action itself does not look at Origin: no header and a foreign one both work", async () => {
+    expect((await call()).status).toBe(200);
+    expect((await call({ headers: { Origin: "https://shopify.example" } })).status).toBe(200);
+  });
+
+  it("through React Router's request handler: resource route is not subject to the Origin (CSRF) check", async () => {
+    const routeModule = await import("~/routes/carrier-service");
+    const handleError = vi.fn();
+    // Мінімальна збірка: корінь (сторінка), наш ресурсний маршрут і контрольна сторінка з action.
+    const build = {
+      routes: {
+        root: { id: "root", path: "", module: { default: () => null } },
+        "routes/carrier-service": { id: "routes/carrier-service", parentId: "root", path: "carrier-service/:token", module: routeModule },
+        "routes/probe": { id: "routes/probe", parentId: "root", path: "probe", module: { default: () => null, action: () => ({ ok: true }) } },
+      },
+      entry: { module: { default: () => new Response("document"), handleError } },
+      assets: { routes: {}, version: "test", entry: { module: "", imports: [] }, url: "" },
+      basename: "/",
+      publicPath: "/",
+      assetsBuildDirectory: "",
+      future: {},
+      ssr: true,
+      isSpaMode: false,
+      prerender: [],
+      routeDiscovery: { mode: "initial", manifestPath: "/__manifest" },
+    } as unknown as ServerBuild;
+    const handler = createRequestHandler(build, "test");
+    const post = (path: string, headers: Record<string, string> = {}) =>
+      handler(
+        new Request(`https://logistics.example.com${path}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...headers },
+          body: JSON.stringify(body),
+        }),
+      );
+
+    // Shopify: сервер-сервер, без Origin
+    const noOrigin = await post(`/carrier-service/${TOKEN}`);
+    expect(noOrigin.status).toBe(200);
+    expect(await noOrigin.json()).toMatchObject({ rates: [{ service_code: "fake_post_standard", total_price: "2000" }] });
+    // чужий Origin теж не відхиляється (ресурсний маршрут)
+    const foreign = await post(`/carrier-service/${TOKEN}`, { Origin: "https://shopify.example" });
+    expect(foreign.status).toBe(200);
+    // контроль: та сама збірка відхиляє чужий Origin для сторінки з action — перевірка в обробнику справді є
+    expect((await post("/probe", { Origin: "https://shopify.example" })).status).toBe(400);
+    expect(handleError).toHaveBeenCalledTimes(1);
+    // неправильний токен — 404 і через обробник React Router
+    expect((await post(`/carrier-service/${carrierServiceToken("wrong-secret", SHOP)}`)).status).toBe(404);
+    // другий однаковий запит — з кешу тарифів
+    expect(carrierCalls).toHaveLength(1);
   });
 
   it("wrong method → 405 (loader and action)", async () => {
