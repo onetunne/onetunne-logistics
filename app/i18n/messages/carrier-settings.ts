@@ -65,7 +65,7 @@ const messages: MessageModule = {
     "settings.novaPost.deliveryType.economy": "Економ (economy)",
     "settings.novaPost.deliveryType.express": "Експрес (express)",
     "settings.novaPost.deliveryTypeHelp":
-      "Обмежує розрахунок вартості й нові накладні цим тарифом. Якщо для замовлення вже обрано тариф (напр. у Checkout), використовується він.",
+      "Обмежує розрахунок вартості й нові накладні цим тарифом. «Автоматично» — тариф визначає перевізник. Тариф, який клієнт обрав і оплатив у Checkout, у накладну поки не передається: якщо в Checkout показуються тарифи застосунку, оберіть тут конкретний тариф — інакше клієнт може оплатити один тариф (напр. «Експрес»), а накладну буде створено з іншим.",
     "settings.novaPost.tariffCurrency": "Валюта тарифів",
     "settings.novaPost.tariffCurrencyHelp":
       "У якій валюті Nova Post повертає вартість. Для договору з України — UAH. Відносно неї задаються курси в розділі «Розрахунок доставки в Checkout».",
@@ -179,7 +179,8 @@ const messages: MessageModule = {
     "settings.checkoutConnection.demo":
       "У демо підключення до Checkout недоступне — лише у вбудованому застосунку в Shopify Admin.",
     "settings.checkoutConnection.loading": "Перевіряємо стан у Shopify…",
-    "settings.checkoutConnection.state.active": "Підключено: Shopify запитує тарифи застосунку.",
+    "settings.checkoutConnection.state.active":
+      "Сервіс зареєстровано й увімкнено. Shopify запитує тарифи застосунку лише там, де їх додано в налаштуваннях доставки (див. нижче).",
     "settings.checkoutConnection.state.inactive": "Сервіс зареєстровано, але вимкнено — тарифи застосунку в Checkout не надходять.",
     "settings.checkoutConnection.state.stale":
       "Адреса сервісу застаріла (змінилася адреса застосунку або секрет) — натисніть «Підключити до Checkout», щоб оновити.",
@@ -201,6 +202,10 @@ const messages: MessageModule = {
       "Shopify дозволяє це на плані Advanced і вище або в магазині розробки не на плані Basic — інакше Shopify відхилить запит.",
     "settings.checkoutConnection.enable.zone":
       "Після підключення додайте тариф у зону доставки: Shopify → Налаштування → Доставка → профіль доставки → зона → додати тариф → «{name}».",
+    "settings.checkoutConnection.enable.market":
+      "У магазині ввімкнено доставку за ринками (market-driven shipping): тарифи в зонах профілів доставки Checkout ігнорує. Додайте тариф, розрахований перевізником, «{name}» у способи доставки потрібного ринку: Shopify → Ринки (Markets) → ринок → доставка (назви пунктів можуть відрізнятися).",
+    "settings.checkoutConnection.enable.marketMaybe":
+      "Якщо магазин налаштовує доставку за ринками (market-driven shipping), зони профілів доставки не діють — увімкніть тариф «{name}» у доставці потрібного ринку (Shopify → Ринки).",
     "settings.checkoutConnection.enable.toggle":
       "Клієнти побачать тарифи застосунку, лише якщо увімкнено «Показувати тарифи застосунку в Checkout».",
     "settings.checkoutConnection.enable.confirm": "Підключити",
@@ -209,7 +214,8 @@ const messages: MessageModule = {
     "settings.checkoutConnection.disable.message":
       "Сервіс у Shopify стане неактивним: тарифи застосунку зникнуть із Checkout, і Shopify показуватиме лише власні тарифи магазину. Підключити знову можна будь-коли.",
     "settings.checkoutConnection.disable.confirm": "Вимкнути",
-    "settings.checkoutConnection.enable.created": "Застосунок підключено до Checkout. Додайте тариф у зону доставки Shopify.",
+    "settings.checkoutConnection.enable.created":
+      "Застосунок підключено до Checkout. Додайте його тариф у зону доставки Shopify, а якщо доставку налаштовано за ринками — у доставку ринку.",
     "settings.checkoutConnection.enable.updated": "Підключення до Checkout оновлено й увімкнено.",
     "settings.checkoutConnection.enable.unchanged": "Застосунок уже підключено до Checkout — змін немає.",
     "settings.checkoutConnection.disable.deactivated": "Розрахунок доставки в Checkout вимкнено.",
@@ -338,7 +344,7 @@ const messages: MessageModule = {
     "settings.novaPost.deliveryType.economy": "Economy",
     "settings.novaPost.deliveryType.express": "Express",
     "settings.novaPost.deliveryTypeHelp":
-      "Limits rate quotes and new waybills to this tariff. If a tariff was already chosen for the order (e.g. at checkout), that one is used.",
+      "Limits rate quotes and new waybills to this tariff. “Automatic” — the carrier picks the tariff. The tariff the customer chose and paid for at checkout is not passed to the waybill yet: if the app's rates are shown at checkout, pick a specific tariff here — otherwise the customer may pay for one tariff (e.g. Express) while the waybill is created with another.",
     "settings.novaPost.tariffCurrency": "Tariff currency",
     "settings.novaPost.tariffCurrencyHelp":
       "The currency Nova Post returns prices in. For a contract from Ukraine — UAH. Exchange rates in “Checkout shipping rates” are relative to it.",
@@ -447,7 +453,8 @@ const messages: MessageModule = {
       "Registers the app in Shopify as a shipping rate service (CarrierService). Applies only to the store where this app is installed.",
     "settings.checkoutConnection.demo": "Checkout connection is not available in the demo — only in the embedded app in Shopify Admin.",
     "settings.checkoutConnection.loading": "Checking the status in Shopify…",
-    "settings.checkoutConnection.state.active": "Connected: Shopify requests the app's rates.",
+    "settings.checkoutConnection.state.active":
+      "The service is registered and enabled. Shopify requests the app's rates only where they are added in the shipping settings (see below).",
     "settings.checkoutConnection.state.inactive": "The service is registered but disabled — the app's rates do not reach checkout.",
     "settings.checkoutConnection.state.stale":
       "The service address is outdated (the app URL or secret changed) — click “Connect to Checkout” to update it.",
@@ -469,6 +476,10 @@ const messages: MessageModule = {
       "Shopify allows this on the Advanced plan or higher, or in a development store not on the Basic plan — otherwise Shopify rejects the request.",
     "settings.checkoutConnection.enable.zone":
       "After connecting, add the rate to a shipping zone: Shopify → Settings → Shipping and delivery → shipping profile → zone → add rate → “{name}”.",
+    "settings.checkoutConnection.enable.market":
+      "The store uses market-driven shipping: checkout ignores rates in shipping-profile zones. Add the carrier-calculated rate “{name}” to the shipping options of the market: Shopify → Markets → market → shipping (menu names may differ).",
+    "settings.checkoutConnection.enable.marketMaybe":
+      "If the store configures shipping by market (market-driven shipping), shipping-profile zones have no effect — enable the rate “{name}” in the market's shipping (Shopify → Markets).",
     "settings.checkoutConnection.enable.toggle":
       "Customers see the app's rates only when “Show the app's rates at checkout” is on.",
     "settings.checkoutConnection.enable.confirm": "Connect",
@@ -477,7 +488,8 @@ const messages: MessageModule = {
     "settings.checkoutConnection.disable.message":
       "The service in Shopify becomes inactive: the app's rates disappear from checkout and Shopify shows only the store's own rates. You can connect again at any time.",
     "settings.checkoutConnection.disable.confirm": "Disable",
-    "settings.checkoutConnection.enable.created": "The app is connected to Checkout. Add the rate to a Shopify shipping zone.",
+    "settings.checkoutConnection.enable.created":
+      "The app is connected to Checkout. Add its rate to a Shopify shipping zone, or, if shipping is configured by market, to the market's shipping.",
     "settings.checkoutConnection.enable.updated": "The Checkout connection was updated and enabled.",
     "settings.checkoutConnection.enable.unchanged": "The app is already connected to Checkout — nothing changed.",
     "settings.checkoutConnection.disable.deactivated": "Shipping rates at checkout are disabled.",

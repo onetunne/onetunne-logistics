@@ -10,7 +10,7 @@
  */
 import { and, asc, eq, inArray, isNotNull, isNull, lt, notInArray, or, sql } from "drizzle-orm";
 import type { DbOrTx } from "~/db/client.server";
-import { issues, orders, shipmentEvents, shipments, shipmentTrackingEvents } from "~/db/schema";
+import { issues, jobs, orders, shipmentEvents, shipments, shipmentTrackingEvents } from "~/db/schema";
 import { canTransition, isShipped, type OrderStatus } from "~/domain/order-status";
 import { requirePermission } from "~/domain/permissions";
 import { DomainError, NotFoundError } from "~/lib/errors";
@@ -20,13 +20,22 @@ import { enqueueJob } from "~/modules/jobs/queue.server";
 import { loadOrderRow, type OrderRow, type ShipmentRow } from "~/modules/orders/repository.server";
 import { getSetting } from "~/modules/settings/settings.server";
 import { JOB } from "~/modules/shopify-sync/sync.server";
+import { FULFILL_DEDUPE_PREFIX } from "~/integrations/shopify/queueing-gateway.server";
 import type { CarrierAdapter, TrackingSnapshot, TrackingStatus } from "~/integrations/carriers/types";
 import type { ServiceContext } from "~/server/types";
 
+/** Тайм-аут ОДНОГО виклику перевізника (частини до TRACKING_CHUNK_SIZE номерів). */
 export const TRACKING_TIMEOUT_MS = 30_000;
 /** Не опитувати одне відправлення частіше (ручне оновлення — без обмеження). */
 export const MIN_POLL_AGE_MS = 15 * 60 * 1000;
 export const POLL_BATCH_LIMIT = 200;
+/**
+ * Номерів на один виклик getTracking. Кожна частина — окремий виклик зі своїм тайм-аутом: збій/повільна відповідь
+ * однієї частини не скасовує вже отриманих результатів інших (вони застосовуються одразу).
+ */
+export const TRACKING_CHUNK_SIZE = 20;
+/** Після цього часу опитування не починає нових частин (решта — у наступному опитуванні; задовго до STALE_LOCK_MS). */
+export const POLL_DEADLINE_MS = 4 * 60 * 1000;
 
 /** Статуси, з яких відправлення більше не опитується. */
 export const FINAL_TRACKING_STATUSES: readonly TrackingStatus[] = ["delivered", "returned", "cancelled"];
@@ -292,40 +301,69 @@ export interface PollSummary {
   updated: number;
   handedOver: number;
   failedCarriers: string[];
+  /** Відправлення, чию частину перевізник не повернув (збій/тайм-аут) — спробуємо в наступному опитуванні. */
+  failed: number;
 }
 
-async function trackShipments(ctx: ServiceContext, rows: ShipmentRow[]): Promise<PollSummary> {
-  const summary: PollSummary = { checked: 0, updated: 0, handedOver: 0, failedCarriers: [] };
+interface TrackOptions {
+  /**
+   * Опитування: для відправлень невдалої частини оновлюється lastTrackedAt, щоб наступне опитування
+   * почало з інших (інакше та сама «погана» партія вибиралася б першою щоразу).
+   */
+  rotateFailed?: boolean;
+  /** Мітка часу (Date.now()), після якої нові частини не починаються. */
+  deadlineAt?: number;
+}
+
+async function touchTracked(ctx: ServiceContext, ids: string[]) {
+  if (ids.length === 0) return;
+  await ctx.db
+    .update(shipments)
+    .set({ lastTrackedAt: ctx.now() })
+    .where(and(inArray(shipments.id, ids), eq(shipments.status, "created")));
+}
+
+async function trackShipments(ctx: ServiceContext, rows: ShipmentRow[], opts: TrackOptions = {}): Promise<PollSummary> {
+  const summary: PollSummary = { checked: 0, updated: 0, handedOver: 0, failedCarriers: [], failed: 0 };
   const byCarrier = new Map<string, ShipmentRow[]>();
   for (const r of rows) byCarrier.set(r.carrierCode, [...(byCarrier.get(r.carrierCode) ?? []), r]);
   for (const [code, list] of byCarrier) {
     const adapter = ctx.carriers.get(code);
     if (!trackable(adapter)) continue;
-    const numbers = [...new Set(list.map((s) => s.waybillNumber).filter((n): n is string => Boolean(n)))];
-    let snapshots: TrackingSnapshot[];
-    try {
-      snapshots = await adapter.getTracking(numbers, { signal: AbortSignal.timeout(TRACKING_TIMEOUT_MS) });
-    } catch (e) {
-      summary.failedCarriers.push(code);
-      logger.warn("tracking.carrier_failed", { carrier: code, count: numbers.length, error: e });
-      continue;
-    }
-    const byNumber = new Map(snapshots.map((s) => [s.waybillNumber, s]));
-    for (const shipment of list) {
-      summary.checked++;
-      const snapshot = shipment.waybillNumber ? byNumber.get(shipment.waybillNumber) : undefined;
-      if (!snapshot) {
-        await ctx.db
-          .update(shipments)
-          .set({ lastTrackedAt: ctx.now() })
-          .where(and(eq(shipments.id, shipment.id), eq(shipments.status, "created")));
+    const byNumber = new Map<string, ShipmentRow[]>();
+    for (const s of list) if (s.waybillNumber) byNumber.set(s.waybillNumber, [...(byNumber.get(s.waybillNumber) ?? []), s]);
+    const numbers = [...byNumber.keys()];
+    for (let i = 0; i < numbers.length; i += TRACKING_CHUNK_SIZE) {
+      if (opts.deadlineAt !== undefined && Date.now() > opts.deadlineAt) {
+        logger.warn("tracking.poll_deadline", { carrier: code, remaining: numbers.length - i });
+        break;
+      }
+      const chunk = numbers.slice(i, i + TRACKING_CHUNK_SIZE);
+      const chunkShipments = chunk.flatMap((n) => byNumber.get(n) ?? []);
+      let snapshots: TrackingSnapshot[];
+      try {
+        snapshots = await adapter.getTracking(chunk, { signal: AbortSignal.timeout(TRACKING_TIMEOUT_MS) });
+      } catch (e) {
+        if (!summary.failedCarriers.includes(code)) summary.failedCarriers.push(code);
+        summary.failed += chunkShipments.length;
+        logger.warn("tracking.carrier_failed", { carrier: code, count: chunk.length, error: e });
+        if (opts.rotateFailed) await touchTracked(ctx, chunkShipments.map((s) => s.id));
         continue;
       }
-      const result = await applyTrackingSnapshot(ctx, shipment.id, snapshot, adapter.displayName);
-      if (result?.changed) summary.updated++;
-      if (result?.newlyHandedOver) {
-        summary.handedOver++;
-        await requestShopifyFulfillment(ctx, shipment.id).catch((e) => logger.warn("tracking.fulfillment_request_failed", { error: e }));
+      const snapshotByNumber = new Map(snapshots.map((s) => [s.waybillNumber, s]));
+      for (const shipment of chunkShipments) {
+        summary.checked++;
+        const snapshot = shipment.waybillNumber ? snapshotByNumber.get(shipment.waybillNumber) : undefined;
+        if (!snapshot) {
+          await touchTracked(ctx, [shipment.id]);
+          continue;
+        }
+        const result = await applyTrackingSnapshot(ctx, shipment.id, snapshot, adapter.displayName);
+        if (result?.changed) summary.updated++;
+        if (result?.newlyHandedOver) {
+          summary.handedOver++;
+          await requestShopifyFulfillment(ctx, shipment.id).catch((e) => logger.warn("tracking.fulfillment_request_failed", { error: e }));
+        }
       }
     }
   }
@@ -353,7 +391,12 @@ export async function shipmentsDueForTracking(db: DbOrTx, now: Date, limit = POL
   return rows.map((r) => r.shipment);
 }
 
-/** Повторно ставить у чергу передачу трек-номерів, якщо попередня постановка не відбулася (збій між кроками). */
+/**
+ * Повторно ставить у чергу передачу трек-номерів, якщо попередня постановка не відбулася (збій між кроками).
+ * Пропускає відправлення, для яких завдання вже чекає/виконується або остаточно не вдалося (dead): остаточна
+ * відмова Shopify (userErrors, немає доступу, замовлення не знайдено) не повторюється щогодини — для неї є
+ * проблема SHOPIFY_FULFILLMENT_FAILED і кнопка «Повторити» на сторінці синхронізації Shopify.
+ */
 async function ensurePendingFulfillments(ctx: ServiceContext): Promise<number> {
   const rows = await ctx.db
     .select({ id: shipments.id })
@@ -366,8 +409,11 @@ async function ensurePendingFulfillments(ctx: ServiceContext): Promise<number> {
         isNull(shipments.shopifyFulfilledAt),
         isNotNull(orders.shopifyOrderId),
         eq(orders.source, "shopify"),
+        sql`not exists (select 1 from ${jobs} where ${jobs.dedupeKey} = ${FULFILL_DEDUPE_PREFIX} || ${shipments.id}::text
+              and ${jobs.status} in ('queued', 'running', 'dead'))`,
       ),
     )
+    .orderBy(asc(shipments.handedOverAt))
     .limit(50);
   let queued = 0;
   for (const r of rows) if ((await requestShopifyFulfillment(ctx, r.id)) === "queued") queued++;
@@ -377,7 +423,7 @@ async function ensurePendingFulfillments(ctx: ServiceContext): Promise<number> {
 /** Одне опитування (фонове завдання). Помилки перевізника не зупиняють інших перевізників. */
 export async function pollTracking(ctx: ServiceContext, opts: { limit?: number } = {}): Promise<PollSummary> {
   const rows = await shipmentsDueForTracking(ctx.db, ctx.now(), opts.limit ?? POLL_BATCH_LIMIT);
-  const summary = await trackShipments(ctx, rows);
+  const summary = await trackShipments(ctx, rows, { rotateFailed: true, deadlineAt: Date.now() + POLL_DEADLINE_MS });
   if (ctx.mode === "production") await ensurePendingFulfillments(ctx);
   logger.info("tracking.poll", { ...summary, failedCarriers: summary.failedCarriers.join(",") });
   return summary;

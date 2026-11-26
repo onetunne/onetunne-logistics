@@ -103,6 +103,7 @@ function fakeCarrierAdmin(initial: GqlCarrierService[] = []) {
   const calls: Array<{ op: string; variables?: Record<string, unknown> }> = [];
   let userErrors: GqlCarrierServiceUserError[] = [];
   let nextId = 1000;
+  let marketDriven: boolean | null | "error" = false;
   const admin: AdminGraphql = async <T,>(query: string, variables?: Record<string, unknown>) => {
     const op = /(query|mutation)\s+(\w+)/.exec(query)?.[2] ?? "unknown";
     calls.push({ op, variables });
@@ -144,6 +145,11 @@ function fakeCarrierAdmin(initial: GqlCarrierService[] = []) {
         data = { carrierServiceDelete: { deletedId: variables?.id ?? null, userErrors: [] } };
         break;
       }
+      case "OtShopShippingFeatures":
+        expect(query).toContain("features { marketDrivenShipping }");
+        if (marketDriven === "error") throw new Error("ACCESS_DENIED");
+        data = { shop: { features: { marketDrivenShipping: marketDriven } } };
+        break;
       default:
         throw new Error(`unexpected op ${op}`);
     }
@@ -153,8 +159,9 @@ function fakeCarrierAdmin(initial: GqlCarrierService[] = []) {
     admin,
     calls,
     services,
-    mutations: () => calls.filter((c) => c.op !== "OtCarrierServices"),
+    mutations: () => calls.filter((c) => c.op !== "OtCarrierServices" && c.op !== "OtShopShippingFeatures"),
     failWith: (e: GqlCarrierServiceUserError[]) => (userErrors = e),
+    setMarketDriven: (v: boolean | null | "error") => (marketDriven = v),
   };
 }
 
@@ -355,7 +362,14 @@ describe("owner operations (ServiceContext)", () => {
     const enabled = await enableCarrierService(prodCtx(), env);
     expect(enabled).toEqual({ ok: true, value: { id: "gid://shopify/DeliveryCarrierService/1000", result: "created", active: true } });
     expect(shops).toEqual([SHOP]);
-    expect(await getCarrierServiceStatus(prodCtx(), env)).toMatchObject({ ok: true, value: { registered: true, active: true } });
+    expect(await getCarrierServiceStatus(prodCtx(), env)).toMatchObject({ ok: true, value: { registered: true, active: true, marketDrivenShipping: false } });
+    // Доставка за ринками (ShopFeatures.marketDrivenShipping): тарифи в зонах профілів не діють → інша інструкція в UI.
+    f.setMarketDriven(true);
+    expect(await getCarrierServiceStatus(prodCtx(), env)).toMatchObject({ ok: true, value: { marketDrivenShipping: true } });
+    // Не вдалося визначити (помилка/немає доступу) — статус сервісу все одно показується, ознака невідома.
+    f.setMarketDriven("error");
+    expect(await getCarrierServiceStatus(prodCtx(), env)).toMatchObject({ ok: true, value: { registered: true, marketDrivenShipping: null } });
+    f.setMarketDriven(false);
     expect(await disableCarrierService(prodCtx(), {}, env)).toEqual({ ok: true, value: { id: "gid://shopify/DeliveryCarrierService/1000", result: "deactivated" } });
     expect(await disableCarrierService(prodCtx(), { remove: true }, env)).toEqual({ ok: true, value: { id: "gid://shopify/DeliveryCarrierService/1000", result: "deleted" } });
     const audit = await handle.db.select().from(auditLog).where(eq(auditLog.entityType, "carrier_service"));

@@ -19,6 +19,7 @@ import {
   CARRIER_SERVICE_DELETE_MUTATION,
   CARRIER_SERVICE_UPDATE_MUTATION,
   CARRIER_SERVICES_QUERY,
+  SHOP_SHIPPING_FEATURES_QUERY,
   type CarrierServiceCreateData,
   type CarrierServiceCreateInput,
   type CarrierServiceDeleteData,
@@ -27,8 +28,10 @@ import {
   type CarrierServiceUpdateInput,
   type GqlCarrierService,
   type GqlCarrierServiceUserError,
+  type GqlShopShippingFeatures,
 } from "~/integrations/shopify/carrier-service-graphql";
 import { getEnv } from "~/lib/env.server";
+import { logger } from "~/lib/logger.server";
 import { DomainError } from "~/lib/errors";
 import { writeAudit } from "~/modules/audit/audit.server";
 import { currentShop } from "~/modules/shopify-sync/sync.server";
@@ -300,13 +303,29 @@ async function prepare(
   return { ok: true, admin, params: { appUrl, secret, shop: shop.shop, name: env.name } };
 }
 
+/**
+ * Доставка за ринками в магазині: true/false — відповідь Shopify; null — не вдалося визначити
+ * (помилка/немає доступу): тоді інтерфейс показує обидва варіанти інструкції.
+ */
+export async function marketDrivenShippingEnabled(admin: AdminGraphql): Promise<boolean | null> {
+  try {
+    const data = await admin<GqlShopShippingFeatures>(SHOP_SHIPPING_FEATURES_QUERY);
+    const value = data.shop?.features?.marketDrivenShipping;
+    return typeof value === "boolean" ? value : null;
+  } catch (error) {
+    logger.warn("carrier_service.shop_features_failed", { error });
+    return null;
+  }
+}
+
 export async function getCarrierServiceStatus(
   ctx: ServiceContext,
   env: CarrierServiceEnv = {},
-): Promise<CarrierServiceOutcome<CarrierServiceStatus>> {
+): Promise<CarrierServiceOutcome<CarrierServiceStatus & { marketDrivenShipping: boolean | null }>> {
   const p = await prepare(ctx, env);
   if (!p.ok) return p;
-  return { ok: true, value: await carrierServiceStatus(p.admin, p.params) };
+  const status = await carrierServiceStatus(p.admin, p.params);
+  return { ok: true, value: { ...status, marketDrivenShipping: await marketDrivenShippingEnabled(p.admin) } };
 }
 
 export async function enableCarrierService(

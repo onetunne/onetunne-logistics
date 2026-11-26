@@ -130,7 +130,15 @@ export type CheckoutConnectionState =
   | { kind: "ownerOnly" }
   | { kind: "unavailable"; reason: CarrierServiceUnavailable["reason"]; scope: string | null; shop: string | null }
   | { kind: "error"; shop: string | null }
-  | { kind: "status"; registered: boolean; active: boolean; callbackUrlCurrent: boolean; shop: string | null };
+  | {
+      kind: "status";
+      registered: boolean;
+      active: boolean;
+      callbackUrlCurrent: boolean;
+      shop: string | null;
+      /** Доставка за ринками (market-driven shipping); null — невідомо. */
+      marketDrivenShipping: boolean | null;
+    };
 
 // ---------------------------------------------------------------- loader
 
@@ -272,8 +280,8 @@ function checkoutConnectionState(
       shop = (await currentShop(ctx.db))?.shop ?? null;
       const r = await getCarrierServiceStatus(ctx);
       if (!r.ok) return { kind: "unavailable", reason: r.reason, scope: r.reason === "missing_scope" ? r.scope : null, shop };
-      const { registered, active, callbackUrlCurrent } = r.value;
-      return { kind: "status", registered, active, callbackUrlCurrent, shop };
+      const { registered, active, callbackUrlCurrent, marketDrivenShipping } = r.value;
+      return { kind: "status", registered, active, callbackUrlCurrent, shop, marketDrivenShipping };
     } catch (error) {
       // Стан необов'язковий для сторінки: помилка Shopify не блокує налаштування.
       logger.warn("settings.carrier_service_status_failed", { error });
@@ -1721,10 +1729,23 @@ function CheckoutConnectionStatus({
   }
   const actionable = state.kind === "status" || state.kind === "error";
   const canDisable = state.kind === "error" || (state.kind === "status" && state.registered && state.active);
+  // Де вмикати тариф застосунку: зона профілю доставки (звичайна доставка) або доставка ринку (market-driven).
+  const marketDriven = state.kind === "status" ? state.marketDrivenShipping : null;
+  const placement =
+    marketDriven === true
+      ? [t("settings.checkoutConnection.enable.market", { name: serviceName })]
+      : marketDriven === false
+        ? [t("settings.checkoutConnection.enable.zone", { name: serviceName })]
+        : [t("settings.checkoutConnection.enable.zone", { name: serviceName }), t("settings.checkoutConnection.enable.marketMaybe", { name: serviceName })];
 
   return (
     <Stack gap={3}>
       {state.kind === "unavailable" ? <Banner tone="warning">{text}</Banner> : <Status badges={badge} text={text} />}
+      {state.kind === "status" && state.registered && state.active ? (
+        <Text variant="body-sm" tone="subdued">
+          {placement.join(" ")}
+        </Text>
+      ) : null}
       {actionable ? (
         <Stack direction="horizontal" gap={3}>
           <Form method="post">
@@ -1736,7 +1757,9 @@ function CheckoutConnectionStatus({
                 <Stack gap={2}>
                   <Text>{t("settings.checkoutConnection.enable.shop", { shop: state.shop ?? "—" })}</Text>
                   <Text>{t("settings.checkoutConnection.enable.plan")}</Text>
-                  <Text>{t("settings.checkoutConnection.enable.zone", { name: serviceName })}</Text>
+                  {placement.map((line) => (
+                    <Text key={line}>{line}</Text>
+                  ))}
                   <Text>{t("settings.checkoutConnection.enable.toggle")}</Text>
                 </Stack>
               }

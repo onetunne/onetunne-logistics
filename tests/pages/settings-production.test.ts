@@ -187,7 +187,10 @@ function renderAll(element: ReactElement): Promise<string> {
         cb();
       },
       final(cb) {
-        resolve(Buffer.concat(chunks).toString("utf8"));
+        // React 18.3.1 (renderToPipeableStream): якщо багатобайтовий символ не вміщується в кінець 2-КБ буфера,
+        // буфер надсилається повністю — з нульовим байтом у кінці. Браузер ігнорує U+0000 у тексті (HTML-парсер),
+        // тож для перевірки тексту прибираємо його так само.
+        resolve(Buffer.concat(chunks).toString("utf8").replace(/\u0000/g, ""));
         cb();
       },
     });
@@ -307,8 +310,18 @@ describe("production settings: Checkout connection state", () => {
     expect(shellOnly).toContain(uk("settings.checkoutConnection.loading"));
     expect(shellOnly).toContain(uk("settings.customs.title"));
     await vi.waitFor(() => expect(pending.length).toBe(2));
-    for (const answer of pending) answer({ carrierServices: { nodes: [{ ...OURS }] } });
-    expect(await data.checkoutConnection).toEqual({ kind: "status", registered: true, active: true, callbackUrlCurrent: true, shop: SHOP });
+    for (const answer of pending.splice(0)) answer({ carrierServices: { nodes: [{ ...OURS }] } });
+    // Далі — ознака доставки за ринками (shop.features.marketDrivenShipping).
+    await vi.waitFor(() => expect(pending.length).toBe(2));
+    for (const answer of pending.splice(0)) answer({ shop: { features: { marketDrivenShipping: false } } });
+    expect(await data.checkoutConnection).toEqual({
+      kind: "status",
+      registered: true,
+      active: true,
+      callbackUrlCurrent: true,
+      shop: SHOP,
+      marketDrivenShipping: false,
+    });
   });
 
   it("a slow Shopify answer turns into the «error» state after the timeout instead of holding the page", async () => {
@@ -362,6 +375,8 @@ describe("production settings: Checkout connection state", () => {
       active: false,
       callbackUrlCurrent: false,
       shop: SHOP,
+      // Ця імітація не відповідає на запит shop.features — ознака невідома.
+      marketDrivenShipping: null,
     });
     let html = await renderPage("/app/settings", settingsRoute());
     expect(html).toContain(uk("settings.checkoutConnection.state.notRegistered"));
@@ -372,6 +387,17 @@ describe("production settings: Checkout connection state", () => {
     m.admin = fakeAdmin([OURS]).admin;
     html = await renderPage("/app/settings", settingsRoute());
     expect(html).toContain(uk("settings.checkoutConnection.state.active"));
+    // Невідомо, чи доставка за ринками: обидві інструкції (зона профілю і ринок).
+    expect(html).toContain(uk("settings.checkoutConnection.enable.zone").replace("{name}", "ONE TUNNE Logistics"));
+    expect(html).toContain(uk("settings.checkoutConnection.enable.marketMaybe").replace("{name}", "ONE TUNNE Logistics"));
+
+    // Доставка за ринками: лише інструкція для ринку (зони профілів доставки Checkout ігнорує).
+    const marketAdmin = fakeAdmin([OURS]).admin;
+    m.admin = (async (query: string, variables?: Record<string, unknown>) =>
+      query.includes("OtShopShippingFeatures") ? { shop: { features: { marketDrivenShipping: true } } } : marketAdmin(query, variables)) as AdminGraphql;
+    html = await renderPage("/app/settings", settingsRoute());
+    expect(html).toContain(uk("settings.checkoutConnection.enable.market").replace("{name}", "ONE TUNNE Logistics"));
+    expect(html).not.toContain(uk("settings.checkoutConnection.enable.zone").replace("{name}", "ONE TUNNE Logistics"));
     expect(html).toContain(uk("settings.checkoutConnection.badge.active"));
     expect(html).toContain(uk("settings.checkoutConnection.disable.button"));
     // Магазин — у підтвердженні підключення; адреса callback і токен — ніде.

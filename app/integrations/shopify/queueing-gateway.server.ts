@@ -3,6 +3,9 @@ import { enqueueJob } from "~/modules/jobs/queue.server";
 import { JOB } from "~/modules/shopify-sync/sync.server";
 import type { ShopifyGateway, ShopifySyncResult } from "./types";
 
+/** dedupeKey завдання передачі трек-номера: `fulfill:<shipmentId>`. */
+export const FULFILL_DEDUPE_PREFIX = "fulfill:";
+
 /**
  * Робочий шлюз: підтверджені зміни контактів/адреси передаються в Shopify через надійну чергу
  * (orderUpdate з повторами). Одне завдання на замовлення надсилає поточний стан повністю.
@@ -39,7 +42,7 @@ export class QueueingShopifyGateway implements ShopifyGateway {
       this.db,
       JOB.fulfillShipment,
       { shop, shopifyOrderId: input.shopifyOrderId, shipmentId: input.shipmentId },
-      { dedupeKey: `fulfill:${input.shipmentId}`, maxAttempts: 8 },
+      { dedupeKey: `${FULFILL_DEDUPE_PREFIX}${input.shipmentId}`, maxAttempts: 8 },
     );
     return { status: "queued" };
   }

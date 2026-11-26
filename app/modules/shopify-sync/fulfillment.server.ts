@@ -3,11 +3,16 @@
  * ПІСЛЯ фактичної передачі посилки перевізнику. Фонове завдання shopify.fulfill_shipment.
  *
  * Надійність (у fulfillmentCreate немає ключа ідемпотентності):
- * 1. Перед створенням перечитуються виконання замовлення: якщо вже є виконання з нашим трек-номером —
- *    лише фіксуємо його (повтор після обриву зв'язку не створює дубліката).
- * 2. Виконуються лише fulfillment orders у статусах OPEN/IN_PROGRESS з дією CREATE_FULFILLMENT і залишком > 0;
+ * 1. Перед КОЖНОЮ спробою перечитується стан fulfillment orders (FO). Створене виконання закриває FO
+ *    або обнуляє залишок, тому стан FO сам захищає від дублікатів — і для кожної локації окремо
+ *    (повтор після збою між локаціями створює виконання лише для решти локацій).
+ * 2. Виконуються лише FO у статусах OPEN/IN_PROGRESS з дією CREATE_FULFILLMENT і залишком > 0;
  *    по одному виконанню на локацію (вимога Shopify: одна локація на виклик).
- * 3. Відмова Shopify (userErrors) — без повторів → проблема SHOPIFY_FULFILLMENT_FAILED.
+ * 3. «Вже виконано в Shopify» — лише якщо Shopify так показує (FULFILLED) або всі видимі FO закриті / без залишку.
+ *    Порожній чи неповний перелік FO (напр. дозвіл ще не схвалено — Shopify повертає лише частину FO) → помилка
+ *    без повторів → проблема SHOPIFY_FULFILLMENT_FAILED (не позначаємо відправлення виконаним мовчки).
+ * 4. Відмова Shopify (userErrors) — без повторів → проблема SHOPIFY_FULFILLMENT_FAILED.
+ * 5. Налаштування pushToShopify перевіряється і під час виконання завдання (власник міг вимкнути передачу).
  * Клієнту лист НЕ надсилається, якщо в налаштуваннях не ввімкнено notifyCustomer (за замовчуванням false).
  */
 import { and, eq, inArray } from "drizzle-orm";
@@ -33,10 +38,19 @@ export type FulfillOutcome =
   | "found_existing"
   | "already_fulfilled_in_shopify"
   | "not_ready"
-  | "not_linked";
+  | "not_linked"
+  | "disabled";
 
 const FULFILLABLE_STATUSES = new Set(["OPEN", "IN_PROGRESS"]);
 const WAITING_STATUSES = new Set(["ON_HOLD", "SCHEDULED"]);
+const FINISHED_STATUSES = new Set(["CLOSED", "CANCELLED"]);
+/** Межа сторінок FO (по FULFILLMENT_ORDERS_PAGE_SIZE). Більше — перелік вважається неповним. */
+export const FULFILLMENT_ORDERS_MAX_PAGES = 5;
+
+/** У FO є невиконані одиниці (або позицій більше, ніж на сторінці, — тоді вважаємо, що можуть бути). */
+function hasRemaining(fo: GqlFulfillmentOrder): boolean {
+  return fo.lineItems.nodes.some((li) => li.remainingQuantity > 0) || Boolean(fo.lineItems.pageInfo?.hasNextPage);
+}
 
 /** Дані трек-номера для Shopify. Посилання — з шаблону налаштувань або від адаптера перевізника. */
 export function trackingInfoFor(
@@ -58,11 +72,57 @@ export function fulfillableGroups(nodes: GqlFulfillmentOrder[]): GqlFulfillmentO
   for (const fo of nodes) {
     if (!FULFILLABLE_STATUSES.has(fo.status)) continue;
     if (!fo.supportedActions.some((a) => a.action === "CREATE_FULFILLMENT")) continue;
-    if (!fo.lineItems.nodes.some((li) => li.remainingQuantity > 0)) continue;
+    if (!hasRemaining(fo)) continue;
     const location = fo.assignedLocation?.location?.id ?? "unknown";
     groups.set(location, [...(groups.get(location) ?? []), fo]);
   }
   return [...groups.values()];
+}
+
+/**
+ * Чи замовлення справді вже виконане в Shopify: так показує Shopify (FULFILLED) або є видимі FO,
+ * і кожне з них закрите/скасоване чи без залишку (хоча б одне — не скасоване). Порожній або неповний
+ * перелік FO нічого не доводить (без дозволу Shopify повертає лише частину FO).
+ */
+export function fulfilledInShopify(state: { displayFulfillmentStatus: string; nodes: GqlFulfillmentOrder[]; complete: boolean }): boolean {
+  if (state.displayFulfillmentStatus === "FULFILLED") return true;
+  if (!state.complete || state.nodes.length === 0) return false;
+  const done = (fo: GqlFulfillmentOrder) => FINISHED_STATUSES.has(fo.status) || !hasRemaining(fo);
+  return state.nodes.every(done) && state.nodes.some((fo) => fo.status !== "CANCELLED");
+}
+
+interface FulfillmentState {
+  displayFulfillmentStatus: string;
+  fulfillments: NonNullable<GqlOrderFulfillmentState["order"]>["fulfillments"];
+  nodes: GqlFulfillmentOrder[];
+  /** false — FO більше, ніж FULFILLMENT_ORDERS_MAX_PAGES сторінок. */
+  complete: boolean;
+}
+
+/** Стан виконання замовлення з усіма сторінками FO (кожна сторінка — окремий запит у межах ліміту вартості). */
+async function readFulfillmentState(admin: AdminGraphql, orderGid: string): Promise<FulfillmentState | null> {
+  let after: string | null = null;
+  const nodes: GqlFulfillmentOrder[] = [];
+  let head: NonNullable<GqlOrderFulfillmentState["order"]> | null = null;
+  for (let page = 1; page <= FULFILLMENT_ORDERS_MAX_PAGES; page++) {
+    const data: GqlOrderFulfillmentState = await admin<GqlOrderFulfillmentState>(ORDER_FULFILLMENT_STATE_QUERY, { id: orderGid, after });
+    if (!data.order) return head ? { ...stateOf(head), nodes, complete: false } : null;
+    head ??= data.order;
+    nodes.push(...data.order.fulfillmentOrders.nodes);
+    const info = data.order.fulfillmentOrders.pageInfo;
+    if (!info?.hasNextPage) return { ...stateOf(head), nodes, complete: true };
+    if (!info.endCursor) break;
+    after = info.endCursor;
+  }
+  return head ? { ...stateOf(head), nodes, complete: false } : null;
+}
+
+function truncatedError(): ShopifyApiError {
+  return new ShopifyApiError("Too many Shopify fulfillment orders to verify; check the order in Shopify", false, "FO_LIST_TRUNCATED");
+}
+
+function stateOf(order: NonNullable<GqlOrderFulfillmentState["order"]>) {
+  return { displayFulfillmentStatus: order.displayFulfillmentStatus, fulfillments: order.fulfillments };
 }
 
 async function recordFulfilled(db: Db, shipmentId: string, orderId: string, fulfillmentId: string | null, outcome: FulfillOutcome) {
@@ -102,32 +162,49 @@ export async function fulfillShipment(
   const number = shipment.trackingNumber ?? shipment.waybillNumber;
   if (!number) return "not_ready";
 
-  const state = await admin<GqlOrderFulfillmentState>(ORDER_FULFILLMENT_STATE_QUERY, { id: order.shopifyOrderId });
-  if (!state.order) throw new ShopifyApiError("Shopify order not found (read access or 60-day limit)", false, "NOT_FOUND");
+  // Власник міг вимкнути передачу, поки завдання чекало/повторювалося: без звернення до Shopify.
+  // shopifyFulfilledAt не ставиться — після повторного ввімкнення завдання можна поставити знову.
+  const tracking = await getSetting(db, "tracking");
+  if (!tracking.pushToShopify) return "disabled";
 
-  // 1. Звірка: виконання з цим трек-номером уже існує (напр. попередня спроба виконалася, але відповідь загубилася).
-  const existing = state.order.fulfillments.find(
-    (f) => f.status !== "CANCELLED" && f.trackingInfo.some((t) => t.number === number),
-  );
-  if (existing) {
-    await recordFulfilled(db, shipment.id, order.id, existing.id, "found_existing");
-    return "found_existing";
-  }
+  const state = await readFulfillmentState(admin, order.shopifyOrderId);
+  if (!state) throw new ShopifyApiError("Shopify order not found (read access or 60-day limit)", false, "NOT_FOUND");
 
-  const groups = fulfillableGroups(state.order.fulfillmentOrders.nodes);
+  // Виконання з цим трек-номером (напр. попередня спроба виконалася, але відповідь загубилася) — лише для
+  // shopifyFulfillmentId. Захист від дублікатів — стан FO: виконане FO закрите або без залишку.
+  const existing = state.fulfillments.find((f) => f.status !== "CANCELLED" && f.trackingInfo.some((t) => t.number === number));
+
+  const groups = fulfillableGroups(state.nodes);
   if (groups.length === 0) {
-    if (state.order.fulfillmentOrders.nodes.some((fo) => WAITING_STATUSES.has(fo.status))) {
+    if (state.nodes.some((fo) => WAITING_STATUSES.has(fo.status))) {
       // Замовлення на утриманні/заплановане — повтор пізніше (з паузою черги).
       throw new ShopifyApiError("Shopify fulfillment orders are on hold or scheduled", true, "FO_NOT_READY");
     }
-    // Усе вже виконано в Shopify (вручну або іншим застосунком) — трек-номер не дублюємо.
-    await recordFulfilled(db, shipment.id, order.id, null, "already_fulfilled_in_shopify");
-    return "already_fulfilled_in_shopify";
+    // Наше виконання вже є (відповідь попередньої спроби загубилася) і видимих FO для виконання не лишилося,
+    // або все виконано в Shopify (вручну чи іншим застосунком) — трек-номер не дублюємо.
+    if ((existing && state.complete) || fulfilledInShopify(state)) {
+      const outcome: FulfillOutcome = existing ? "found_existing" : "already_fulfilled_in_shopify";
+      await recordFulfilled(db, shipment.id, order.id, existing?.id ?? null, outcome);
+      return outcome;
+    }
+    if (!state.complete) throw truncatedError();
+    // Немає видимих FO для виконання, але й не доведено, що замовлення виконане (дозвіл ще не схвалено,
+    // FO іншої локації/служби виконання) — не позначаємо виконаним: dead → проблема для менеджера.
+    logger.warn("shopify.fulfillment_no_fulfillable_fo", {
+      shipmentId: shipment.id,
+      visible: state.nodes.length,
+      complete: state.complete,
+      statuses: [...new Set(state.nodes.map((fo) => fo.status))].join(","),
+    });
+    throw new ShopifyApiError(
+      `No fulfillable Shopify fulfillment orders visible (${state.nodes.length} visible, order ${state.displayFulfillmentStatus || "unknown"})`,
+      false,
+      "NO_FULFILLABLE_FO",
+    );
   }
 
-  const tracking = await getSetting(db, "tracking");
   const trackingInfo = trackingInfoFor(carriers, shipment.carrierCode, number, tracking.trackingUrlTemplate);
-  let firstId: string | null = null;
+  let firstId: string | null = existing?.id ?? null;
   for (const group of groups) {
     const result = await admin<GqlFulfillmentCreateResult>(FULFILLMENT_CREATE_MUTATION, {
       fulfillment: {
@@ -144,6 +221,8 @@ export async function fulfillShipment(
     }
     firstId ??= result.fulfillmentCreate.fulfillment.id;
   }
+  // FO більше, ніж переглянуто: решта могла лишитися невиконаною — не позначаємо відправлення виконаним.
+  if (!state.complete) throw truncatedError();
   await recordFulfilled(db, shipment.id, order.id, firstId, "created");
   logger.info("shopify.fulfillment_created", { shipmentId: shipment.id, groups: groups.length, notifyCustomer: tracking.notifyCustomer });
   return "created";

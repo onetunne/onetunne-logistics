@@ -21,6 +21,7 @@ import { createWaybill } from "~/modules/shipments/waybill.server";
 import { JOB } from "~/modules/shopify-sync/sync.server";
 import { updateSetting } from "~/modules/settings/settings.server";
 import {
+  TRACKING_CHUNK_SIZE,
   markHandedOver,
   orderStatusForTracking,
   planOrderTransitions,
@@ -51,6 +52,8 @@ class TrackingCarrier implements CarrierAdapter {
   snapshots = new Map<string, TrackingSnapshot>();
   calls: string[][] = [];
   fail = false;
+  /** Збій лише для виклику, що містить цей номер (решта частин відповідає). */
+  failIfContains: string | null = null;
   async createShipment(): Promise<CreatedShipment> {
     this.n++;
     const num = `TRK${String(this.n).padStart(8, "0")}`;
@@ -65,6 +68,7 @@ class TrackingCarrier implements CarrierAdapter {
   async getTracking(numbers: string[]): Promise<TrackingSnapshot[]> {
     this.calls.push(numbers);
     if (this.fail) throw new Error("carrier down");
+    if (this.failIfContains && numbers.includes(this.failIfContains)) throw new Error("429 Too Many Attempts");
     return numbers.flatMap((n) => (this.snapshots.has(n) ? [this.snapshots.get(n)!] : []));
   }
 }
@@ -118,6 +122,7 @@ beforeEach(() => {
   gateway.requests = [];
   carrier.calls = [];
   carrier.fail = false;
+  carrier.failIfContains = null;
   now = new Date(now.getTime() + 60 * 60 * 1000);
 });
 
@@ -301,5 +306,84 @@ describe("poll job scheduling", () => {
     await runTrackingPollJob(ctxFor());
     const queued = await env.handle.db.select().from(jobs).where(and(eq(jobs.type, JOB.trackingPoll), eq(jobs.status, "queued")));
     expect(queued).toHaveLength(1);
+  });
+});
+
+/** Відправлення з накладною без повного циклу створення (для перевірки опитування великої партії). */
+async function insertShipment(tag: string, opts: { handedOver?: boolean; shopifyOrderId?: string } = {}) {
+  const db = env.handle.db;
+  const [src] = await db.select().from(orders).where(eq(orders.orderNumber, "#1001"));
+  const { id: _id, createdAt: _c, updatedAt: _u, ...rest } = src!;
+  const [order] = await db
+    .insert(orders)
+    .values({
+      ...rest,
+      orderNumber: `B-${tag}`,
+      status: opts.handedOver ? "handed_to_carrier" : "waybill_created",
+      version: 1,
+      ...(opts.shopifyOrderId ? { source: "shopify" as const, shopifyOrderId: opts.shopifyOrderId } : {}),
+    })
+    .returning({ id: orders.id });
+  const number = `TRKB${tag.padStart(8, "0")}`;
+  const [row] = await db
+    .insert(shipments)
+    .values({
+      orderId: order!.id,
+      carrierCode: carrier.code,
+      mode: "test",
+      status: "created",
+      carrierReference: `OT-B${tag}-1`,
+      waybillNumber: number,
+      trackingNumber: number,
+      createdBy: "test",
+      handedOverAt: opts.handedOver ? new Date("2026-11-20T09:00:00Z") : null,
+    })
+    .returning();
+  return { orderId: order!.id, shipment: row! };
+}
+
+describe("tracking poll resilience", () => {
+  it("one failing chunk does not discard the others; failed shipments rotate to the back", async () => {
+    const batch = [];
+    for (let i = 0; i < TRACKING_CHUNK_SIZE + 5; i++) batch.push(await insertShipment(`1${String(i).padStart(3, "0")}`));
+    for (const b of batch) carrier.snapshots.set(b.shipment.waybillNumber!, snap(b.shipment.waybillNumber!, "accepted", "4"));
+    const bad = batch.at(-1)!.shipment.waybillNumber!;
+    carrier.failIfContains = bad;
+    const summary = await pollTracking(ctxFor());
+
+    expect(carrier.calls.every((c) => c.length <= TRACKING_CHUNK_SIZE)).toBe(true);
+    expect(carrier.calls.length).toBeGreaterThan(1);
+    expect(summary.failedCarriers).toEqual(["trk"]);
+    const failedChunk = carrier.calls.find((c) => c.includes(bad))!;
+    expect(summary.failed).toBe(failedChunk.length);
+    let applied = 0;
+    for (const b of batch) {
+      const [row] = await env.handle.db.select().from(shipments).where(eq(shipments.id, b.shipment.id));
+      // Невдала частина: стан не змінено, але lastTrackedAt оновлено (наступне опитування почне з інших).
+      expect(row!.lastTrackedAt?.getTime()).toBe(now.getTime());
+      if (failedChunk.includes(b.shipment.waybillNumber!)) {
+        expect(row!.handedOverAt).toBeNull();
+      } else {
+        expect(row!.handedOverAt).not.toBeNull();
+        expect((await loadOrderRow(env.handle.db, b.orderId)).status).toBe("handed_to_carrier");
+        applied++;
+      }
+    }
+    expect(applied).toBeGreaterThan(0);
+  });
+
+  it("production safety net skips shipments whose fulfillment job is dead or already queued", async () => {
+    const dead = await insertShipment("2001", { handedOver: true, shopifyOrderId: "gid://shopify/Order/92001" });
+    const queuedAlready = await insertShipment("2002", { handedOver: true, shopifyOrderId: "gid://shopify/Order/92002" });
+    const lost = await insertShipment("2003", { handedOver: true, shopifyOrderId: "gid://shopify/Order/92003" });
+    await env.handle.db.insert(jobs).values([
+      { type: JOB.fulfillShipment, payload: {}, status: "dead", dedupeKey: `fulfill:${dead.shipment.id}`, lastError: "Shopify rejected fulfillment" },
+      { type: JOB.fulfillShipment, payload: {}, status: "queued", dedupeKey: `fulfill:${queuedAlready.shipment.id}` },
+    ]);
+    await pollTracking({ ...ctxFor(), mode: "production" });
+    const requested = gateway.requests.map((r) => r.shipmentId);
+    expect(requested).toContain(lost.shipment.id);
+    expect(requested).not.toContain(dead.shipment.id);
+    expect(requested).not.toContain(queuedAlready.shipment.id);
   });
 });

@@ -10,6 +10,7 @@
  *    ручний розгляд (розділ «Проблеми»), автоматизацію замовлення призупинено.
  * 4. Повторне натискання/повторний запит повертає наявну накладну без звернення до перевізника.
  */
+import { randomUUID } from "node:crypto";
 import { and, desc, eq, inArray, like } from "drizzle-orm";
 import type { DbOrTx, Tx } from "~/db/client.server";
 import { issues, orders, shipmentEvents, shipments } from "~/db/schema";
@@ -72,9 +73,22 @@ export type CreateWaybillResult =
   | { kind: "not_created"; shipment: ShipmentRow | null; message: string }
   | { kind: "unknown"; shipment: ShipmentRow };
 
-function referenceFor(order: OrderRow, generation: number): string {
-  return `OT-${order.orderNumber.replace(/[^A-Za-z0-9]/g, "")}-${generation}`;
+/**
+ * Reference для перевізника (clientOrder у Nova Post, до 50 символів): OT-<номер замовлення>-<покоління>-<8 hex id запису>.
+ * Номер замовлення унікальний лише в межах однієї бази (тестова база після скидання, інша інсталяція з тим самим
+ * ключем перевізника починають знову з #1001), тому reference містить фрагмент id запису відправлення —
+ * звірка не прийме чуже/старе відправлення того самого номера за своє. Повтори того самого запису — той самий reference.
+ */
+export function referenceFor(order: Pick<OrderRow, "orderNumber">, generation: number, shipmentId: string): string {
+  const orderPart = order.orderNumber.replace(/[^A-Za-z0-9]/g, "").slice(0, 30);
+  return `OT-${orderPart}-${generation}-${shipmentId.replace(/-/g, "").slice(0, 8).toUpperCase()}`;
 }
+
+/**
+ * Допуск розбіжності годинників (наш сервер ↔ перевізник) для звірки: відправлення перевізника, створене раніше
+ * за наш запис мінус допуск, не може бути результатом жодної спроби цього запису.
+ */
+export const RECONCILE_CLOCK_SKEW_MS = 10 * 60 * 1000;
 
 function safeMessage(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e);
@@ -329,10 +343,12 @@ export async function createWaybill(
       shipment = row!;
     } else {
       const generation = (last?.generation ?? 0) + 1;
-      request = buildShipmentRequest(freshOrder, items, settings, referenceFor(freshOrder, generation), ctx.now());
+      const id = randomUUID();
+      request = buildShipmentRequest(freshOrder, items, settings, referenceFor(freshOrder, generation, id), ctx.now());
       const [row] = await tx
         .insert(shipments)
         .values({
+          id,
           orderId,
           carrierCode: carrier.code,
           mode: carrier.mode,
@@ -520,9 +536,15 @@ async function reconcileShipmentInternal(ctx: ServiceContext, shipmentId: string
       const lookup = await adapter.findShipmentByReference(shipment.carrierReference, {
         signal: AbortSignal.timeout(CARRIER_TIMEOUT_MS),
       });
-      if (lookup.found && !lookup.cancelled) return markCreated(ctx, shipmentId, lookup.shipment, "recovered");
+      // Збіг, створений раніше за наш запис, — не результат жодної нашої спроби (чужа інсталяція/скинута база
+      // з тим самим reference): не прив'язуємо і не вважаємо скасованим — ручний розгляд нижче.
+      const plausible = lookup.found && lookup.shipment.createdAt.getTime() >= shipment.createdAt.getTime() - RECONCILE_CLOCK_SKEW_MS;
+      if (lookup.found && !plausible) {
+        await addEvent(ctx.db, shipmentId, "reference_match_predates_shipment", null, { waybillNumber: lookup.shipment.waybillNumber });
+      }
+      if (plausible && lookup.found && !lookup.cancelled) return markCreated(ctx, shipmentId, lookup.shipment, "recovered");
       const confirmedAbsent = !lookup.found && lookup.authoritative && adapter.capabilities.referenceLookupAuthoritative;
-      if ((lookup.found && lookup.cancelled) || confirmedAbsent) {
+      if ((plausible && lookup.found && lookup.cancelled) || confirmedAbsent) {
         const nextStatus = lookup.found ? "cancelled" : "failed";
         const note = lookup.found ? "found_cancelled" : "confirmed_not_created";
         return ctx.db.transaction(async (tx) => {

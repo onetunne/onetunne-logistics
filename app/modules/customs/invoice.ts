@@ -7,7 +7,7 @@
  *
  * Дані не вигадуються: відсутні HS-код/країна походження/опис позначаються в `missing`.
  */
-import { addMoney, multiplyMoney } from "~/lib/money";
+import { addMoney, fromMinor, isDecimalString, multiplyMoney, toMinor } from "~/lib/money";
 import { normalizeHsCode } from "~/modules/validation";
 import type { AllSettings } from "~/modules/settings/schema";
 import type { CustomsDeclaration, CustomsItem, ExportReason, Incoterm } from "~/integrations/carriers/types";
@@ -15,6 +15,12 @@ import type { CustomsDeclaration, CustomsItem, ExportReason, Incoterm } from "~/
 export interface InvoiceOrderInput {
   orderNumber: string;
   currency: string;
+  /**
+   * Сума позицій ПІСЛЯ всіх знижок (Shopify Order.subtotalPriceSet: «after discounts»; податок включено так само,
+   * як у цінах позицій). Ціни позицій — ДО знижок (LineItem.originalUnitPriceSet), тому різниця — знижка.
+   * Відсутнє значення → ціни позицій без змін.
+   */
+  subtotal?: string | null;
   shippingPaid: string;
   email: string | null;
   shipFirstName: string | null;
@@ -107,6 +113,41 @@ export function invoiceNumberFor(orderNumber: string): string {
   return `INV-${orderNumber.replace(/[^A-Za-z0-9-]/g, "")}`;
 }
 
+/**
+ * Митна вартість одиниці = ціна угоди (фактично сплачена, після знижок). Знижка (Σ ціна до знижок × кількість −
+ * subtotal) розподіляється між рядками пропорційно їхній вартості (BigInt, метод найбільших залишків), потім
+ * ділиться на кількість з округленням до цента (рядок = ціна × кількість, тож сума може відрізнятися від subtotal
+ * не більше ніж на половину цента на одиницю). Без знижки або без subtotal — ціни без змін.
+ * Обмеження: рядки, що не входять у subtotal (подарункові картки, чайові), Shopify не позначено в наших даних —
+ * для них розподіл неточний (такі позиції й без того не мають бути в митному інвойсі).
+ */
+export function transactionUnitValues(items: readonly { unitPrice: string; quantity: number }[], subtotal: string | null | undefined): string[] {
+  const original = items.map((i) => i.unitPrice);
+  if (!subtotal || !isDecimalString(subtotal) || !items.every((i) => isDecimalString(i.unitPrice))) return original;
+  const lines = items.map((i) => (i.quantity > 0 ? toMinor(i.unitPrice) * BigInt(i.quantity) : 0n));
+  const sum = lines.reduce((a, b) => a + b, 0n);
+  let discount = sum - toMinor(subtotal);
+  if (sum <= 0n || discount <= 0n) return original;
+  if (discount > sum) discount = sum;
+  const shares = lines.map((l) => (discount * l) / sum);
+  let rest = discount - shares.reduce((a, b) => a + b, 0n);
+  const byRemainder = lines
+    .map((l, index) => ({ index, rem: (discount * l) % sum }))
+    .sort((a, b) => (a.rem === b.rem ? a.index - b.index : a.rem > b.rem ? -1 : 1));
+  for (const { index } of byRemainder) {
+    if (rest <= 0n) break;
+    if (lines[index]! - shares[index]! <= 0n) continue;
+    shares[index]! += 1n;
+    rest -= 1n;
+  }
+  return items.map((item, i) => {
+    if (item.quantity <= 0) return item.unitPrice;
+    const q = BigInt(item.quantity);
+    const lineAfter = lines[i]! - shares[i]!;
+    return fromMinor((2n * lineAfter + q) / (2n * q));
+  });
+}
+
 const clean = (v: string | null | undefined): string | null => {
   const t = (v ?? "").trim();
   return t === "" ? null : t;
@@ -122,6 +163,7 @@ export function buildCommercialInvoice(input: {
   const { order, items, settings } = input;
   const s = settings.shipper;
   const missing: CommercialInvoice["missing"] = [];
+  const unitValues = transactionUnitValues(items, order.subtotal);
   const lines: InvoiceLine[] = items.map((item, index) => {
     const position = index + 1;
     const v = item.variant;
@@ -143,8 +185,8 @@ export function buildCommercialInvoice(input: {
       hsCode,
       countryOfOrigin: origin,
       quantity: item.quantity,
-      unitValue: item.unitPrice,
-      lineValue: multiplyMoney(item.unitPrice, item.quantity),
+      unitValue: unitValues[index]!,
+      lineValue: multiplyMoney(unitValues[index]!, item.quantity),
       unitWeightGrams: weight,
       lineWeightGrams: weight === null ? null : weight * item.quantity,
     };
@@ -224,4 +266,76 @@ export function toCustomsItems(invoice: CommercialInvoice): CustomsItem[] {
     materialLocal: null,
     producerAndModel: null,
   }));
+}
+
+/** Митні дані, фактично надіслані перевізнику (знімок запиту відправлення shipments.requestSnapshot). */
+export interface SentCustomsData {
+  customs?: CustomsDeclaration | null;
+  customsItems?: CustomsItem[] | null;
+}
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const isMoney = (m: unknown): m is { amount: string; currency: string } =>
+  Boolean(m) && typeof (m as { amount?: unknown }).amount === "string" && isDecimalString((m as { amount: string }).amount);
+
+/**
+ * Друкований інвойс має збігатися з електронним інвойсом перевізника (той самий номер). Якщо запит уже надіслано,
+ * дата, тип, Incoterms, причина експорту і митні дані позицій (HS-код, походження, опис, кількість, вартість, вага)
+ * беруться зі знімка запиту, а не з поточних налаштувань/товарів (вони могли змінитися після створення накладної,
+ * а повтор після збою міг надіслати іншу дату). Дані сторін (адреси) — поточні: у знімку їх немає (без персональних даних).
+ * Немає знімка або він іншого формату — інвойс без змін.
+ */
+export function withSentCustomsData(invoice: CommercialInvoice, sent: SentCustomsData | null | undefined): CommercialInvoice {
+  const customs = sent?.customs;
+  if (!customs || typeof customs !== "object" || !DATE_RE.test(String(customs.invoiceDate ?? ""))) return invoice;
+  const out: CommercialInvoice = {
+    ...invoice,
+    number: typeof customs.invoiceNumber === "string" && customs.invoiceNumber ? customs.invoiceNumber : invoice.number,
+    date: customs.invoiceDate,
+    type: customs.invoiceType ?? invoice.type,
+    incoterm: customs.incoterm ?? invoice.incoterm,
+    exportReason: customs.exportReason ?? invoice.exportReason,
+  };
+  const items = Array.isArray(sent?.customsItems) ? sent.customsItems : null;
+  if (!items || items.length !== invoice.lines.length || !items.every((i) => isMoney(i?.unitValue) && Number.isInteger(i.quantity))) {
+    return out;
+  }
+  const lines = invoice.lines.map((line, index): InvoiceLine => {
+    const item = items[index]!;
+    const weight = Number.isFinite(item.weightGrams) && item.weightGrams > 0 ? item.weightGrams : null;
+    return {
+      ...line,
+      sku: clean(item.sku) ?? line.sku,
+      description: clean(item.description) ?? line.description,
+      descriptionLocal: clean(item.descriptionLocal),
+      material: clean(item.material),
+      hsCode: clean(item.hsCode),
+      countryOfOrigin: clean(item.countryOfOrigin),
+      quantity: item.quantity,
+      unitValue: item.unitValue.amount,
+      lineValue: multiplyMoney(item.unitValue.amount, item.quantity),
+      unitWeightGrams: weight,
+      lineWeightGrams: weight === null ? null : weight * item.quantity,
+    };
+  });
+  const missing: CommercialInvoice["missing"] = [];
+  for (const l of lines) {
+    if (!l.hsCode) missing.push({ position: l.position, field: "hsCode" });
+    if (!l.countryOfOrigin) missing.push({ position: l.position, field: "countryOfOrigin" });
+    // Опис у знімку вже містить назву товару як запасний варіант — відсутність опису беремо з поточних даних.
+    if (invoice.missing.some((m) => m.position === l.position && m.field === "customsDescription")) {
+      missing.push({ position: l.position, field: "customsDescription" });
+    }
+    if (l.unitWeightGrams === null) missing.push({ position: l.position, field: "weight" });
+  }
+  const goodsTotal = addMoney("0.00", ...lines.map((l) => l.lineValue));
+  return {
+    ...out,
+    currency: isMoney(customs.totalValue) ? customs.totalValue.currency : out.currency,
+    lines,
+    goodsTotal,
+    total: addMoney(goodsTotal, invoice.shippingCharge),
+    totalWeightGrams: lines.reduce((sum, l) => sum + (l.lineWeightGrams ?? 0), 0),
+    missing,
+  };
 }

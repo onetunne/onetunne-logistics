@@ -15,6 +15,21 @@ export const CARRIER_SERVICES_QUERY = `#graphql
     carrierServices(first: 50) { nodes { ${SERVICE_FIELDS} } }
   }`;
 
+/**
+ * Чи ввімкнено в магазині доставку за ринками (market-driven shipping): ShopFeatures.marketDrivenShipping
+ * («Whether market-driven shipping is enabled for the shop», API 2026-07+). У такому магазині тарифи із зон
+ * профілів доставки, створених продавцем, Checkout ігнорує (deliveryProfileUpdate, 2026-10) — тарифи застосунку
+ * вмикаються в доставці ринку (Markets).
+ */
+export const SHOP_SHIPPING_FEATURES_QUERY = `#graphql
+  query OtShopShippingFeatures {
+    shop { features { marketDrivenShipping } }
+  }`;
+
+export interface GqlShopShippingFeatures {
+  shop: { features: { marketDrivenShipping: boolean | null } | null } | null;
+}
+
 export const CARRIER_SERVICE_CREATE_MUTATION = `#graphql
   mutation OtCarrierServiceCreate($input: DeliveryCarrierServiceCreateInput!) {
     carrierServiceCreate(input: $input) { carrierService { ${SERVICE_FIELDS} } ${USER_ERRORS} }

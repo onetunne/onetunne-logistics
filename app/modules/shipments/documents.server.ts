@@ -7,7 +7,7 @@ import { and, eq } from "drizzle-orm";
 import { shipments } from "~/db/schema";
 import { requirePermission } from "~/domain/permissions";
 import { DomainError, NotFoundError } from "~/lib/errors";
-import { buildCommercialInvoice, type CommercialInvoice } from "~/modules/customs/invoice";
+import { buildCommercialInvoice, withSentCustomsData, type CommercialInvoice, type SentCustomsData } from "~/modules/customs/invoice";
 import { loadLineItems, loadOrderRow } from "~/modules/orders/repository.server";
 import { getSettings } from "~/modules/settings/settings.server";
 import { CARRIER_DOCUMENT_KINDS, type CarrierDocument, type CarrierDocumentKind } from "~/integrations/carriers/types";
@@ -50,7 +50,10 @@ export async function fetchCarrierDocument(
   );
 }
 
-/** Комерційний інвойс застосунку (друк у браузері). Номер накладної — з активного відправлення, якщо є. */
+/**
+ * Комерційний інвойс застосунку (друк у браузері). Номер накладної — з активного відправлення, якщо є.
+ * Якщо запит до перевізника вже надіслано — митні дані й дата з його знімка (друк = електронний інвойс перевізника).
+ */
 export async function loadOrderInvoice(ctx: ServiceContext, orderId: string): Promise<CommercialInvoice> {
   requirePermission(ctx.actor, "orders.view");
   const order = await loadOrderRow(ctx.db, orderId);
@@ -60,11 +63,12 @@ export async function loadOrderInvoice(ctx: ServiceContext, orderId: string): Pr
     ctx.db.select().from(shipments).where(eq(shipments.orderId, orderId)),
   ]);
   const active = rows.find((s) => (ACTIVE_SHIPMENT_STATUSES as readonly string[]).includes(s.status));
-  return buildCommercialInvoice({
+  const invoice = buildCommercialInvoice({
     order,
     items,
     settings,
     issuedAt: active?.createdAt ?? ctx.now(),
     waybillNumber: active?.status === "created" ? active.waybillNumber : null,
   });
+  return withSentCustomsData(invoice, (active?.requestSnapshot ?? null) as SentCustomsData | null);
 }
