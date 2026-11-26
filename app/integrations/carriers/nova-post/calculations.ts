@@ -77,7 +77,8 @@ export function summarizeCalculation(r: CalculationResponse | null) {
   const services = r?.services ?? [];
   const byType = new Map<string, number>();
   for (const s of services) {
-    const key = s.deliveryType ?? "default";
+    // deliveryType у відповіді — ідентифікатор (UUID); для людини зрозуміліша назва тарифу.
+    const key = s.deliveryTypeName ?? s.serviceName ?? s.deliveryType ?? "default";
     byType.set(key, (byType.get(key) ?? 0) + (typeof s.cost === "number" ? s.cost : 0));
   }
   return {
