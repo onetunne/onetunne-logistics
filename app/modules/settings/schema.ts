@@ -117,7 +117,7 @@ export const checkoutRatesSchema = z.object({
   enabled: z.boolean(),
   /** Націнка у відсотках до вартості перевізника (0–200). */
   markupPercent: z.number().min(0).max(200),
-  /** Фіксована надбавка у валюті магазину, десятковий рядок. */
+  /** Фіксована надбавка у валюті тарифу перевізника (novaPost.tariffCurrency — база таблиці курсів), десятковий рядок; у валюту кошика перераховується за fxRates. */
   markupFixed: z.string().trim().regex(/^\d{1,7}(\.\d{1,2})?$/, "0.00"),
   rounding: z.enum(ROUNDING_MODES),
   /**

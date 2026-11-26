@@ -204,7 +204,9 @@ describe("validateOrder — issues", () => {
       }),
     );
 
-    const validatorCodes = ISSUE_CODES.filter((c) => !c.startsWith("CARRIER_") && !c.startsWith("SHOPIFY_"));
+    const validatorCodes = ISSUE_CODES.filter(
+      (c) => !c.startsWith("CARRIER_") && !c.startsWith("SHOPIFY_") && c !== "DELIVERY_PROBLEM", // відстеження, не валідатор
+    );
     expect([...seen].sort()).toEqual([...validatorCodes].sort());
   });
 

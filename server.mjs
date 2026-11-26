@@ -36,7 +36,9 @@ app.use((req, res, next) => {
   const started = Date.now();
   res.on("finish", () => {
     if (req.path.startsWith("/assets/")) return;
-    console.log(`${req.method} ${req.path} ${res.statusCode} ${Date.now() - started}ms`);
+    // Токен у шляху зворотного виклику Shopify Checkout — секрет: у журнал не записується.
+    const logPath = req.path.replace(/\/carrier-service\/[^/]+/g, "/carrier-service/[hidden]");
+    console.log(`${req.method} ${logPath} ${res.statusCode} ${Date.now() - started}ms`);
   });
   next();
 });

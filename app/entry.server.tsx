@@ -76,5 +76,6 @@ export default async function handleRequest(
 /** Необроблені помилки loader/action: лише через логер із маскуванням персональних даних. */
 export function handleError(error: unknown, { request }: { request: Request }) {
   if (request.signal.aborted) return;
-  logger.error("request.error", { path: new URL(request.url).pathname, error });
+  const path = new URL(request.url).pathname.replace(/\/carrier-service\/[^/]+/g, "/carrier-service/[hidden]");
+  logger.error("request.error", { path, error });
 }
