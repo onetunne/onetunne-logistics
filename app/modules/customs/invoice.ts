@@ -164,7 +164,8 @@ export function buildCommercialInvoice(input: {
       company: clean(s.companyName),
       taxId: clean(s.taxId),
       eori: clean(s.eori),
-      ioss: null,
+      // IOSS продавця — для посилок до ЄС до 150 EUR (ПДВ сплачено при продажу).
+      ioss: clean(s.ioss),
       phone: clean(s.phone),
       email: clean(s.email),
       addressLines: [s.address1, s.address2, [s.postalCode, s.city].filter((x) => clean(x)).join(" ")].filter((x) => clean(x)),
@@ -175,8 +176,7 @@ export function buildCommercialInvoice(input: {
       company: clean(order.shipCompany),
       taxId: null,
       eori: null,
-      // IOSS відправника вказується для посилок до ЄС (імпортний ПДВ сплачено при продажу).
-      ioss: clean(s.ioss),
+      ioss: null,
       phone: clean(order.shipPhone),
       email: clean(order.email),
       addressLines: [
