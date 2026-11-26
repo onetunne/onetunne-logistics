@@ -33,6 +33,12 @@ import { getSettings } from "~/modules/settings/settings.server";
 import { computeParcelWeights } from "~/modules/shipments/weight";
 import { validateOrder } from "~/modules/validation";
 import { buildCommercialInvoice, toCustomsDeclaration, toCustomsItems } from "~/modules/customs/invoice";
+import { splitStreetAndBuilding } from "~/modules/customs/address-parts";
+
+function streetParts(address1: string | null | undefined): { street: string | null; building: string | null } {
+  const parts = splitStreetAndBuilding(address1);
+  return { street: parts?.street ?? null, building: parts?.building ?? null };
+}
 import {
   CarrierError,
   type CarrierAdapter,
@@ -174,6 +180,7 @@ export function buildShipmentRequest(
         province: null,
         address1: s.address1,
         address2: s.address2 || null,
+        ...streetParts(s.address1),
       },
       branchCode: s.carrierBranch || null,
       taxId: s.taxId || null,
@@ -192,6 +199,7 @@ export function buildShipmentRequest(
         province: order.shipProvince,
         address1: order.shipAddress1 ?? "",
         address2: order.shipAddress2,
+        ...streetParts(order.shipAddress1),
       },
     },
     parcels: [

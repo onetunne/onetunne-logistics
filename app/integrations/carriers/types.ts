@@ -41,6 +41,12 @@ export interface CarrierAddress {
   province: string | null;
   address1: string;
   address2: string | null;
+  /**
+   * Вулиця й номер будинку окремо — лише якщо однозначно виділяються з address1
+   * (modules/customs/address-parts.ts). null — не виділено (адаптер вирішує: відмова з поясненням або address1).
+   */
+  street?: string | null;
+  building?: string | null;
 }
 
 export interface CarrierParty {
