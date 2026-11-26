@@ -11,19 +11,33 @@ export interface CalculationInput {
   recipientCountry: string;
   recipientCity?: string | null;
   recipientPostCode?: string | null;
+  /** Регіон/штат одержувача (для США — дволітерний код штату, за документацією). */
+  recipientRegion?: string | null;
   /**
    * insuranceCost — оголошена вартість посилки для страхування у валюті країни відправника (для UA — гривні).
    * Обов'язкове поле: API повертає 422 "parcels.0.insuranceCost field is required" (перевірено на робочому API 2026-11-26).
    */
   parcels: Array<{ weightGrams: number; lengthMm: number; widthMm: number; heightMm: number; insuranceCost: number }>;
-  payerType?: "Sender" | "Recipient";
+  payerType?: "Sender" | "Recipient" | "ThirdPerson";
+  /**
+   * Номер договору платника. Документація: обов'язковий для ThirdPerson у Європі/з Європи в Україну,
+   * «для відправлень з України не обов'язковий». Вплив на тариф не документований — передаємо, якщо задано.
+   */
+  payerContractNumber?: string | null;
+  /**
+   * ЄДРПОУ/ІПН і назва компанії відправника. Документація: якщо платник — відправник-юрособа,
+   * ці поля застосовують індивідуальну знижку контрагента.
+   */
+  senderCompanyTin?: string | null;
+  senderCompanyName?: string | null;
   deliveryTypes?: Array<"standard" | "economy" | "express">;
   /** Дані інвойсу для розрахунку мита (необов'язково). */
   invoice?: {
     incoterm: "DAP" | "DDP";
     currency: string;
     cost: number;
-    items: Array<{ hsCode: string; amount: number; cost: number }>;
+    payerFeesCustoms?: "Sender" | "Recipient";
+    items?: Array<{ hsCode: string; amount: number; cost: number }>;
   };
 }
 
@@ -33,16 +47,23 @@ const clean = <T extends Record<string, unknown>>(o: T) =>
 export function buildCalculationRequest(input: CalculationInput) {
   return clean({
     payerType: input.payerType ?? "Sender",
+    payerContractNumber: input.payerContractNumber ?? undefined,
     deliveryTypes: input.deliveryTypes,
-    invoice: input.invoice,
+    invoice: input.invoice ? clean(input.invoice) : undefined,
     sender: clean({
+      companyTin: input.senderCompanyTin ?? undefined,
+      companyName: input.senderCompanyName ?? undefined,
       countryCode: input.senderCountry,
       divisionNumber: input.senderDivisionNumber ?? undefined,
       addressParts: clean({ city: input.senderCity ?? undefined, postCode: input.senderPostCode ?? undefined }),
     }),
     recipient: clean({
       countryCode: input.recipientCountry,
-      addressParts: clean({ city: input.recipientCity ?? undefined, postCode: input.recipientPostCode ?? undefined }),
+      addressParts: clean({
+        city: input.recipientCity ?? undefined,
+        region: input.recipientRegion ?? undefined,
+        postCode: input.recipientPostCode ?? undefined,
+      }),
     }),
     parcels: input.parcels.map((p, i) => ({
       rowNumber: i + 1,
@@ -63,8 +84,12 @@ export interface CalculationService {
   serviceCode?: string;
   cost?: number;
   price?: number;
+  discount?: number;
   deliveryType?: string;
   deliveryTypeName?: string;
+  /** Оцінка мит, якщо їх сплачує одержувач / відправник (за наявності інвойсу). */
+  recipientPayerFeesCustomsCost?: number;
+  senderPayerFeesCustomsCost?: number;
 }
 
 export interface CalculationResponse {
