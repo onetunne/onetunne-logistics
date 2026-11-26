@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CarrierError, NovaGlobalAdapter, type CarrierAdapter, type CreateShipmentRequest } from "~/integrations/carriers";
 
-const MESSAGE = "Nova Global API is not configured: official documentation and API keys pending (stage 3)";
+const MESSAGE = "Nova Global Partners API is not configured: partner login/password and company_id from the Nova Global agreement are required";
 
 async function expectNotConfigured(promise: Promise<unknown>): Promise<void> {
   const err = await promise.then(

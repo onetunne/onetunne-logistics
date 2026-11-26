@@ -89,6 +89,12 @@ tests/            unit + інтеграційні тести (PGlite)
 - Зміни з Shopify не перезаписують замовлення з накладною або з неперенесеними підтвердженими змінами → проблема SHOPIFY_ORDER_CHANGED.
 - Тести етапу 2 — `tests/stage2` з імітацією Admin API (`fixtures.ts`); реальний API перевіряє власник на тестовому магазині.
 
+## Етап 3 (перевізник)
+- Аналіз API: `docs/carrier-api-analysis.md`. Документація: nova.global/partners_api (розділи `_<name>_en.html`),
+  api-portal.novapost.com (`.md`-версії сторінок, `llms.txt`). Хости дозволено в середовищі `onetunne-logistics`.
+- Nova Post API v1.0: `integrations/carriers/nova-post/` (JWT-клієнт, розрахунок вартості, перевірка ключа при старті).
+- Nova Global Partners API: Basic auth + company_id за договором; поки `not_configured`.
+
 ## Нотатки для наступних етапів
 - Етап 2: Dev Dashboard → Custom Distribution, `shopify app config link`, мінімальні scopes (план у `shopify.app.toml`),
   запит Protected Customer Data, робочий ShopifyGateway (GraphQL Admin API), webhooks orders/*, імпорт старих замовлень,

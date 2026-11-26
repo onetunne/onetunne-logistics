@@ -1,17 +1,15 @@
 /**
- * Nova Global — заглушка адаптера (етап 3).
- *
- * Офіційна документація партнерського API: https://nova.global/partners_api/
- *
- * Правила реалізації:
- * - Методи/ендпоінти реалізувати ЛИШЕ після підтвердження офіційної документації та отримання
- *   API-ключів. Не вигадувати методи, поля чи коди помилок.
- * - НЕ підставляти внутрішній український API Nova Post (https://api-portal.novapost.com/)
- *   без підтвердженої сумісності — це інший продукт.
- * - Перед повторним створенням після помилки API ЗАВЖДИ виконувати звірку через пошук за
- *   reference; якщо результат неможливо перевірити — відправлення йде на ручний розгляд.
- *
- * До того часу всі можливості вимкнені, а кожен метод кидає CarrierError("not_configured").
+ * Nova Global Partners API (офіційна документація v2.8 від 30.04.2026: https://nova.global/partners_api/).
+ * Перевірені факти (2026-11-26):
+ * - Доступ лише після підписання договору співпраці; авторизація — HTTP Basic (login:password),
+ *   окремі облікові дані для тестового і робочого середовищ; у кожному запиті — company_id (напр. "npi").
+ * - Хости: тест https://test-api.novaposhta.international:8243, робочий https://api.novaposhta.international:8243.
+ * - Методи: POST /v.2.0/IEW/create (api_order — унікальний ідентифікатор партнера; повтор → 422 COR7 "Duplicated reference"),
+ *   POST /v.2.0/IEW/cancel (COR202 — стан не дозволяє, COR125 — не знайдено), POST /v.2.0/IEW/print (label_format, base64 PDF),
+ *   POST /npi/IEW/getTrackingHistory (iew_num_in | api_order_in | references), POST /npi/Dictionary/getWarehouses,
+ *   маніфести/консолідація. Метода розрахунку вартості в поточній версії документації немає.
+ * - API-ключ Нової пошти (NOVA_POSHTA_API_KEY) НЕ підходить: потрібні login/password і company_id від Nova Global.
+ * Поки облікових даних немає — усі можливості вимкнені (not_configured).
  */
 import {
   CarrierError,
@@ -26,7 +24,7 @@ import {
 export const NOVA_GLOBAL_CODE = "nova_global";
 
 export const NOVA_GLOBAL_NOT_CONFIGURED_MESSAGE =
-  "Nova Global API is not configured: official documentation and API keys pending (stage 3)";
+  "Nova Global Partners API is not configured: partner login/password and company_id from the Nova Global agreement are required";
 
 export class NovaGlobalAdapter implements CarrierAdapter {
   readonly code = NOVA_GLOBAL_CODE;

@@ -11,6 +11,15 @@ export const streamTimeout = 5000;
 // Перевірка конфігурації під час запуску сервера (напр. заборона DEMO_MODE разом із ключами Shopify у production).
 const bootEnv = getEnv();
 
+// Перевірка сумісності ключа Nova Post (лише читання: JWT + розрахунок вартості, відправлення не створюються).
+if (bootEnv.NODE_ENV !== "test" && bootEnv.NOVA_POSHTA_API_KEY && !bootEnv.DEMO_MODE) {
+  const key = bootEnv.NOVA_POSHTA_API_KEY;
+  void import("~/integrations/carriers/nova-post/key-check.server").then(async (m) => {
+    const { NOVA_POST_ENDPOINTS } = await import("~/integrations/carriers/nova-post/client.server");
+    await m.logNovaPostKeyCheck(key, bootEnv.NOVA_POSHTA_API_BASE ?? NOVA_POST_ENDPOINTS.ua).catch(() => undefined);
+  });
+}
+
 // Робочий режим: фоновий обробник черги стартує разом із сервером (не з першим запитом).
 if (bootEnv.NODE_ENV !== "test" && bootEnv.shopifyConfigured && bootEnv.DATABASE_URL) {
   void import("~/server/production-runtime.server").then((m) => m.ensureJobWorker());
