@@ -32,6 +32,7 @@ export default [
   route("webhooks/shopify", "routes/webhooks.shopify.tsx"),
   route("webhooks/app/uninstalled", "routes/webhooks.app.uninstalled.tsx"),
   route("webhooks/app/scopes_update", "routes/webhooks.app.scopes_update.tsx"),
+  route("carrier-service/:token", "routes/carrier-service.tsx"),
   route("preferences", "routes/preferences.tsx"),
   route("healthz", "routes/healthz.tsx"),
 ] satisfies RouteConfig;

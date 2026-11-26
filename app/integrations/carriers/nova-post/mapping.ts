@@ -780,8 +780,10 @@ const normNumber = (n: string) => n.replace(/\s+/g, "");
  * Номер без поточного статусу й без подій пропускається (невідомий перевізнику).
  */
 export function buildTrackingSnapshots(response: NovaPostFullTracking | null, numbers: readonly string[]): TrackingSnapshot[] {
-  const current = Array.isArray(response?.currentStatus) ? response.currentStatus.filter(isObject) : [];
-  const history = Array.isArray(response?.historyOnlineTracking) ? response.historyOnlineTracking.filter(isObject) : [];
+  const current = Array.isArray(response?.currentStatus) ? response.currentStatus.filter((c): c is NovaPostCurrentStatus => isObject(c)) : [];
+  const history = Array.isArray(response?.historyOnlineTracking)
+    ? response.historyOnlineTracking.filter((r): r is NovaPostTrackRecord => isObject(r))
+    : [];
   const out: TrackingSnapshot[] = [];
   for (const requested of numbers) {
     const key = normNumber(requested);

@@ -399,7 +399,13 @@ async function runQuote(
   const result = await callWithTimeout((signal) => quoteRates(request, { signal }), deps.timeoutMs ?? CHECKOUT_RATES_TIMEOUT_MS);
   if ("error" in result) {
     const errorKind = result.timedOut ? "timeout" : result.error instanceof CarrierError ? result.error.kind : "unexpected";
-    if (errorKind === "unexpected") logger.warn("checkout_rates.carrier_unexpected_error", { carrier: carrier.code, error: result.error });
+    // Текст довільної помилки адаптера може містити дані запиту (адресу) — у журнал лише тип помилки.
+    if (errorKind === "unexpected") {
+      logger.warn("checkout_rates.carrier_unexpected_error", {
+        carrier: carrier.code,
+        errorType: result.error instanceof Error ? result.error.name : typeof result.error,
+      });
+    }
     return { kind: "carrier_error", carrier, parcel, timedOut: result.timedOut, errorKind };
   }
   const quotes = Array.isArray(result.value) ? result.value : [];
