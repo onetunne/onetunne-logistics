@@ -9,8 +9,9 @@ import type { CarrierAdapter, CarrierCapabilities, RateQuote, RateRequest } from
 import { DICTIONARIES } from "~/i18n";
 import { resetEnvCache } from "~/lib/env.server";
 import { JOB } from "~/modules/shopify-sync/sync.server";
-import { DEFAULT_SETTINGS } from "~/modules/settings/schema";
-import { getSetting } from "~/modules/settings/settings.server";
+import { DEFAULT_SETTINGS, type SettingsKey, type SettingsValue } from "~/modules/settings/schema";
+import { getSetting, loadSettings, updateSetting } from "~/modules/settings/settings.server";
+import { DEMO_ACTORS } from "~/server/context.server";
 import { demoRoleCookie } from "~/server/cookies.server";
 import { getDemoRuntime } from "~/server/demo-runtime.server";
 
@@ -115,6 +116,35 @@ function visible(html: string): string {
 
 async function db() {
   return (await getDemoRuntime()).handle.db;
+}
+
+/** Стан, потрібний тесту, задається в самому тесті (тести не залежать від порядку запуску). */
+async function setSetting<K extends SettingsKey>(key: K, patch: Partial<SettingsValue<K>>): Promise<void> {
+  const d = await db();
+  const { values, versions } = await loadSettings(d);
+  const r = await updateSetting(d, DEMO_ACTORS.owner(), key, { ...values[key], ...patch }, versions[key]);
+  if (!r.ok) throw new Error(`setSetting ${key}: ${JSON.stringify(r.fieldErrors)}`);
+}
+
+/** Курси й націнка для тестового розрахунку: EUR 45.50, +10,5 %, +45.50 UAH (= 1 EUR), округлення до .99. */
+const PREVIEW_RATES: Partial<SettingsValue<"checkoutRates">> = {
+  enabled: true,
+  markupPercent: 10.5,
+  markupFixed: "45.50",
+  rounding: "up_99",
+  fxRates: [
+    { currency: "EUR", rate: "45.50" },
+    { currency: "USD", rate: "41.2" },
+  ],
+};
+
+/** Усі значення атрибутів id у видимій розмітці, що повторюються. */
+function duplicateIds(html: string): string[] {
+  const counts = new Map<string, number>();
+  for (const m of html.replace(/<script[\s\S]*?<\/script>/g, "").matchAll(/\sid="([^"]+)"/g)) {
+    counts.set(m[1]!, (counts.get(m[1]!) ?? 0) + 1);
+  }
+  return [...counts].filter(([, n]) => n > 1).map(([id]) => id);
 }
 
 // ---------------------------------------------------------------- підроблені перевізники
@@ -222,6 +252,7 @@ describe("stage 3 settings: loader", () => {
       ...data.options.incoterms.map((v) => `settings.customs.incoterm.${v}`),
       ...data.options.exportReasons.map((v) => `settings.customs.exportReason.${v}`),
       ...data.options.invoiceTypes.map((v) => `settings.customs.invoiceType.${v}`),
+      ...data.options.registrationAddressModes.map((v) => `settings.customs.registrationAddress.${v}`),
       ...data.options.payerTypes.map((v) => `settings.novaPost.payerType.${v}`),
       ...data.options.deliveryTypes.filter(Boolean).map((v) => `settings.novaPost.deliveryType.${v}`),
       ...data.options.roundingModes.map((v) => `settings.checkoutRates.rounding.${v}`),
@@ -272,17 +303,42 @@ describe("stage 3 settings: saving sections (owner)", () => {
   it("customs: saves, validates and detects stale versions", async () => {
     const { version } = (await load()).customs;
     const base = { intent: "saveCustoms", expectedVersion: String(version) };
-    const bad = await act({ ...base, incoterm: "EXW", exportReason: "sale", invoiceType: "commercial" });
+    const bad = await act({ ...base, incoterm: "EXW", exportReason: "sale", invoiceType: "commercial", recipientRegistrationAddress: "billing" });
     expect(bad).toMatchObject({ ok: false, error: "error.validation", intent: "saveCustoms" });
-    expect(Object.keys(errorsOf(bad))).toEqual(["incoterm"]);
+    expect(Object.keys(errorsOf(bad)).sort()).toEqual(["incoterm", "recipientRegistrationAddress"]);
 
-    const ok = await act({ ...base, incoterm: "DDP", exportReason: "return", invoiceType: "proforma" });
+    const ok = await act({ ...base, incoterm: "DDP", exportReason: "return", invoiceType: "proforma", recipientRegistrationAddress: "shipping" });
     expect(ok).toEqual({ ok: true, message: "result.settings.saved", intent: "saveCustoms" });
-    expect(await getSetting(await db(), "customs")).toEqual({ incoterm: "DDP", exportReason: "return", invoiceType: "proforma" });
+    expect(await getSetting(await db(), "customs")).toEqual({
+      incoterm: "DDP",
+      exportReason: "return",
+      invoiceType: "proforma",
+      recipientRegistrationAddress: "shipping",
+    });
     expect((await load()).customs.version).toBe(version + 1);
 
-    const stale = await act({ ...base, incoterm: "DAP", exportReason: "sale", invoiceType: "commercial" });
+    const stale = await act({ ...base, incoterm: "DAP", exportReason: "sale", invoiceType: "commercial", recipientRegistrationAddress: "none" });
     expect(stale).toMatchObject({ ok: false, error: "error.conflict" });
+  });
+
+  it("customs: the owner's registration-address permission survives saves (also from a form without the field)", async () => {
+    await setSetting("customs", { recipientRegistrationAddress: "shipping" });
+    // Форма сторінки, відкритої до появи поля: поля немає — збережене значення не скидається до "none".
+    let { version } = (await load()).customs;
+    const old = await act({ intent: "saveCustoms", expectedVersion: String(version), incoterm: "DAP", exportReason: "sale", invoiceType: "commercial" });
+    expect(old).toMatchObject({ ok: true, intent: "saveCustoms" });
+    expect(await getSetting(await db(), "customs")).toEqual({
+      incoterm: "DAP",
+      exportReason: "sale",
+      invoiceType: "commercial",
+      recipientRegistrationAddress: "shipping",
+    });
+
+    // Поточна форма надсилає поле — власник може скасувати дозвіл.
+    ({ version } = (await load()).customs);
+    const fields = { intent: "saveCustoms", expectedVersion: String(version), incoterm: "DAP", exportReason: "sale", invoiceType: "commercial" };
+    expect(await act({ ...fields, recipientRegistrationAddress: "none" })).toMatchObject({ ok: true });
+    expect((await getSetting(await db(), "customs")).recipientRegistrationAddress).toBe("none");
   });
 
   it("shipper: tax ID, EORI and IOSS are validated and normalized", async () => {
@@ -414,7 +470,7 @@ describe("stage 3 settings: test calculation and Checkout connection", () => {
   };
 
   it("previewRates returns quotes from a fake rates carrier (carrier, converted and checkout prices)", async () => {
-    // Курс EUR 45.50, націнка 10,5 %, надбавка 45.50 UAH (= 1 EUR), округлення до .99 — збережено раніше.
+    await setSetting("checkoutRates", PREVIEW_RATES);
     const { adapter, calls } = fakeCarrier("fake_rates", async () => [QUOTE]);
     const r = await withCarrier(adapter, () => act(previewFields));
     expect(r).toMatchObject({ ok: true, message: "settings.checkoutRates.preview.ok", params: { count: 1 }, intent: "previewRates" });
@@ -480,6 +536,8 @@ describe("stage 3 settings: test calculation and Checkout connection", () => {
 
 describe("stage 3 settings: page render", () => {
   it("renders the new sections in Ukrainian; Nova Post hidden in the demo; Checkout connection explained", async () => {
+    await setSetting("tracking", { notifyCustomer: true });
+    await setSetting("checkoutRates", PREVIEW_RATES);
     const html = visible(await render());
     for (const key of [
       "settings.shipper.customsTitle",
@@ -487,6 +545,11 @@ describe("stage 3 settings: page render", () => {
       "settings.shipper.help.carrierBranch",
       "settings.customs.title",
       "settings.customs.hsNote",
+      "settings.customs.registrationAddress",
+      "settings.customs.registrationAddressHelp",
+      "settings.customs.registrationAddress.none",
+      "settings.customs.registrationAddress.shipping",
+      "settings.checkoutRates.preview.weightUnit",
       "settings.checkoutRates.title",
       "settings.checkoutRates.fx.title",
       "settings.checkoutRates.preview.title",
@@ -500,10 +563,23 @@ describe("stage 3 settings: page render", () => {
     expect(DICTIONARIES.uk["settings.shipper.help.carrierBranch"]).toContain("32521/1");
     expect(html).not.toContain(DICTIONARIES.uk["settings.novaPost.payerType"]);
     expect(html).not.toContain(DICTIONARIES.uk["settings.checkoutConnection.enable.button"]);
-    // Збережені курси — рядки таблиці.
+    // Збережені курси — рядки таблиці, кожен рядок — підписана група.
     expect(html).toContain('name="fxCurrency"');
     expect(html).toContain('value="45.50"');
+    expect(html).toContain(`aria-label="${DICTIONARIES.uk["settings.checkoutRates.fx.rowLabel"]!.replace("{n}", "2")}"`);
+    expect(html).toContain('name="recipientRegistrationAddress"');
     expect(html).not.toMatch(/>\s*(settings|shopify|carrierService)\.[a-zA-Z_.]+\s*</);
+  });
+
+  it("every id on the page is unique; each «enabled» checkbox label targets its own checkbox", async () => {
+    const html = await render();
+    expect(duplicateIds(html)).toEqual([]);
+    for (const id of ["checkoutRates-enabled", "tracking-enabled"]) {
+      expect(html).toContain(`for="${id}"`);
+      expect(html).toContain(`id="${id}"`);
+    }
+    const { adapter } = fakeCarrier("nova_post", async () => []);
+    expect(duplicateIds(await withCarrier(adapter, () => render()))).toEqual([]);
   });
 
   it("renders the Nova Post section with the creation status and the ThirdPerson field error", async () => {
@@ -519,17 +595,25 @@ describe("stage 3 settings: page render", () => {
     expect(html).toContain("NOVA_POST_SHIPMENTS_ENABLED=true");
     expect(html).toContain(DICTIONARIES.uk["settings.novaPost.error.contractRequired"]);
     expect(html).toContain(DICTIONARIES.uk["settings.integrations.status.creationDisabled"]);
+    // Поле договору не дозволяє ввести більше, ніж приймає перевірка (2–20 символів).
+    expect(html).toMatch(/<input[^>]*name="payerContractNumber"[^>]*maxLength="20"|<input[^>]*maxLength="20"[^>]*name="payerContractNumber"/i);
   });
 
-  it("renders the test calculation table and localized FX row errors", async () => {
+  it("renders the test calculation table (localized weight unit)", async () => {
+    await setSetting("checkoutRates", PREVIEW_RATES);
     const { adapter } = fakeCarrier("fake_rates", async () => [QUOTE]);
     const html = await withCarrier(adapter, async () => visible(await render(previewFieldsForRender())));
     expect(html).toContain(DICTIONARIES.uk["settings.checkoutRates.preview.col.checkoutPrice"]);
     expect(html).toContain("fake_rates_standard");
     expect(html).toMatch(/23[.,]99/);
+    expect(DICTIONARIES.uk["settings.checkoutRates.preview.weightUnit"]).toBe("г");
+    expect(html).toMatch(/name="weightGrams"[^>]*>\s*<span class="ot-input-affix ot-input-affix--suffix" aria-hidden="true">г<\/span>/);
+  });
 
+  it("FX row errors stay on the submitted rows, also without JavaScript (rows come from the response)", async () => {
+    await setSetting("checkoutRates", PREVIEW_RATES);
     const { version } = (await load()).checkoutRates;
-    const errors = visible(
+    const html = visible(
       await render({
         intent: "saveCheckoutRates",
         expectedVersion: String(version),
@@ -537,12 +621,49 @@ describe("stage 3 settings: page render", () => {
         markupFixed: "0",
         rounding: "none",
         serviceName: "",
-        fxCurrency: ["EUR", "EUR"],
-        fxRate: ["45", "abc"],
+        fxCurrency: ["PLN", "", "PLN"],
+        fxRate: ["11", "", "abc"],
       }),
     );
-    expect(errors).toContain(DICTIONARIES.uk["settings.checkoutRates.error.fxDuplicate"]);
-    expect(errors).toContain(DICTIONARIES.uk["settings.checkoutRates.error.fxRate"]);
+    const duplicate = DICTIONARIES.uk["settings.checkoutRates.error.fxDuplicate"]!;
+    const badRate = DICTIONARIES.uk["settings.checkoutRates.error.fxRate"]!;
+    // Показано рядки, як їх ввели (з порожнім рядком), а не збережені EUR 45.50 / USD 41.2.
+    const inputs = (name: string) =>
+      [...html.matchAll(new RegExp(`<input[^>]*name="${name}"[^>]*>`, "g"))].map((m) => ({
+        at: m.index,
+        value: /value="([^"]*)"/.exec(m[0])?.[1] ?? "",
+        invalid: m[0].includes('aria-invalid="true"'),
+      }));
+    const currencies = inputs("fxCurrency");
+    const rates = inputs("fxRate");
+    expect(currencies.map((c) => c.value)).toEqual(["PLN", "", "PLN"]);
+    expect(rates.map((r) => r.value)).toEqual(["11", "", "abc"]);
+    // Перший і другий рядки без помилок; помилки — у третьому рядку, кожна біля свого поля.
+    expect([...currencies, ...rates].map((f) => f.invalid)).toEqual([false, false, true, false, false, true]);
+    const at = (needle: string) => html.indexOf(needle);
+    expect(at(duplicate)).toBeGreaterThan(currencies[2]!.at);
+    expect(at(duplicate)).toBeLessThan(rates[2]!.at);
+    expect(at(badRate)).toBeGreaterThan(rates[2]!.at);
+    expect(html.split(duplicate).length - 1).toBe(1);
+    expect(html.split(badRate).length - 1).toBe(1);
+    // Нічого не збережено.
+    expect((await load()).checkoutRates.version).toBe(version);
+  });
+
+  it("saveCheckoutRates echoes the submitted rows only on validation errors", async () => {
+    const { version } = (await load()).checkoutRates;
+    const base = { intent: "saveCheckoutRates", expectedVersion: String(version), markupPercent: "0", markupFixed: "0", rounding: "none", serviceName: "" };
+    const bad = await act({ ...base, fxCurrency: ["eur", "", "EUR"], fxRate: ["45,5", "", "1"] });
+    expect(bad).toMatchObject({
+      ok: false,
+      fxRows: [
+        { currency: "eur", rate: "45,5" },
+        { currency: "", rate: "" },
+        { currency: "EUR", rate: "1" },
+      ],
+    });
+    const ok = await act({ ...base, fxCurrency: ["EUR"], fxRate: ["45.5"] });
+    expect(ok).toEqual({ ok: true, message: "result.settings.saved", intent: "saveCheckoutRates" });
   });
 });
 

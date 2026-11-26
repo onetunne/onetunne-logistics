@@ -1,6 +1,7 @@
-import { useRef, useState, type ReactNode } from "react";
+import { Suspense, useRef, useState, type ReactNode } from "react";
 import type { ZodType } from "zod";
 import {
+  Await,
   Form,
   useActionData,
   useLoaderData,
@@ -97,14 +98,29 @@ type Intent = (typeof INTENTS)[number];
 /** Максимум рядків у таблиці курсів (як у checkoutRatesSchema). */
 const MAX_FX_RATES = 20;
 const INVOICE_TYPES = customsSchema.shape.invoiceType.options;
+const REGISTRATION_ADDRESS_MODES = customsSchema.shape.recipientRegistrationAddress.unwrap().options;
+/**
+ * Скільки чекаємо на стан CarrierService із Shopify. Стан завантажується окремо від сторінки (React Router
+ * передає його потоком), тож повільна відповідь Shopify не затримує налаштування; ліміт — менший за
+ * streamTimeout (5 с) в entry.server, щоб замість обірваного потоку показати зрозумілий стан «помилка».
+ */
+const CHECKOUT_STATUS_TIMEOUT_MS = 4000;
+/** Скільки рядків курсів повертається формі після помилки (для показу без JavaScript). */
+const MAX_ECHOED_FX_ROWS = 50;
 
 /** Результат тестового розрахунку для сторінки (те саме, що бачить Shopify, плюс пояснення). */
 export type CheckoutPreviewView = Pick<CheckoutRatesPreview, "enabled" | "carrier" | "parcel" | "reason" | "errorKind" | "quotes"> & {
   rateCount: number;
 };
 
+/** Рядок таблиці курсів так, як його ввели (для показу помилок у тих самих рядках після перевірки). */
+export interface SubmittedFxRow {
+  currency: string;
+  rate: string;
+}
+
 /** Результат дії з позначкою форми, якій він належить (банер показується лише в ній). */
-export type SettingsActionResult = ActionResult & { intent: string; preview?: CheckoutPreviewView };
+export type SettingsActionResult = ActionResult & { intent: string; preview?: CheckoutPreviewView; fxRows?: SubmittedFxRow[] };
 
 type CapabilityFlags = Pick<CarrierCapabilities, "rates" | "documents" | "tracking" | "createShipment" | "cancelShipment">;
 
@@ -147,6 +163,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       incoterms: [...INCOTERMS],
       exportReasons: [...EXPORT_REASONS],
       invoiceTypes: [...INVOICE_TYPES],
+      registrationAddressModes: [...REGISTRATION_ADDRESS_MODES],
       payerTypes: [...NOVA_POST_PAYER_TYPES],
       // "" — автоматично (тариф визначає перевізник).
       deliveryTypes: ["", ...NOVA_POST_DELIVERY_TYPES],
@@ -175,7 +192,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
       /** Базова валюта таблиці курсів — валюта тарифів Nova Post (як у checkout-rates.server). */
       baseCurrency: values.novaPost.tariffCurrency,
     },
-    checkoutConnection: await checkoutConnectionState(ctx, canManage),
+    /** Значення одразу (демо, лише власник) або проміс — сторінка показує стан через <Await>, не чекаючи Shopify. */
+    checkoutConnection: checkoutConnectionState(ctx, canManage),
     /** Назва сервісу розрахунку доставки в Shopify (для інструкції «додайте тариф у зону доставки»). */
     checkoutServiceName: DEFAULT_CARRIER_SERVICE_NAME,
     tracking: { value: values.tracking, version: versions.tracking },
@@ -236,23 +254,39 @@ function urlHost(url: string): string | null {
   }
 }
 
-async function checkoutConnectionState(ctx: RequestContext, canManage: boolean): Promise<CheckoutConnectionState> {
+/**
+ * Стан підключення до Checkout. Демо й «лише власник» — одразу; інакше проміс, який завжди виконується успішно
+ * (помилка або тайм-аут Shopify → kind "error"): сторінка не чекає на Admin API ні під час завантаження,
+ * ні після кожного збереження розділу (повторне завантаження даних).
+ */
+function checkoutConnectionState(
+  ctx: RequestContext,
+  canManage: boolean,
+): CheckoutConnectionState | Promise<CheckoutConnectionState> {
   if (ctx.mode !== "production") return { kind: "demo" };
   if (!canManage) return { kind: "ownerOnly" };
   let shop: string | null = null;
-  try {
-    shop = (await currentShop(ctx.db))?.shop ?? null;
-    const status = await getCarrierServiceStatus(ctx);
-    if (!status.ok) {
-      return { kind: "unavailable", reason: status.reason, scope: status.reason === "missing_scope" ? status.scope : null, shop };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const status = (async (): Promise<CheckoutConnectionState> => {
+    try {
+      shop = (await currentShop(ctx.db))?.shop ?? null;
+      const r = await getCarrierServiceStatus(ctx);
+      if (!r.ok) return { kind: "unavailable", reason: r.reason, scope: r.reason === "missing_scope" ? r.scope : null, shop };
+      const { registered, active, callbackUrlCurrent } = r.value;
+      return { kind: "status", registered, active, callbackUrlCurrent, shop };
+    } catch (error) {
+      // Стан необов'язковий для сторінки: помилка Shopify не блокує налаштування.
+      logger.warn("settings.carrier_service_status_failed", { error });
+      return { kind: "error", shop };
     }
-    const { registered, active, callbackUrlCurrent } = status.value;
-    return { kind: "status", registered, active, callbackUrlCurrent, shop };
-  } catch (error) {
-    // Стан необов'язковий для сторінки: помилка Shopify не блокує налаштування.
-    logger.warn("settings.carrier_service_status_failed", { error });
-    return { kind: "error", shop };
-  }
+  })();
+  const timeout = new Promise<CheckoutConnectionState>((resolve) => {
+    timer = setTimeout(() => {
+      logger.warn("settings.carrier_service_status_timeout", { timeoutMs: CHECKOUT_STATUS_TIMEOUT_MS });
+      resolve({ kind: "error", shop });
+    }, CHECKOUT_STATUS_TIMEOUT_MS);
+  });
+  return Promise.race([status, timeout]).finally(() => clearTimeout(timer));
 }
 
 // ---------------------------------------------------------------- action
@@ -273,7 +307,7 @@ function isIntent(value: string): value is Intent {
   return (INTENTS as readonly string[]).includes(value);
 }
 
-type IntentResult = ActionResult & { preview?: CheckoutPreviewView };
+type IntentResult = ActionResult & { preview?: CheckoutPreviewView; fxRows?: SubmittedFxRow[] };
 
 async function runIntent(ctx: RequestContext, intent: Intent, form: FormData): Promise<IntentResult> {
   switch (intent) {
@@ -282,7 +316,7 @@ async function runIntent(ctx: RequestContext, intent: Intent, form: FormData): P
       const version = expectedVersion(form);
       if (version === null) return { ok: false, error: "error.generic" };
       const input = { mode: formString(form, "mode"), globalPause: form.get("globalPause") === "on" };
-      return saved(await updateSetting(ctx.db, ctx.actor, "automation", input, version));
+      return saved(await updateSetting(ctx.db, ctx.actor, "automation", await withStored(ctx, "automation", input), version));
     }
     case "saveShipper": {
       requirePermission(ctx.actor, "settings.manage");
@@ -296,12 +330,10 @@ async function runIntent(ctx: RequestContext, intent: Intent, form: FormData): P
       requirePermission(ctx.actor, "settings.manage");
       const version = expectedVersion(form);
       if (version === null) return { ok: false, error: "error.generic" };
-      const input = {
-        incoterm: formString(form, "incoterm"),
-        exportReason: formString(form, "exportReason"),
-        invoiceType: formString(form, "invoiceType"),
-      };
-      return saved(await updateSetting(ctx.db, ctx.actor, "customs", input, version));
+      // Усі поля розділу — списки вибору: поле, якого немає у формі (сторінка, відкрита до оновлення), зберігає
+      // поточне значення, а не скидається до значення за замовчуванням.
+      const input = presentFields(form, Object.keys(customsSchema.shape));
+      return saved(await updateSetting(ctx.db, ctx.actor, "customs", await withStored(ctx, "customs", input), version));
     }
     case "savePackaging": {
       requirePermission(ctx.actor, "settings.manage");
@@ -322,12 +354,12 @@ async function runIntent(ctx: RequestContext, intent: Intent, form: FormData): P
       requirePermission(ctx.actor, "settings.manage");
       const version = expectedVersion(form);
       if (version === null) return { ok: false, error: "error.generic" };
-      const input = {
+      const input = await withStored(ctx, "novaPost", {
         payerType: formString(form, "payerType"),
         payerContractNumber: formString(form, "payerContractNumber"),
         deliveryType: formString(form, "deliveryType"),
         tariffCurrency: formString(form, "tariffCurrency"),
-      };
+      });
       const extra = novaPostFieldErrors(input);
       if (Object.keys(extra).length > 0) return invalid({ ...schemaFieldErrors(novaPostSchema, input), ...extra });
       return saved(await updateSetting(ctx.db, ctx.actor, "novaPost", input, version));
@@ -339,6 +371,7 @@ async function runIntent(ctx: RequestContext, intent: Intent, form: FormData): P
       const { values } = await loadSettings(ctx.db);
       const fx = parseFxRateRows(form, values.novaPost.tariffCurrency);
       const input = {
+        ...values.checkoutRates,
         enabled: form.get("enabled") === "on",
         markupPercent: decimalNumber(formString(form, "markupPercent")),
         markupFixed: decimalString(formString(form, "markupFixed")),
@@ -346,11 +379,13 @@ async function runIntent(ctx: RequestContext, intent: Intent, form: FormData): P
         fxRates: fx.rows,
         serviceName: formString(form, "serviceName"),
       };
+      // Після помилки форма показує рядки так, як їх ввели (і без JavaScript), — помилки в тих самих рядках.
       if (Object.keys(fx.errors).length > 0) {
-        return invalid({ ...remapFxErrors(schemaFieldErrors(checkoutRatesSchema, input), fx.index), ...fx.errors });
+        const errors = { ...remapFxErrors(schemaFieldErrors(checkoutRatesSchema, input), fx.index), ...fx.errors };
+        return { ...invalid(errors), fxRows: fx.submitted };
       }
       const result = await updateSetting(ctx.db, ctx.actor, "checkoutRates", input, version);
-      return result.ok ? saved(result) : invalid(remapFxErrors(result.fieldErrors, fx.index));
+      return result.ok ? saved(result) : { ...invalid(remapFxErrors(result.fieldErrors, fx.index)), fxRows: fx.submitted };
     }
     case "previewRates": {
       requirePermission(ctx.actor, "settings.manage");
@@ -409,7 +444,7 @@ async function runIntent(ctx: RequestContext, intent: Intent, form: FormData): P
         notifyCustomer: form.get("notifyCustomer") === "on",
         trackingUrlTemplate: formString(form, "trackingUrlTemplate"),
       };
-      return saved(await updateSetting(ctx.db, ctx.actor, "tracking", input, version));
+      return saved(await updateSetting(ctx.db, ctx.actor, "tracking", await withStored(ctx, "tracking", input), version));
     }
     case "saveTestCarrier": {
       if (ctx.mode !== "demo") throw new Response("Not Found", { status: 404 });
@@ -417,7 +452,7 @@ async function runIntent(ctx: RequestContext, intent: Intent, form: FormData): P
       const version = expectedVersion(form);
       if (version === null) return { ok: false, error: "error.generic" };
       const input = { simulation: formString(form, "simulation") };
-      return saved(await updateSetting(ctx.db, ctx.actor, "testCarrier", input, version));
+      return saved(await updateSetting(ctx.db, ctx.actor, "testCarrier", await withStored(ctx, "testCarrier", input), version));
     }
     case "resetDemo": {
       if (ctx.mode !== "demo") throw new Response("Not Found", { status: 404 });
@@ -432,6 +467,25 @@ async function runIntent(ctx: RequestContext, intent: Intent, form: FormData): P
 function expectedVersion(form: FormData): number | null {
   const raw = formString(form, "expectedVersion");
   return /^\d{1,9}$/.test(raw) ? Number(raw) : null;
+}
+
+/**
+ * Значення форми поверх збереженого значення розділу. Сторінка надсилає лише поля, які показує; поле схеми,
+ * якого форма не знає (напр. нове поле з .default()), зберігає поточне значення, а не скидається до
+ * значення за замовчуванням. Конкурентні зміни відсікає перевірка версії в updateSetting.
+ */
+async function withStored<K extends SettingsKey>(
+  ctx: RequestContext,
+  key: K,
+  input: Record<string, unknown>,
+): Promise<SettingsValue<K> & Record<string, unknown>> {
+  const { values } = await loadSettings(ctx.db);
+  return { ...values[key], ...input };
+}
+
+/** Лише ті поля, які є у формі (для розділів, де всі поля — списки вибору). */
+function presentFields(form: FormData, names: readonly string[]): Record<string, string> {
+  return Object.fromEntries(names.filter((n) => form.has(n)).map((n) => [n, formString(form, n)]));
 }
 
 function saved<K extends SettingsKey>(result: UpdateSettingResult<K>): ActionResult {
@@ -489,6 +543,8 @@ function integerNumber(raw: string): number {
 
 interface ParsedFxRates {
   rows: FxRate[];
+  /** Усі рядки форми так, як їх ввели (з порожніми), — для показу після помилки. */
+  submitted: SubmittedFxRow[];
   /** Індекс рядка у формі для кожного збереженого рядка (порожні рядки пропускаються). */
   index: number[];
   /** Помилки сторінки за шляхом fxRates.{рядок форми}.{поле}: duplicate | base | zero. */
@@ -504,12 +560,14 @@ function parseFxRateRows(form: FormData, baseCurrency: string): ParsedFxRates {
   const currencies = form.getAll("fxCurrency");
   const rates = form.getAll("fxRate");
   const rows: FxRate[] = [];
+  const submitted: SubmittedFxRow[] = [];
   const index: number[] = [];
   const errors: Record<string, string> = {};
   const seen = new Set<string>();
   const base = baseCurrency.trim().toUpperCase();
   const count = Math.max(currencies.length, rates.length);
   for (let i = 0; i < count; i++) {
+    if (i < MAX_ECHOED_FX_ROWS) submitted.push({ currency: text(currencies[i]).slice(0, 20), rate: text(rates[i]).slice(0, 20) });
     const currency = text(currencies[i]).trim().toUpperCase();
     const rate = decimalString(text(rates[i]));
     if (currency === "" && rate === "") continue;
@@ -520,7 +578,7 @@ function parseFxRateRows(form: FormData, baseCurrency: string): ParsedFxRates {
     rows.push({ currency, rate });
     index.push(i);
   }
-  return { rows, index, errors };
+  return { rows, submitted, index, errors };
 }
 
 /** Шляхи помилок схеми fxRates.{n}.* (n — індекс у збереженому масиві) → індекс рядка у формі. */
@@ -906,6 +964,20 @@ function CustomsSection({ data, result, pending, fieldError }: SectionProps) {
               error={fieldError("invoiceType")}
               disabled={!editable}
             />
+            <div className="ot-form-layout__full">
+              <Select
+                label={t("settings.customs.registrationAddress")}
+                name="recipientRegistrationAddress"
+                defaultValue={value.recipientRegistrationAddress}
+                options={data.options.registrationAddressModes.map((v) => ({
+                  value: v,
+                  label: t(`settings.customs.registrationAddress.${v}`),
+                }))}
+                helpText={t("settings.customs.registrationAddressHelp")}
+                error={fieldError("recipientRegistrationAddress")}
+                disabled={!editable}
+              />
+            </div>
           </FormLayout>
           <Banner tone="info" title={t("settings.customs.hsTitle")}>
             {t("settings.customs.hsNote")}
@@ -1055,7 +1127,7 @@ function NovaPostForm({ data, result, pending, fieldError, initialPayer }: Secti
             label={t("settings.novaPost.payerContractNumber")}
             name="payerContractNumber"
             defaultValue={value.payerContractNumber}
-            maxLength={50}
+            maxLength={20}
             autoComplete="off"
             spellCheck={false}
             required={payer === "ThirdPerson"}
@@ -1130,7 +1202,6 @@ function CheckoutRatesForm({ data, result, pending, fieldError }: SectionProps) 
   const t = useT();
   const { value, version, baseCurrency } = data.checkoutRates;
   const editable = data.can.manage;
-  const errors = result && !result.ok ? (result.fieldErrors ?? {}) : {};
   return (
     <Form method="post">
       <Hidden intent="saveCheckoutRates" version={version} />
@@ -1138,6 +1209,7 @@ function CheckoutRatesForm({ data, result, pending, fieldError }: SectionProps) 
         <ActionBanner data={result} />
         {value.enabled ? <Banner tone="info">{t("settings.checkoutRates.enabledBanner")}</Banner> : null}
         <Checkbox
+          id="checkoutRates-enabled"
           label={t("settings.checkoutRates.enabled")}
           name="enabled"
           defaultChecked={value.enabled}
@@ -1192,7 +1264,7 @@ function CheckoutRatesForm({ data, result, pending, fieldError }: SectionProps) 
           editable={editable}
           base={baseCurrency}
           max={data.options.maxFxRates}
-          errors={errors}
+          result={result}
         />
         <SaveRow canSave={editable} pending={pending} version={version} />
       </Stack>
@@ -1207,35 +1279,74 @@ const FX_ERROR_KEYS: Readonly<Record<string, string>> = {
   rate: "settings.checkoutRates.error.fxRate",
 };
 
-/** Таблиця курсів: рядки «валюта + курс», додавання/видалення до max рядків. Порожні рядки не зберігаються. */
+type FxField = "currency" | "rate";
+type FxRow = SubmittedFxRow & { id: number };
+/** Помилки рядків курсів за стабільним id рядка (не за позицією — рядки можна видаляти). */
+type FxRowErrors = Record<number, Partial<Record<FxField, string>>>;
+
+/** Помилки сервера fxRates.{рядок форми}.{поле} → за id рядків, які були у формі на момент надсилання. */
+function fxErrorsByRowId(rows: readonly FxRow[], errors: Record<string, string>): FxRowErrors {
+  const out: FxRowErrors = {};
+  for (const [path, message] of Object.entries(errors)) {
+    const m = /^fxRates\.(\d+)\.(currency|rate)$/.exec(path);
+    const row = m ? rows[Number(m[1])] : undefined;
+    if (!m || !row) continue;
+    (out[row.id] ??= {})[m[2] as FxField] = message;
+  }
+  return out;
+}
+
+/**
+ * Таблиця курсів: рядки «валюта + курс», додавання/видалення до max рядків. Порожні рядки не зберігаються.
+ * Помилки з сервера прив'язуються до рядків у момент відповіді й далі рухаються разом із рядком: видалення
+ * рядка вище не переносить помилку на іншу валюту; виправлене поле більше не позначається як помилкове.
+ * Після помилки без JavaScript рядки беруться з відповіді (як їх ввели), а не зі збереженого значення.
+ */
 function FxRatesEditor({
   initial,
   editable,
   base,
   max,
-  errors,
+  result,
 }: {
   initial: FxRate[];
   editable: boolean;
   base: string;
   max: number;
-  errors: Record<string, string>;
+  result: SettingsActionResult | undefined;
 }) {
   const t = useT();
+  const errors = result && !result.ok ? (result.fieldErrors ?? {}) : {};
   const nextId = useRef(0);
-  const withId = (row: FxRate) => ({ ...row, id: nextId.current++ });
-  const [rows, setRows] = useState(() => (initial.length > 0 ? initial : [{ currency: "", rate: "" }]).map(withId));
-  const rowError = (i: number, field: "currency" | "rate") => {
-    const message = errors[`fxRates.${i}.${field}`];
+  const withId = (row: SubmittedFxRow): FxRow => ({ currency: row.currency, rate: row.rate, id: nextId.current++ });
+  const [rows, setRows] = useState<FxRow[]>(() => {
+    const source = result?.fxRows ?? initial;
+    return (source.length > 0 ? source : [{ currency: "", rate: "" }]).map(withId);
+  });
+  const [rowErrors, setRowErrors] = useState<FxRowErrors>(() => fxErrorsByRowId(rows, errors));
+  // Нова відповідь сервера (та сама форма, без перемонтування) — прив'язуємо її помилки до поточних рядків.
+  const [seenResult, setSeenResult] = useState(result);
+  if (result !== seenResult) {
+    setSeenResult(result);
+    setRowErrors(fxErrorsByRowId(rows, errors));
+  }
+  const rowError = (id: number, field: FxField) => {
+    const message = rowErrors[id]?.[field];
     if (!message) return null;
     return t(FX_ERROR_KEYS[`${field}:${message}`] ?? FX_ERROR_KEYS[field] ?? "settings.error.invalid", { base });
   };
+  const clearError = (id: number, field: FxField) => {
+    if (!rowErrors[id]?.[field]) return;
+    setRowErrors((all) => ({ ...all, [id]: { ...all[id], [field]: undefined } }));
+  };
   const add = () => setRows((r) => (r.length >= max ? r : [...r, withId({ currency: "", rate: "" })]));
-  const remove = (id: number) =>
+  const remove = (id: number) => {
     setRows((r) => {
       const left = r.filter((row) => row.id !== id);
       return left.length > 0 ? left : [withId({ currency: "", rate: "" })];
     });
+    setRowErrors(({ [id]: _removed, ...rest }) => rest);
+  };
   const tooMany = Object.keys(errors).includes("fxRates");
 
   return (
@@ -1250,40 +1361,44 @@ function FxRatesEditor({
       </Stack>
       {tooMany ? <Banner tone="critical">{t("settings.checkoutRates.error.fxTooMany", { max })}</Banner> : null}
       {rows.map((row, i) => (
-        <Grid key={row.id} columns={{ xs: 1, md: editable ? 3 : 2 }} gap={3}>
-          <TextField
-            id={`fxCurrency-${row.id}`}
-            label={t("settings.checkoutRates.fx.currency")}
-            name="fxCurrency"
-            defaultValue={row.currency}
-            maxLength={3}
-            autoComplete="off"
-            autoCapitalize="characters"
-            spellCheck={false}
-            placeholder="EUR"
-            error={rowError(i, "currency")}
-            disabled={!editable}
-          />
-          <TextField
-            id={`fxRate-${row.id}`}
-            label={t("settings.checkoutRates.fx.rate", { base })}
-            name="fxRate"
-            inputMode="decimal"
-            defaultValue={row.rate}
-            maxLength={13}
-            autoComplete="off"
-            placeholder="45.50"
-            error={rowError(i, "rate")}
-            disabled={!editable}
-          />
-          {editable ? (
-            <Stack justify="end">
-              <Button onClick={() => remove(row.id)} aria-label={t("settings.checkoutRates.fx.removeLabel", { n: i + 1 })}>
-                {t("settings.checkoutRates.fx.remove")}
-              </Button>
-            </Stack>
-          ) : null}
-        </Grid>
+        <div key={row.id} role="group" aria-label={t("settings.checkoutRates.fx.rowLabel", { n: i + 1 })}>
+          <Grid columns={{ xs: 1, md: editable ? 3 : 2 }} gap={3}>
+            <TextField
+              id={`fxCurrency-${row.id}`}
+              label={t("settings.checkoutRates.fx.currency")}
+              name="fxCurrency"
+              defaultValue={row.currency}
+              onChange={() => clearError(row.id, "currency")}
+              maxLength={3}
+              autoComplete="off"
+              autoCapitalize="characters"
+              spellCheck={false}
+              placeholder="EUR"
+              error={rowError(row.id, "currency")}
+              disabled={!editable}
+            />
+            <TextField
+              id={`fxRate-${row.id}`}
+              label={t("settings.checkoutRates.fx.rate", { base })}
+              name="fxRate"
+              inputMode="decimal"
+              defaultValue={row.rate}
+              onChange={() => clearError(row.id, "rate")}
+              maxLength={13}
+              autoComplete="off"
+              placeholder="45.50"
+              error={rowError(row.id, "rate")}
+              disabled={!editable}
+            />
+            {editable ? (
+              <Stack justify="end">
+                <Button onClick={() => remove(row.id)} aria-label={t("settings.checkoutRates.fx.removeLabel", { n: i + 1 })}>
+                  {t("settings.checkoutRates.fx.remove")}
+                </Button>
+              </Stack>
+            ) : null}
+          </Grid>
+        </div>
       ))}
       {editable ? (
         <Stack direction="horizontal" gap={3} align="center">
@@ -1381,7 +1496,7 @@ function CheckoutPreview({
                 max={1_000_000}
                 step={1}
                 defaultValue={500}
-                suffix="g"
+                suffix={t("settings.checkoutRates.preview.weightUnit")}
                 required
                 helpText={t("settings.checkoutRates.preview.weightHelp")}
                 error={fieldError("weightGrams")}
@@ -1529,33 +1644,59 @@ function CheckoutConnection({
   pendingDisable: boolean;
 }) {
   const t = useT();
-  const state = data.checkoutConnection;
-  const header = (
-    <Stack gap={1}>
-      <Text as="h3" variant="heading-sm">
-        {t("settings.checkoutConnection.title")}
-      </Text>
-      <Text variant="body-sm" tone="subdued">
-        {t("settings.checkoutConnection.help")}
-      </Text>
-    </Stack>
+  const status = (state: CheckoutConnectionState) => (
+    <CheckoutConnectionStatus
+      state={state}
+      serviceName={data.checkoutServiceName}
+      pendingEnable={pendingEnable}
+      pendingDisable={pendingDisable}
+    />
   );
-  if (state.kind === "demo") {
-    return (
-      <Stack gap={3}>
-        {header}
-        <Banner tone="info">{t("settings.checkoutConnection.demo")}</Banner>
-      </Stack>
-    );
-  }
-  if (state.kind === "ownerOnly") {
-    return (
-      <Stack gap={3}>
-        {header}
+  return (
+    <Stack gap={3}>
+      <Stack gap={1}>
+        <Text as="h3" variant="heading-sm">
+          {t("settings.checkoutConnection.title")}
+        </Text>
         <Text variant="body-sm" tone="subdued">
-          {t("settings.ownerOnly")}
+          {t("settings.checkoutConnection.help")}
         </Text>
       </Stack>
+      <ActionBanner data={result} />
+      {/* Стан із Shopify надходить окремо від сторінки: поки його немає — «Перевіряємо…», решта сторінки вже працює. */}
+      <Suspense
+        fallback={
+          <Text variant="body-sm" tone="subdued">
+            {t("settings.checkoutConnection.loading")}
+          </Text>
+        }
+      >
+        <Await resolve={data.checkoutConnection} errorElement={status({ kind: "error", shop: null })}>
+          {(state) => status(state)}
+        </Await>
+      </Suspense>
+    </Stack>
+  );
+}
+
+function CheckoutConnectionStatus({
+  state,
+  serviceName,
+  pendingEnable,
+  pendingDisable,
+}: {
+  state: CheckoutConnectionState;
+  serviceName: string;
+  pendingEnable: boolean;
+  pendingDisable: boolean;
+}) {
+  const t = useT();
+  if (state.kind === "demo") return <Banner tone="info">{t("settings.checkoutConnection.demo")}</Banner>;
+  if (state.kind === "ownerOnly") {
+    return (
+      <Text variant="body-sm" tone="subdued">
+        {t("settings.ownerOnly")}
+      </Text>
     );
   }
 
@@ -1583,13 +1724,7 @@ function CheckoutConnection({
 
   return (
     <Stack gap={3}>
-      {header}
-      <ActionBanner data={result} />
-      {state.kind === "unavailable" ? (
-        <Banner tone="warning">{text}</Banner>
-      ) : (
-        <Status badges={badge} text={text} />
-      )}
+      {state.kind === "unavailable" ? <Banner tone="warning">{text}</Banner> : <Status badges={badge} text={text} />}
       {actionable ? (
         <Stack direction="horizontal" gap={3}>
           <Form method="post">
@@ -1601,7 +1736,7 @@ function CheckoutConnection({
                 <Stack gap={2}>
                   <Text>{t("settings.checkoutConnection.enable.shop", { shop: state.shop ?? "—" })}</Text>
                   <Text>{t("settings.checkoutConnection.enable.plan")}</Text>
-                  <Text>{t("settings.checkoutConnection.enable.zone", { name: data.checkoutServiceName })}</Text>
+                  <Text>{t("settings.checkoutConnection.enable.zone", { name: serviceName })}</Text>
                   <Text>{t("settings.checkoutConnection.enable.toggle")}</Text>
                 </Stack>
               }
@@ -1648,6 +1783,7 @@ function TrackingSection({ data, result, pending, fieldError }: SectionProps) {
           {value.notifyCustomer ? <Banner tone="warning">{t("settings.tracking.notifyWarning")}</Banner> : null}
           <FormLayout columns={2}>
             <Checkbox
+              id="tracking-enabled"
               label={t("settings.tracking.enabled")}
               name="enabled"
               defaultChecked={value.enabled}

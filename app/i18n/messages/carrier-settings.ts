@@ -37,6 +37,11 @@ const messages: MessageModule = {
     "settings.customs.invoiceType": "Тип інвойсу",
     "settings.customs.invoiceType.commercial": "Комерційний інвойс (продаж)",
     "settings.customs.invoiceType.proforma": "Проформа-інвойс (без продажу)",
+    "settings.customs.registrationAddress": "Адреса реєстрації одержувача (DE, SK, HU, FR)",
+    "settings.customs.registrationAddress.none": "Не передавати — накладні до цих країн не створюються",
+    "settings.customs.registrationAddress.shipping": "Передавати адресу доставки із замовлення",
+    "settings.customs.registrationAddressHelp":
+      "Nova Post вимагає адресу реєстрації одержувача для посилок до Німеччини, Словаччини, Угорщини й Франції. Застосунок не знає адреси реєстрації клієнта, тому за замовчуванням накладну до цих країн створити не вдасться: запит зупиняється до надсилання, менеджер бачить помилку. Якщо дозволити, замість адреси реєстрації передається адреса доставки із замовлення — перевірте, що це прийнятно для вашого договору з Nova Post.",
     "settings.customs.hsTitle": "Коди УКТ ЗЕД (HS)",
     "settings.customs.hsNote":
       "Nova Post приймає лише коди з 8–10 цифр (УКТ ЗЕД). 6-значні коди HS, які зазвичай вносять у Shopify, перевізник відхиляє. Змінити код: у Shopify відкрийте товар (або варіант) → блок запасів (Inventory) або доставки → «Код HS» (Harmonized System code).",
@@ -53,7 +58,7 @@ const messages: MessageModule = {
     "settings.novaPost.payerType.ThirdPerson": "Третя особа (за договором)",
     "settings.novaPost.payerContractNumber": "Номер договору",
     "settings.novaPost.payerContractNumberHelp":
-      "Договір з Новою поштою для безготівкової оплати й договірних тарифів. Обов’язковий, якщо платник — третя особа.",
+      "Договір із Nova Post для безготівкової оплати й договірних тарифів, 2–20 символів. Обов’язковий, якщо платник — третя особа.",
     "settings.novaPost.deliveryType": "Тариф",
     "settings.novaPost.deliveryType.auto": "Автоматично (за замовчуванням перевізника)",
     "settings.novaPost.deliveryType.standard": "Стандарт (standard)",
@@ -107,9 +112,9 @@ const messages: MessageModule = {
     "settings.checkoutRates.fx.removeLabel": "Видалити курс {n}",
     "settings.checkoutRates.fx.limit": "Не більше {max} валют.",
     "settings.checkoutRates.error.markupPercent": "Введіть число від 0 до 200.",
-    "settings.checkoutRates.error.markupFixed": "Сума з крапкою, до 2 знаків після коми, напр. 20.00.",
+    "settings.checkoutRates.error.markupFixed": "Сума до 2 знаків після коми чи крапки, напр. 20.00 або 20,00.",
     "settings.checkoutRates.error.fxCurrency": "Код валюти — три латинські літери, напр. EUR.",
-    "settings.checkoutRates.error.fxRate": "Курс — число більше 0, до 6 знаків після коми, напр. 45.50.",
+    "settings.checkoutRates.error.fxRate": "Курс — число більше 0, до 6 знаків після коми чи крапки, напр. 45.50 або 45,50.",
     "settings.checkoutRates.error.fxDuplicate": "Ця валюта вже є в таблиці.",
     "settings.checkoutRates.error.fxBase": "Для валюти тарифів ({base}) курс не потрібен.",
     "settings.checkoutRates.error.fxTooMany": "Забагато валют: не більше {max}.",
@@ -123,6 +128,7 @@ const messages: MessageModule = {
     "settings.checkoutRates.preview.city": "Місто",
     "settings.checkoutRates.preview.province": "Регіон / штат",
     "settings.checkoutRates.preview.weightGrams": "Вага товарів",
+    "settings.checkoutRates.preview.weightUnit": "г",
     "settings.checkoutRates.preview.weightHelp": "Без упаковки: тара й об’ємна вага додаються з розділу «Упаковка».",
     "settings.checkoutRates.preview.value": "Вартість товарів",
     "settings.checkoutRates.preview.currency": "Валюта кошика",
@@ -140,7 +146,7 @@ const messages: MessageModule = {
     "settings.checkoutRates.preview.daysExact": "{days} дн.",
     "settings.checkoutRates.preview.until": "до {date}",
     "settings.checkoutRates.error.weight": "Ціле число грамів від 1 до 1 000 000.",
-    "settings.checkoutRates.error.value": "Сума з крапкою, до 2 знаків після коми, напр. 49.90.",
+    "settings.checkoutRates.error.value": "Сума до 2 знаків після коми чи крапки, напр. 49.90 або 49,90.",
     "settings.checkoutRates.reason.no_fx_rate": "Немає курсу для валюти кошика — додайте його в таблицю курсів і збережіть.",
     "settings.checkoutRates.reason.unsupported_currency":
       "Ця валюта не підтримується: лише валюти з 0 або 2 знаками після коми.",
@@ -172,7 +178,7 @@ const messages: MessageModule = {
       "Реєструє застосунок у Shopify як сервіс розрахунку доставки (CarrierService). Діє лише в магазині, де встановлено цей застосунок.",
     "settings.checkoutConnection.demo":
       "У демо підключення до Checkout недоступне — лише у вбудованому застосунку в Shopify Admin.",
-    "settings.checkoutConnection.status": "Стан",
+    "settings.checkoutConnection.loading": "Перевіряємо стан у Shopify…",
     "settings.checkoutConnection.state.active": "Підключено: Shopify запитує тарифи застосунку.",
     "settings.checkoutConnection.state.inactive": "Сервіс зареєстровано, але вимкнено — тарифи застосунку в Checkout не надходять.",
     "settings.checkoutConnection.state.stale":
@@ -305,6 +311,11 @@ const messages: MessageModule = {
     "settings.customs.invoiceType": "Invoice type",
     "settings.customs.invoiceType.commercial": "Commercial invoice (sale)",
     "settings.customs.invoiceType.proforma": "Proforma invoice (no sale)",
+    "settings.customs.registrationAddress": "Recipient's registered address (DE, SK, HU, FR)",
+    "settings.customs.registrationAddress.none": "Do not send — no waybills to these countries",
+    "settings.customs.registrationAddress.shipping": "Send the order's shipping address",
+    "settings.customs.registrationAddressHelp":
+      "Nova Post requires the recipient's registered address for parcels to Germany, Slovakia, Hungary and France. The app does not know the customer's registered address, so by default a waybill to these countries cannot be created: the request is stopped before it is sent and the manager sees an error. If you allow it, the order's shipping address is sent instead of the registered address — check that this is acceptable under your Nova Post contract.",
     "settings.customs.hsTitle": "UKTZED (HS) codes",
     "settings.customs.hsNote":
       "Nova Post accepts only 8–10 digit codes (UKTZED). The 6-digit HS codes usually entered in Shopify are rejected by the carrier. To change a code: in Shopify open the product (or variant) → the Inventory or Shipping block → “HS code” (Harmonized System code).",
@@ -320,7 +331,7 @@ const messages: MessageModule = {
     "settings.novaPost.payerType.ThirdPerson": "Third party (under a contract)",
     "settings.novaPost.payerContractNumber": "Contract number",
     "settings.novaPost.payerContractNumberHelp":
-      "Your contract with Nova Post for non-cash payment and contract tariffs. Required when the payer is a third party.",
+      "Your contract with Nova Post for non-cash payment and contract tariffs, 2–20 characters. Required when the payer is a third party.",
     "settings.novaPost.deliveryType": "Tariff",
     "settings.novaPost.deliveryType.auto": "Automatic (carrier default)",
     "settings.novaPost.deliveryType.standard": "Standard",
@@ -373,9 +384,9 @@ const messages: MessageModule = {
     "settings.checkoutRates.fx.removeLabel": "Remove rate {n}",
     "settings.checkoutRates.fx.limit": "No more than {max} currencies.",
     "settings.checkoutRates.error.markupPercent": "Enter a number from 0 to 200.",
-    "settings.checkoutRates.error.markupFixed": "An amount with a dot, up to 2 decimals, e.g. 20.00.",
+    "settings.checkoutRates.error.markupFixed": "An amount with up to 2 decimals, e.g. 20.00 or 20,00.",
     "settings.checkoutRates.error.fxCurrency": "A currency code is three Latin letters, e.g. EUR.",
-    "settings.checkoutRates.error.fxRate": "A rate is a number above 0 with up to 6 decimals, e.g. 45.50.",
+    "settings.checkoutRates.error.fxRate": "A rate is a number above 0 with up to 6 decimals, e.g. 45.50 or 45,50.",
     "settings.checkoutRates.error.fxDuplicate": "This currency is already in the table.",
     "settings.checkoutRates.error.fxBase": "No rate is needed for the tariff currency ({base}).",
     "settings.checkoutRates.error.fxTooMany": "Too many currencies: no more than {max}.",
@@ -388,6 +399,7 @@ const messages: MessageModule = {
     "settings.checkoutRates.preview.city": "City",
     "settings.checkoutRates.preview.province": "Region / state",
     "settings.checkoutRates.preview.weightGrams": "Goods weight",
+    "settings.checkoutRates.preview.weightUnit": "g",
     "settings.checkoutRates.preview.weightHelp": "Without packaging: tare and volumetric weight are added from “Packaging”.",
     "settings.checkoutRates.preview.value": "Goods value",
     "settings.checkoutRates.preview.currency": "Cart currency",
@@ -405,7 +417,7 @@ const messages: MessageModule = {
     "settings.checkoutRates.preview.daysExact": "{days} days",
     "settings.checkoutRates.preview.until": "by {date}",
     "settings.checkoutRates.error.weight": "A whole number of grams from 1 to 1,000,000.",
-    "settings.checkoutRates.error.value": "An amount with a dot, up to 2 decimals, e.g. 49.90.",
+    "settings.checkoutRates.error.value": "An amount with up to 2 decimals, e.g. 49.90 or 49,90.",
     "settings.checkoutRates.reason.no_fx_rate": "No exchange rate for the cart currency — add it to the rates table and save.",
     "settings.checkoutRates.reason.unsupported_currency": "This currency is not supported: only currencies with 0 or 2 decimals.",
     "settings.checkoutRates.reason.no_rates_carrier":
@@ -434,7 +446,7 @@ const messages: MessageModule = {
     "settings.checkoutConnection.help":
       "Registers the app in Shopify as a shipping rate service (CarrierService). Applies only to the store where this app is installed.",
     "settings.checkoutConnection.demo": "Checkout connection is not available in the demo — only in the embedded app in Shopify Admin.",
-    "settings.checkoutConnection.status": "Status",
+    "settings.checkoutConnection.loading": "Checking the status in Shopify…",
     "settings.checkoutConnection.state.active": "Connected: Shopify requests the app's rates.",
     "settings.checkoutConnection.state.inactive": "The service is registered but disabled — the app's rates do not reach checkout.",
     "settings.checkoutConnection.state.stale":
