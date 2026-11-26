@@ -11,7 +11,11 @@ export interface CalculationInput {
   recipientCountry: string;
   recipientCity?: string | null;
   recipientPostCode?: string | null;
-  parcels: Array<{ weightGrams: number; lengthMm: number; widthMm: number; heightMm: number; insuranceCost?: number }>;
+  /**
+   * insuranceCost — оголошена вартість посилки для страхування у валюті країни відправника (для UA — гривні).
+   * Обов'язкове поле: API повертає 422 "parcels.0.insuranceCost field is required" (перевірено на робочому API 2026-11-26).
+   */
+  parcels: Array<{ weightGrams: number; lengthMm: number; widthMm: number; heightMm: number; insuranceCost: number }>;
   payerType?: "Sender" | "Recipient";
   deliveryTypes?: Array<"standard" | "economy" | "express">;
   /** Дані інвойсу для розрахунку мита (необов'язково). */
@@ -48,7 +52,7 @@ export function buildCalculationRequest(input: CalculationInput) {
       length: Math.round(p.lengthMm),
       width: Math.round(p.widthMm),
       height: Math.round(p.heightMm),
-      ...(p.insuranceCost ? { insuranceCost: p.insuranceCost } : {}),
+      insuranceCost: p.insuranceCost,
     })),
   });
 }

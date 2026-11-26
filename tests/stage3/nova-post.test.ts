@@ -66,13 +66,13 @@ describe("delivery cost calculation request", () => {
       recipientCountry: "DE",
       recipientCity: "Berlin",
       recipientPostCode: "10178",
-      parcels: [{ weightGrams: 453, lengthMm: 300, widthMm: 200, heightMm: 100 }],
+      parcels: [{ weightGrams: 453, lengthMm: 300, widthMm: 200, heightMm: 100, insuranceCost: 1000 }],
     });
     expect(req).toEqual({
       payerType: "Sender",
       sender: { countryCode: "UA", addressParts: { city: "Київ" } },
       recipient: { countryCode: "DE", addressParts: { city: "Berlin", postCode: "10178" } },
-      parcels: [{ rowNumber: 1, cargoCategory: "parcel", actualWeight: 460, length: 300, width: 200, height: 100 }],
+      parcels: [{ rowNumber: 1, cargoCategory: "parcel", actualWeight: 460, length: 300, width: 200, height: 100, insuranceCost: 1000 }],
     });
   });
 

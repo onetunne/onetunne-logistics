@@ -29,7 +29,8 @@ const SAMPLE = {
   recipientCountry: "DE",
   recipientCity: "Berlin",
   recipientPostCode: "10178",
-  parcels: [{ weightGrams: 500, lengthMm: 300, widthMm: 200, heightMm: 100 }],
+  // Оголошена вартість зразкової посилки — 1000 грн (валюта країни відправника).
+  parcels: [{ weightGrams: 500, lengthMm: 300, widthMm: 200, heightMm: 100, insuranceCost: 1000 }],
 } as const;
 
 /** Лише читання: JWT + розрахунок вартості зразкової посилки UA → DE у двох варіантах. Нічого не створюється. */
