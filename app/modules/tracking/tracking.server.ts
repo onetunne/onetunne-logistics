@@ -256,12 +256,14 @@ export async function requestShopifyFulfillment(ctx: ServiceContext, shipmentId:
  * Ручне підтвердження передачі перевізнику (менеджер передав посилку у відділенні),
  * коли перевізник не підтримує відстеження або статус ще не оновився.
  */
-export async function markHandedOver(ctx: ServiceContext, shipmentId: string): Promise<void> {
+export async function markHandedOver(ctx: ServiceContext, shipmentId: string): Promise<string> {
   requirePermission(ctx.actor, "waybills.manage");
   await ctx.db.transaction(async (tx) => {
     const [shipment] = await tx.select().from(shipments).where(eq(shipments.id, shipmentId)).for("update");
     if (!shipment) throw new NotFoundError("shipment");
     if (shipment.status !== "created") throw new DomainError("waybill.notActive", 409);
+    // Перевізник повідомив, що накладну видалено — передати таку посилку неможливо.
+    if (shipment.trackingStatus === "cancelled") throw new DomainError("shipment.deletedAtCarrier", 409);
     const order = await loadOrderRow(tx, shipment.orderId, { forUpdate: true });
     if (shipment.handedOverAt || isShipped(order.status)) throw new DomainError("shipment.alreadyHandedOver", 409);
     const steps = planOrderTransitions(order.status, "handed_to_carrier");
@@ -274,7 +276,11 @@ export async function markHandedOver(ctx: ServiceContext, shipmentId: string): P
     await tx.insert(shipmentEvents).values({ shipmentId, type: "handed_over", message: "manual", data: null });
     await writeAudit(tx, ctx.actor, "shipment.handed_over", { type: "shipment", id: shipmentId }, { orderId: order.id, source: "manual" });
   });
-  await requestShopifyFulfillment(ctx, shipmentId);
+  // Передачу вже збережено: збій постановки в чергу не скасовує її (повтор — ensurePendingFulfillments під час опитування).
+  return requestShopifyFulfillment(ctx, shipmentId).catch((e: unknown) => {
+    logger.warn("tracking.fulfillment_request_failed", { error: e });
+    return "failed";
+  });
 }
 
 function trackable(adapter: CarrierAdapter | undefined): adapter is CarrierAdapter & Required<Pick<CarrierAdapter, "getTracking">> {

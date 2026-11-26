@@ -264,6 +264,27 @@ describe("manual handover", () => {
     expect(ev).toHaveLength(1);
   });
 
+  it("returns the Shopify outcome and survives a failing gateway after the handover is saved", async () => {
+    const { orderId, shipment } = await orderWithWaybill("#1010", "gid://shopify/Order/9010");
+    const original = gateway.requestFulfillment.bind(gateway);
+    gateway.requestFulfillment = async () => {
+      throw new Error("queue down");
+    };
+    await expect(markHandedOver(ctxFor(), shipment.id)).resolves.toBe("failed");
+    gateway.requestFulfillment = original;
+    expect((await loadOrderRow(env.handle.db, orderId)).status).toBe("handed_to_carrier");
+    const { shipment: other } = await orderWithWaybill("#1011", "gid://shopify/Order/9011");
+    await expect(markHandedOver(ctxFor(), other.id)).resolves.toBe("queued");
+  });
+
+  it("refuses handover when the carrier reports the waybill deleted", async () => {
+    const { orderId, shipment } = await orderWithWaybill("#1012");
+    carrier.snapshots.set(shipment.waybillNumber!, snap(shipment.waybillNumber!, "cancelled", "2"));
+    await pollTracking(ctxFor());
+    await expect(markHandedOver(ctxFor(), shipment.id)).rejects.toMatchObject({ code: "shipment.deletedAtCarrier" });
+    expect((await loadOrderRow(env.handle.db, orderId)).status).toBe("waybill_created");
+  });
+
   it("does not request Shopify fulfillment when disabled in settings", async () => {
     const ctx = ctxFor();
     const { shipment } = await orderWithWaybill("#1008", "gid://shopify/Order/9008");

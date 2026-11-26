@@ -610,9 +610,9 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<A
         // Накладну видалено у перевізника — трек-номер «мертвий», передачу (і трек-номер у Shopify) не фіксуємо.
         // Ту саму перевірку в транзакції має робити markHandedOver (сервіс відстеження).
         if (deletedAtCarrier(shipment)) throw new DomainError("shipment.deletedAtCarrier", 409);
-        // Допустимий стан перевіряє сервіс. Результат — що сталося з трек-номером для Shopify
-        // (рядок requestShopifyFulfillment: "queued" | "disabled" | "skipped…"). «Буде передано в Shopify»
-        // повідомляємо лише тоді, коли завдання справді поставлено в чергу.
+        // Допустимий стан перевіряє сервіс. «Буде передано в Shopify» — лише якщо завдання справді поставлено
+        // в чергу: markHandedOver має повертати результат requestShopifyFulfillment ("queued" | "disabled" | "skipped…").
+        // Поки сервіс нічого не повертає, повідомлення не показується (не обіцяємо того, чого не знаємо).
         const shopifyOutcome: unknown = await markHandedOver(ctx, shipment.id);
         return {
           ok: true,
