@@ -67,11 +67,16 @@ export interface NovaPostRequestOptions {
   networkErrorKind?: Extract<CarrierErrorKind, "unavailable" | "unknown_outcome">;
 }
 
-/** Текст помилки без секретів (ключ у query, JWT). */
-export function safeErrorText(text: string, apiKey: string): string {
-  let out = text.slice(0, 400);
+/** Текст без секретів (ключ, JWT), без обрізання — для розбору тіла помилки. */
+export function redactSecrets(text: string, apiKey: string): string {
+  let out = text;
   if (apiKey) out = out.split(apiKey).join("[apiKey]");
   return out.replace(/eyJ[\w-]+\.[\w-]+\.[\w-]+/g, "[jwt]");
+}
+
+/** Текст помилки без секретів (ключ у query, JWT). */
+export function safeErrorText(text: string, apiKey: string): string {
+  return redactSecrets(text.slice(0, 400), apiKey);
 }
 
 /**
@@ -229,12 +234,12 @@ export class NovaPostClient {
     const kind = opts.networkErrorKind ?? "unavailable";
     const res = await this.send(method, path, body, opts, "application/json");
     const text = await this.readBody(res, kind, (r) => r.text(), "");
-    const parsed = parseJson(text);
     return {
       status: res.status,
-      body: res.ok ? ((parsed as T | null) ?? null) : null,
+      body: res.ok ? ((parseJson(text) as T | null) ?? null) : null,
       errorText: res.ok ? null : safeErrorText(text, this.opts.apiKey),
-      errorBody: res.ok ? null : parsed,
+      // Тіло помилки розбирається з тексту, з якого вже прибрано ключ і JWT.
+      errorBody: res.ok ? null : parseJson(redactSecrets(text, this.opts.apiKey)),
       contentType: res.headers.get("content-type"),
     };
   }
@@ -248,6 +253,12 @@ export class NovaPostClient {
       return { status: res.status, contentType, bytes: new Uint8Array(buf), errorText: null, errorBody: null };
     }
     const text = await this.readBody(res, "unavailable", (r) => r.text(), "");
-    return { status: res.status, contentType, bytes: null, errorText: safeErrorText(text, this.opts.apiKey), errorBody: parseJson(text) };
+    return {
+      status: res.status,
+      contentType,
+      bytes: null,
+      errorText: safeErrorText(text, this.opts.apiKey),
+      errorBody: parseJson(redactSecrets(text, this.opts.apiKey)),
+    };
   }
 }

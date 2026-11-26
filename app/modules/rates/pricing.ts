@@ -129,6 +129,23 @@ export function conversionFactor(
   return { num: fromRate.num * toRate.den, den: fromRate.den * toRate.num };
 }
 
+/**
+ * Чи можна взагалі показати тариф у валюті кошика: валюта з 0 або 2 знаками і є курс від базової валюти
+ * таблиці (валюти тарифу перевізника). Перевіряється ДО запиту до перевізника, щоб не викликати його даремно.
+ */
+export function canPriceInCurrency(
+  targetCurrency: string,
+  fxRates: PricingSettings["fxRates"],
+  fxBaseCurrency: string,
+): Exclude<PricingFailure, "invalid_price"> | null {
+  const target = normalizeCurrency(targetCurrency);
+  const base = normalizeCurrency(fxBaseCurrency);
+  if (!target || !base) return "unsupported_currency";
+  const digits = currencyMinorDigits(target);
+  if (digits !== 0 && digits !== 2) return "unsupported_currency";
+  return conversionFactor(base, target, fxRates, base) ? null : "no_fx_rate";
+}
+
 /** Режим округлення для суми в центах (сума × 100). 0 лишається 0 (безкоштовний тариф не стає 0.99). */
 export function applyRounding(cents: bigint, mode: RoundingMode, minorDigits: number): bigint {
   if (cents < 0n) throw new RangeError("amount must be non-negative");

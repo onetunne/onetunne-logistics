@@ -25,6 +25,7 @@ import {
 } from "~/modules/rates/checkout-rates.server";
 import {
   applyRounding,
+  canPriceInCurrency,
   conversionFactor,
   currencyMinorDigits,
   markupFixedToCents,
@@ -207,6 +208,15 @@ describe("pricing: markup and rounding", () => {
     expect(subunitsToDecimal(1000n, "JPY")).toBe("1000.00");
     expect(subunitsToDecimal(1234n, "KWD")).toBe("1.24");
     expect(subunitsToDecimal(0n, "EUR")).toBe("0.00");
+  });
+
+  it("canPriceInCurrency: pre-check before calling the carrier", () => {
+    const fx = [{ currency: "EUR", rate: "45" }];
+    expect(canPriceInCurrency("EUR", fx, "UAH")).toBeNull();
+    expect(canPriceInCurrency("uah", fx, "UAH")).toBeNull();
+    expect(canPriceInCurrency("USD", fx, "UAH")).toBe("no_fx_rate");
+    expect(canPriceInCurrency("KWD", [{ currency: "KWD", rate: "130" }], "UAH")).toBe("unsupported_currency");
+    expect(canPriceInCurrency("EU", fx, "UAH")).toBe("unsupported_currency");
   });
 });
 
@@ -587,6 +597,13 @@ describe("computeCheckoutRates", () => {
     const c = fakeCarrier(async () => [quote()]);
     expect(await computeCheckoutRates(deps(c.registry), request({ currency: "USD" }))).toEqual({ status: 200, body: { rates: [] } });
     expect(await computeCheckoutRates(deps(c.registry), request({ currency: "KWD" }))).toEqual({ status: 200, body: { rates: [] } });
+    // перевізника не викликаємо, якщо ціну все одно не показати
+    expect(c.calls).toHaveLength(0);
+    // валюта тарифу (UAH) — без курсу
+    expect((await computeCheckoutRates(deps(c.registry), request({ currency: "UAH" }))).body.rates[0]).toMatchObject({
+      currency: "UAH",
+      total_price: "99199", // 900 × 1.1 + 1 = 991.00 → up_99 = 991.99
+    });
   });
 
   it("only unpriceable quotes are dropped", async () => {
@@ -738,9 +755,15 @@ describe("previewCheckoutRates (owner test calculation)", () => {
   it("explains why nothing can be priced", async () => {
     await setCheckout({ ...ENABLED, fxRates: [] });
     const c = fakeCarrier(async () => [quote()]);
-    const r = await previewCheckoutRates(ctx(c.registry), input);
+    expect(await previewCheckoutRates(ctx(c.registry), input)).toMatchObject({ reason: "no_fx_rate", quotes: [], rates: [] });
+    expect(await previewCheckoutRates(ctx(c.registry), { ...input, currency: "KWD" })).toMatchObject({ reason: "unsupported_currency" });
+    expect(c.calls).toHaveLength(0);
+
+    await setCheckout(ENABLED);
+    const pln = fakeCarrier(async () => [quote({ price: { amount: "100", currency: "PLN" } })]);
+    const r = await previewCheckoutRates(ctx(pln.registry), input);
     expect(r.reason).toBe("no_priced_quotes");
-    expect(r.quotes[0]).toMatchObject({ failure: "no_fx_rate", checkoutPrice: null, carrierPrice: { amount: "900.00", currency: "UAH" } });
+    expect(r.quotes[0]).toMatchObject({ failure: "no_fx_rate", checkoutPrice: null, carrierPrice: { amount: "100", currency: "PLN" } });
     expect(r.rates).toEqual([]);
 
     const failing = fakeCarrier(async () => {

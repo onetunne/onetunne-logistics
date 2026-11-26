@@ -454,7 +454,7 @@ export function buildCreateShipmentBody(req: CreateShipmentRequest, settings: No
   if (!["Sender", "Recipient", "ThirdPerson"].includes(settings.payerType)) problems.add("payerType", "unsupported payer type");
   const payerContractNumber = text(settings.payerContractNumber, "payerContractNumber", problems, { min: 2, max: 20 });
   if (settings.payerType === "ThirdPerson" && !payerContractNumber) problems.add("payerContractNumber", "required for payer type ThirdPerson");
-  const deliveryType = (req.serviceCode ?? "").trim() || settings.deliveryType.trim() || undefined;
+  const deliveryType = (req.serviceCode ?? "").trim() || (settings.deliveryType ?? "").trim() || undefined;
 
   if (international && !req.customs) problems.add("invoice", "customs data required for an international shipment");
   if (international && req.customs && req.customsItems.length === 0) problems.add("invoice.items", "customs items required for an international shipment");

@@ -38,7 +38,7 @@ import type { AllSettings } from "~/modules/settings/schema";
 import { getSettings } from "~/modules/settings/settings.server";
 import { computeParcelWeights } from "~/modules/shipments/weight";
 import type { ServiceContext } from "~/server/types";
-import { priceCheckoutRate, subunitsToDecimal, type PricingFailure, type PricingResult } from "./pricing";
+import { canPriceInCurrency, priceCheckoutRate, subunitsToDecimal, type PricingFailure, type PricingResult } from "./pricing";
 
 // ---------------------------------------------------------------------------
 // Константи
@@ -420,15 +420,18 @@ interface PricedQuote {
   serviceCode: string;
 }
 
+/**
+ * Базова валюта таблиці курсів: опис налаштування — «скільки одиниць валюти перевізника (UAH) коштує 1 одиниця валюти».
+ * Поки єдиний перевізник із тарифами — Nova Post, тож база = novaPost.tariffCurrency (адаптер Nova Post так само
+ * перераховує оголошену вартість у tariffCurrency за цією таблицею).
+ */
+const fxBaseCurrency = (settings: AllSettings) => settings.novaPost.tariffCurrency;
+
 function priceQuotes(carrier: CarrierAdapter, quotes: RateQuote[], currency: string, settings: AllSettings): PricedQuote[] {
   return quotes.map((quote) => ({
     quote,
     serviceCode: shopifyServiceCode(carrier.code, quote.serviceCode),
-    pricing: priceCheckoutRate(quote.price, currency, settings.checkoutRates, {
-      // Таблиця курсів задана у валюті тарифів перевізника (опис налаштування: «скільки одиниць валюти перевізника (UAH)»).
-      // Поки єдиний перевізник із тарифами — Nova Post, тож база = novaPost.tariffCurrency.
-      fxBaseCurrency: settings.novaPost.tariffCurrency,
-    }),
+    pricing: priceCheckoutRate(quote.price, currency, settings.checkoutRates, { fxBaseCurrency: fxBaseCurrency(settings) }),
   }));
 }
 
@@ -471,6 +474,8 @@ export type CheckoutRatesOutcome =
   | "ok"
   | "disabled"
   | "no_destination"
+  | "no_fx_rate"
+  | "unsupported_currency"
   | "no_shippable_items"
   | "missing_weight"
   | "invalid_weight"
@@ -498,8 +503,11 @@ export async function computeCheckoutRates(deps: CheckoutRatesDeps, request: Sho
   const started = deps.now().getTime();
   const rate = request.rate;
   const shippable = rate.items.filter(isShippable);
+  const country = norm(rate.destination.country);
+  const validCountry = /^[A-Z]{2}$/.test(country);
   const log: Record<string, unknown> = {
-    destinationCountry: norm(rate.destination.country).slice(0, 2) || null,
+    // Лише дволітерний код країни; довільний текст із поля country у журнал не потрапляє.
+    destinationCountry: validCountry ? country : null,
     currency: rate.currency,
     itemCount: rate.items.length,
     shippableCount: shippable.length,
@@ -519,9 +527,11 @@ export async function computeCheckoutRates(deps: CheckoutRatesDeps, request: Sho
     const settings = await getSettings(deps.db);
     if (!settings.checkoutRates.enabled) return finish("disabled", 200);
 
-    const country = norm(rate.destination.country);
-    if (!/^[A-Z]{2}$/.test(country)) return finish("no_destination", 200);
+    if (!validCountry) return finish("no_destination", 200);
     if (shippable.length === 0) return finish("no_shippable_items", 200);
+    // Без курсу для валюти кошика тариф не показати — перевізника не викликаємо.
+    const currencyProblem = canPriceInCurrency(rate.currency, settings.checkoutRates.fxRates, fxBaseCurrency(settings));
+    if (currencyProblem) return finish(currencyProblem, 200);
 
     // Вага: grams за одиницю (SHOPIFY_ITEM_GRAMS_ARE_PER_UNIT); 0/відсутня → вага варіанта з нашої бази.
     const gids = [...new Set(shippable.map((i) => variantGid(i.variant_id)).filter((g): g is string => g !== null))];
@@ -642,6 +652,8 @@ export const previewInputSchema = z.object({
 export type CheckoutRatesPreviewInput = z.input<typeof previewInputSchema>;
 
 export type PreviewReason =
+  | "no_fx_rate"
+  | "unsupported_currency"
   | "no_rates_carrier"
   | "origin_not_configured"
   | "invalid_weight"
@@ -692,6 +704,17 @@ export async function previewCheckoutRates(
   const settings = await getSettings(ctx.db);
   const deps: CheckoutRatesDeps = { db: ctx.db, carriers: ctx.carriers, now: ctx.now, timeoutMs: opts.timeoutMs };
   const value = fromMinor(toMinor(data.value));
+  const base: CheckoutRatesPreview = {
+    enabled: settings.checkoutRates.enabled,
+    carrier: null,
+    parcel: null,
+    reason: null,
+    errorKind: null,
+    quotes: [],
+    rates: [],
+  };
+  const currencyProblem = canPriceInCurrency(data.currency, settings.checkoutRates.fxRates, fxBaseCurrency(settings));
+  if (currencyProblem) return { ...base, reason: currencyProblem };
   const outcome = await runQuote(
     deps,
     settings,
@@ -710,15 +733,6 @@ export async function previewCheckoutRates(
     { useCache: false },
   );
 
-  const base: CheckoutRatesPreview = {
-    enabled: settings.checkoutRates.enabled,
-    carrier: null,
-    parcel: null,
-    reason: null,
-    errorKind: null,
-    quotes: [],
-    rates: [],
-  };
   if (outcome.kind === "no_rates_carrier") return { ...base, reason: "no_rates_carrier" };
   const carrier = { code: outcome.carrier.code, displayName: outcome.carrier.displayName, mode: outcome.carrier.mode };
   let result: CheckoutRatesPreview;

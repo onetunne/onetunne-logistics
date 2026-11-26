@@ -53,6 +53,7 @@ import {
   summarizeErrorDetails,
   toCreatedShipment,
   type NovaPostCalculationResult,
+  type NovaPostCreateShipmentBody,
   type NovaPostCreatedResponse,
   type NovaPostDeliveryType,
   type NovaPostFullTracking,
@@ -157,7 +158,7 @@ export class NovaPostAdapter implements CarrierAdapter {
   async createShipment(req: CreateShipmentRequest, opts?: CarrierCallOptions): Promise<CreatedShipment> {
     if (!this.allowShipmentCreation) throw new CarrierError("not_configured", NOVA_POST_CODE, NOVA_POST_SHIPMENTS_DISABLED_MESSAGE);
     const settings = await this.settings();
-    let body;
+    let body: NovaPostCreateShipmentBody;
     try {
       body = buildCreateShipmentBody(req, settings.novaPost);
     } catch (e) {
@@ -316,8 +317,8 @@ export class NovaPostAdapter implements CarrierAdapter {
       throw new CarrierError("rejected", NOVA_POST_CODE, "Nova Post calculation: declared value must be greater than 0");
     }
     const branch = settings.shipper?.carrierBranch?.trim() || null;
-    const contract = np.payerContractNumber.trim() || null;
-    const deliveryType = np.deliveryType.trim();
+    const contract = (np.payerContractNumber ?? "").trim() || null;
+    const deliveryType = (np.deliveryType ?? "").trim();
     const international = req.origin.countryCode.toUpperCase() !== req.destination.countryCode.toUpperCase();
     const toEu = EU_COUNTRY_CODES.has(req.destination.countryCode.toUpperCase());
     const invoice = international ? rateInvoice(req, incoterm, toEu) : undefined;
