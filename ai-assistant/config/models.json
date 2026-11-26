@@ -1,0 +1,55 @@
+{
+  "verified": "2026-11-26",
+  "note": "Теги — з бібліотеки Ollama за оглядами станом на дату verified; розміри приблизні (стандартне стиснення q4). Якщо тег зник або не завантажується, assistant-setup models бере альтернативу. Хмарні моделі (*cloud*) заборонені.",
+  "tiers": [
+    {
+      "id": "none",
+      "label": "без локальних моделей (Claude працює повністю без них)",
+      "min_vram": null,
+      "min_ram_cpu": 0,
+      "models": []
+    },
+    {
+      "id": "small",
+      "label": "мала: текст + зображення",
+      "min_vram": 4,
+      "min_ram": 8,
+      "min_ram_cpu": 16,
+      "models": [
+        {"tag": "qwen3.5:4b", "roles": ["text", "vision"], "size_gb": 3.5, "alternatives": ["gemma4:e2b", "gemma3:4b"]}
+      ]
+    },
+    {
+      "id": "medium",
+      "label": "середня: текст + зображення",
+      "min_vram": 8,
+      "min_ram": 16,
+      "min_ram_cpu": null,
+      "models": [
+        {"tag": "qwen3.5:9b", "roles": ["text", "vision"], "size_gb": 6.6, "alternatives": ["gemma4:e4b", "qwen3-vl:8b", "gemma3:12b"]}
+      ]
+    },
+    {
+      "id": "large",
+      "label": "велика: швидка 9B + за бажанням 26B",
+      "min_vram": 16,
+      "min_ram": 32,
+      "min_ram_cpu": null,
+      "models": [
+        {"tag": "qwen3.5:9b", "roles": ["text", "vision"], "size_gb": 6.6, "alternatives": ["gemma4:e4b", "qwen3-vl:8b"]},
+        {"tag": "gemma4:26b", "roles": ["text", "vision"], "size_gb": 18, "optional": true, "alternatives": ["qwen3.5:27b", "gemma3:27b"]}
+      ]
+    },
+    {
+      "id": "xlarge",
+      "label": "дуже велика: 26B (якість) + 9B (швидкість)",
+      "min_vram": 24,
+      "min_ram": 32,
+      "min_ram_cpu": null,
+      "models": [
+        {"tag": "gemma4:26b", "roles": ["text", "vision"], "size_gb": 18, "alternatives": ["qwen3.5:27b", "gemma3:27b"]},
+        {"tag": "qwen3.5:9b", "roles": [], "size_gb": 6.6, "optional": true, "alternatives": ["gemma4:e4b"]}
+      ]
+    }
+  ]
+}

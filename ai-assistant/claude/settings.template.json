@@ -1,0 +1,67 @@
+{
+  "_comment": "Шаблон: assistant-setup deploy ЗЛИВАЄ його з ~/.claude/settings.json (ваші значення зберігаються). {{...}} підставляються під конкретний ПК.",
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "env": {
+    "BASH_MAX_OUTPUT_LENGTH": "20000"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(mtk probe *)",
+      "Bash(mtk sheet *)",
+      "Bash(mtk scenes *)",
+      "Bash(mtk silence *)",
+      "Bash(mtk loudness *)",
+      "Bash(mtk doctor)",
+      "Bash(llm-local status)",
+      "Bash(assistant-setup doctor)",
+      "Bash(ffprobe *)",
+      "PowerShell(mtk probe *)",
+      "PowerShell(mtk sheet *)",
+      "PowerShell(mtk doctor)",
+      "PowerShell(llm-local status)",
+      "PowerShell(assistant-setup doctor)",
+      "PowerShell(ffprobe *)"
+    ],
+    "ask": [
+      "Bash(git push *)",
+      "PowerShell(git push *)",
+      "Bash(npm publish *)",
+      "Bash(winget *)",
+      "PowerShell(winget *)"
+    ],
+    "deny": [
+      "Read(~/.claude/.credentials.json)",
+      "Edit(~/.claude/.credentials.json)",
+      "Read(~/.ssh/id_*)",
+      "Bash(rm -rf /)",
+      "Bash(rm -rf ~)",
+      "Bash(rm -rf ~/)",
+      "Bash(diskpart*)",
+      "Bash(bcdedit*)",
+      "Bash(format c:*)",
+      "PowerShell(Format-Volume*)",
+      "PowerShell(Clear-Disk*)",
+      "PowerShell(diskpart*)",
+      "PowerShell(bcdedit*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell|Read|Edit|Write|MultiEdit|NotebookEdit|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{GUARD_COMMAND}}",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "{{STATUSLINE_COMMAND}}",
+    "padding": 0
+  }
+}

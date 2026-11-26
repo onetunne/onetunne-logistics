@@ -1,0 +1,53 @@
+{
+  "verified": "2026-11-26",
+  "profiles": {
+    "minimal": ["git", "uv", "ffmpeg", "claude-code", "assistant-tools"],
+    "recommended": ["git", "uv", "ffmpeg", "claude-code", "assistant-tools", "claude-desktop", "node", "gh", "auto-editor", "playwright-cli", "ollama"],
+    "full": ["git", "uv", "ffmpeg", "claude-code", "assistant-tools", "claude-desktop", "node", "gh", "auto-editor", "playwright-cli", "ollama", "handy", "imagemagick"]
+  },
+  "components": [
+    {"id": "git", "name": "Git for Windows", "tier": "обов'язковий", "winget": "Git.Git", "check": "git", "tokens": "нейтрально", "license": "GPL-2.0",
+     "why": "дає Claude Code інструмент Bash; синхронізація конфігурації між ПК"},
+    {"id": "uv", "name": "uv (Python і утиліти)", "tier": "обов'язковий", "winget": "astral-sh.uv", "check": "uv", "tokens": "нейтрально", "license": "MIT/Apache-2.0",
+     "why": "ставить Python 3.12 та інструменти помічника ізольовано"},
+    {"id": "ffmpeg", "name": "FFmpeg", "tier": "обов'язковий", "winget": "Gyan.FFmpeg", "check": "ffmpeg", "tokens": "ЕКОНОМИТЬ", "license": "GPL (збірка Gyan)",
+     "why": "уся обробка відео/аудіо локально, без передачі кадрів у модель"},
+    {"id": "claude-code", "name": "Claude Code (CLI)", "tier": "обов'язковий", "script": "irm https://claude.ai/install.ps1 | iex", "check": "claude", "tokens": "—", "license": "комерційна (входить у підписку)",
+     "why": "агент, що виконує команди, пише код, керує інструментами"},
+    {"id": "assistant-tools", "name": "Інструменти помічника: mtk, llm-local, захист, рядок стану, бекап", "tier": "обов'язковий", "internal": true, "check": "mtk", "tokens": "ЕКОНОМИТЬ", "license": "MIT (наш код)",
+     "why": "готові перевірені команди замість щоразу нового коду; Whisper входить сюди"},
+    {"id": "claude-desktop", "name": "Claude Desktop", "tier": "рекомендований", "winget": "Anthropic.Claude", "check": null, "tokens": "—", "license": "комерційна (входить у підписку)",
+     "why": "Computer Use на Windows (лише в застосунку), Cowork, конектори Blender/Affinity, Remote Control"},
+    {"id": "node", "name": "Node.js LTS", "tier": "рекомендований", "winget": "OpenJS.NodeJS.LTS", "check": "node", "tokens": "нейтрально", "license": "MIT",
+     "why": "потрібен для playwright-cli, ctx7, Remotion"},
+    {"id": "gh", "name": "GitHub CLI", "tier": "рекомендований", "winget": "GitHub.cli", "check": "gh", "tokens": "ЕКОНОМИТЬ", "license": "MIT",
+     "why": "замінює GitHub MCP: компактніший вивід, без десятків описів інструментів"},
+    {"id": "auto-editor", "name": "Auto-Editor", "tier": "рекомендований", "uv_tool": "auto-editor", "check": "auto-editor", "tokens": "ЕКОНОМИТЬ", "license": "Unlicense",
+     "why": "автоматично вирізає паузи і віддає таймлайн у DaVinci Resolve (--export resolve)"},
+    {"id": "playwright-cli", "name": "Playwright CLI + skill", "tier": "рекомендований", "npm_global": "@playwright/cli@latest", "post": "playwright-cli install --skills --global", "check": "playwright-cli", "needs": ["node"], "tokens": "ЕКОНОМИТЬ (проти Playwright MCP)", "license": "Apache-2.0",
+     "why": "автоматизація браузера й тести без важкого MCP"},
+    {"id": "ollama", "name": "Ollama (локальні моделі)", "tier": "рекомендований за залізом", "winget": "Ollama.Ollama", "check": "ollama", "only_if_plan": true, "tokens": "ЕКОНОМИТЬ на масових простих задачах", "license": "MIT",
+     "why": "описи сотень кадрів, первинне сортування — безкоштовно на ПК; хмара Ollama вимикається"},
+    {"id": "handy", "name": "Handy (офлайн-диктування)", "tier": "необов'язковий", "winget": "cjpais.Handy", "check": null, "tokens": "нейтрально", "license": "MIT",
+     "why": "диктування українською в будь-яку програму без інтернету; у Claude Code є вбудований /voice"},
+    {"id": "imagemagick", "name": "ImageMagick", "tier": "необов'язковий", "winget": "ImageMagick.ImageMagick", "check": "magick", "tokens": "ЕКОНОМИТЬ", "license": "ImageMagick License (вільна)",
+     "why": "пакетна обробка зображень: розміри, формати, водяні знаки"}
+  ],
+  "manual": [
+    {"id": "resolve-mcp", "name": "DaVinci Resolve Studio — вбудований MCP", "tier": "рекомендований", "steps": "Оновити Resolve Studio до 21.1+ → File → Setup AI Assistants → Claude Code (і/або Claude Desktop). Preferences → System → General → External scripting using: Local."},
+    {"id": "chrome", "name": "Claude in Chrome", "tier": "рекомендований", "steps": "Встановити розширення Claude з Chrome Web Store, увійти; у Claude Code: /chrome."},
+    {"id": "context7", "name": "Context7 (документація бібліотек)", "tier": "рекомендований для розробки", "steps": "npx ctx7 setup --claude → обрати режим «CLI + Skills», увійти (безкоштовний ключ)."},
+    {"id": "voice", "name": "Голос у Claude Code", "tier": "рекомендований", "steps": "У Claude Code: /config → мова Ukrainian; /voice → тримати Пробіл і говорити."},
+    {"id": "blender", "name": "Blender 5.1+ + офіційний MCP/конектор", "tier": "необов'язковий (3D)", "steps": "winget install BlenderFoundation.Blender; у Claude Desktop → Connectors → Blender."},
+    {"id": "affinity", "name": "Affinity by Canva + конектор", "tier": "необов'язковий (дизайн)", "steps": "Безкоштовний застосунок Affinity; у Claude Desktop → Connectors → Affinity."},
+    {"id": "remotion", "name": "Remotion + skills", "tier": "необов'язковий (анімації кодом)", "steps": "Безкоштовно для фізособи/компанії до 3 осіб, інакше платна ліцензія — спершу підтвердження власника. npx skills add remotion-dev/skills."}
+  ],
+  "not_recommended": [
+    {"name": "GitHub MCP", "why": "дублює gh CLI, але додає багато описів інструментів у контекст"},
+    {"name": "Playwright MCP", "why": "той самий Playwright, але вивід значно об'ємніший; CLI+skill економніший (рекомендація Microsoft)"},
+    {"name": "Спільнотний davinci-resolve-mcp", "why": "добрий (MIT), але дублює вбудований MCP Resolve 21.1; ставити лише якщо вбудованого бракує"},
+    {"name": "Windows-MCP", "why": "повне керування Windows через спільнотний сервер — дублює офіційний Computer Use і збільшує ризики"},
+    {"name": "Claude Code на моделях Ollama (ollama launch claude)", "why": "Anthropic офіційно не підтримує; якість різко нижча"},
+    {"name": "Проксі-маршрутизатори запитів (claude-code-router тощо)", "why": "перехоплюють увесь трафік і ключі — ризик безпеки"}
+  ]
+}

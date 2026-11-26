@@ -1,0 +1,28 @@
+[project]
+name = "assistant-tools"
+version = "0.1.0"
+description = "Local helper CLIs for the universal Claude assistant: media toolkit, local-LLM delegate, safety guard, status line, setup/backup."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+# Core has NO third-party dependencies (stdlib only). Optional features:
+dependencies = []
+
+[project.optional-dependencies]
+whisper = ["faster-whisper>=1.2"]
+# NVIDIA GPU acceleration for faster-whisper on Windows/Linux (CUDA 12 + cuDNN 9 runtime libs from pip)
+cuda = ["nvidia-cublas-cu12", "nvidia-cudnn-cu12>=9,<10"]
+
+[project.scripts]
+mtk = "assistant_tools.mtk:main"
+llm-local = "assistant_tools.llm_local:main"
+assistant-guard = "assistant_tools.guard:main"
+assistant-statusline = "assistant_tools.statusline:main"
+assistant-setup = "assistant_tools.setup_cli:main"
+
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["assistant_tools"]
