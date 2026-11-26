@@ -11,7 +11,18 @@ import { useHref } from "./shell";
  * у вбудованому застосунку Shopify App Bridge додає до fetch токен сесії, а перехід за посиланням
  * у новій вкладці втратив би автентифікацію. Отриманий PDF відкривається як blob у новій вкладці
  * (або, якщо браузер заблокував вкладку, завантажується файлом).
+ *
+ * Перенаправлення не виконуються (redirect: "manual"): після завершення сесії демо/Shopify перенаправляє
+ * на сторінку входу, і без цього HTML-сторінка входу відкрилася б як «PDF». Відкривається лише вміст
+ * дозволеного типу; blob створюється заново з перевіреним типом (HTML ніколи не відкривається в origin застосунку).
  */
+
+const SESSION_ERROR = "tracking.documents.error.session";
+const GENERIC_ERROR = "tracking.documents.error.generic";
+const NETWORK_ERROR = "tracking.documents.error.network";
+
+/** Типи вмісту, які можна відкрити як документ перевізника. */
+const DOCUMENT_CONTENT_TYPES: readonly string[] = ["application/pdf", "image/png"];
 
 /** Відповідь ресурсного маршруту (текстовий код) → ключ повідомлення. */
 export function documentErrorKey(status: number, body: string): string {
@@ -43,7 +54,45 @@ function fileNameFrom(response: Response, fallback: string): string {
   return match?.[1] ?? fallback;
 }
 
-const REVOKE_AFTER_MS = 60_000;
+export const REVOKE_AFTER_MS = 60_000;
+
+export type DocumentResponseResult = { ok: true; blob: Blob; fileName: string } | { ok: false; errorKey: string };
+
+/**
+ * Відповідь ресурсного маршруту → документ або ключ помилки.
+ * Перенаправлення (вхід після завершення сесії) або HTML замість документа → «Сесія завершилася»;
+ * інший недозволений тип → загальна помилка.
+ */
+export async function readDocumentResponse(response: Response, fallbackName: string): Promise<DocumentResponseResult> {
+  if (response.type === "opaqueredirect" || response.redirected) return { ok: false, errorKey: SESSION_ERROR };
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    return { ok: false, errorKey: documentErrorKey(response.status, body.slice(0, 100)) };
+  }
+  const type = (response.headers.get("Content-Type") ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
+  if (type === "text/html") return { ok: false, errorKey: SESSION_ERROR };
+  if (!DOCUMENT_CONTENT_TYPES.includes(type)) return { ok: false, errorKey: GENERIC_ERROR };
+  const blob = new Blob([await response.arrayBuffer()], { type });
+  return { ok: true, blob, fileName: fileNameFrom(response, fallbackName) };
+}
+
+/** Отримує документ і відкриває його. Повертає ключ помилки або null (документ відкрито). */
+export async function downloadCarrierDocument(url: string, fallbackName: string): Promise<string | null> {
+  let result: DocumentResponseResult;
+  try {
+    const response = await window.fetch(url, {
+      credentials: "same-origin",
+      redirect: "manual",
+      headers: { Accept: "application/pdf" },
+    });
+    result = await readDocumentResponse(response, fallbackName);
+  } catch {
+    return NETWORK_ERROR;
+  }
+  if (!result.ok) return result.errorKey;
+  openBlob(result.blob, result.fileName);
+  return null;
+}
 
 function openBlob(blob: Blob, fileName: string): void {
   const objectUrl = URL.createObjectURL(blob);
@@ -82,15 +131,10 @@ export function CarrierDocumentButtons({
     setPending(kind);
     try {
       const url = href(`orders/${orderId}/shipments/${shipmentId}/documents/${kind}`);
-      const response = await window.fetch(url, { credentials: "same-origin", headers: { Accept: "application/pdf" } });
-      if (!response.ok) {
-        const body = await response.text().catch(() => "");
-        setError(documentErrorKey(response.status, body.slice(0, 100)));
-        return;
-      }
-      openBlob(await response.blob(), fileNameFrom(response, `${kind}.pdf`));
+      const errorKey = await downloadCarrierDocument(url, `${kind}.pdf`);
+      if (errorKey) setError(errorKey);
     } catch {
-      setError("tracking.documents.error.network");
+      setError(GENERIC_ERROR);
     } finally {
       setPending(null);
     }

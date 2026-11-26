@@ -19,7 +19,9 @@ import { isShipped, type OrderStatus } from "~/domain/order-status";
 import { requirePermission } from "~/domain/permissions";
 import { hasKey, makeT, useLocale, useT, type TFunction } from "~/i18n";
 import { localizeCode, localizeParams } from "~/i18n/localize";
-import { NotFoundError } from "~/lib/errors";
+// Лише в loader (серверний код): у клієнтський бандл модуль зіставлення Nova Post не потрапляє.
+import { NOVA_POST_CODE } from "~/integrations/carriers/nova-post/mapping";
+import { DomainError, NotFoundError } from "~/lib/errors";
 import { countryName, formatDateTime, formatMoney, formatWeight } from "~/lib/format";
 import { isDecimalString, multiplyMoney } from "~/lib/money";
 import {
@@ -38,7 +40,7 @@ import {
   validateOrderById,
 } from "~/modules/orders/workflow.server";
 import { REQUIRED_SHIPPER_FIELDS } from "~/modules/settings/schema";
-import { getSetting, getSettings } from "~/modules/settings/settings.server";
+import { getSettings } from "~/modules/settings/settings.server";
 import { availableDocumentKinds } from "~/modules/shipments/documents.server";
 import {
   ACTIVE_SHIPMENT_STATUSES,
@@ -111,8 +113,11 @@ const CUSTOMS_FIELDS = ["weightGrams", "hsCode", "countryOfOrigin", "customsDesc
 const TRACKING_EVENTS_LIMIT = 50;
 /** Статуси замовлення, з яких можна вручну підтвердити фактичну передачу перевізнику. */
 const HANDOVER_ORDER_STATUSES: readonly OrderStatus[] = ["waybill_created", "awaiting_picking", "packed"];
-/** Код адаптера Nova Post (integrations/carriers/nova-post): створення накладних вмикає власник змінною середовища. */
-const NOVA_POST_CARRIER_CODE = "nova_post";
+
+/** Перевізник повідомив, що накладну видалено (відстеження «cancelled»), а посилку ще не передано. */
+function deletedAtCarrier(s: { status: string; handedOverAt: Date | null; trackingStatus: string | null }): boolean {
+  return s.status === "created" && !s.handedOverAt && s.trackingStatus === "cancelled";
+}
 
 /** Стан передачі трек-номера в Shopify для відправлення. */
 type ShopifyTrackingState = "sent" | "pending" | "after_handover" | "disabled" | "not_applicable";
@@ -310,8 +315,11 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         handedOverAt: s.handedOverAt,
         deliveredAt: s.deliveredAt,
         trackingSupported: Boolean(adapter?.capabilities.tracking && adapter.getTracking),
+        /** Перевізник повідомив, що накладну видалено: передавати посилку з нею не можна (скасувати й створити нову). */
+        deletedAtCarrier: deletedAtCarrier(s),
         /** Стан дозволяє вручну підтвердити фактичну передачу (право waybills.manage перевіряє сервер і UI). */
-        handoverAvailable: s.status === "created" && !s.handedOverAt && HANDOVER_ORDER_STATUSES.includes(order.status),
+        handoverAvailable:
+          s.status === "created" && !s.handedOverAt && !deletedAtCarrier(s) && HANDOVER_ORDER_STATUSES.includes(order.status),
         trackingEvents: events.map((e) => ({
           id: e.id,
           status: isTrackingStatus(e.status) ? e.status : ("unknown" as const),
@@ -366,6 +374,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
           displayName: carrier.displayName,
           mode: carrier.mode,
           canCreate: carrier.capabilities.createShipment,
+          /** Nova Post: створення реальних накладних вмикає власник змінною середовища (окреме пояснення). */
+          isNovaPost: carrier.code === NOVA_POST_CODE,
         }
       : null,
     /** Передача трек-номера в Shopify після фактичної передачі (налаштування «Відстеження»). */
@@ -436,12 +446,13 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<A
     const intent = formString(form, "intent");
     // Перевірка, що ідентифікатор із форми належить саме цьому замовленню.
     const aggregate = () => loadOrderAggregate(ctx.db, orderId);
-    const ownShipmentId = async () => {
+    const ownShipment = async () => {
       const id = uuidField(form, "shipmentId");
       if (!id) return null;
       const { shipments } = await aggregate();
-      return shipments.some((s) => s.id === id) ? id : null;
+      return shipments.find((s) => s.id === id) ?? null;
     };
+    const ownShipmentId = async () => (await ownShipment())?.id ?? null;
     const ownOpenIssueId = async () => {
       const id = uuidField(form, "issueId");
       if (!id) return null;
@@ -593,15 +604,20 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<A
       }
 
       case "markHandedOver": {
-        const shipmentId = await ownShipmentId();
-        if (!shipmentId) return { ok: false, error: "error.notFound" };
-        // Право waybills.manage і допустимий стан перевіряє сервіс.
-        await markHandedOver(ctx, shipmentId);
-        const [{ order }, tracking] = await Promise.all([aggregate(), getSetting(ctx.db, "tracking")]);
+        const shipment = await ownShipment();
+        if (!shipment) return { ok: false, error: "error.notFound" };
+        requirePermission(ctx.actor, "waybills.manage");
+        // Накладну видалено у перевізника — трек-номер «мертвий», передачу (і трек-номер у Shopify) не фіксуємо.
+        // Ту саму перевірку в транзакції має робити markHandedOver (сервіс відстеження).
+        if (deletedAtCarrier(shipment)) throw new DomainError("shipment.deletedAtCarrier", 409);
+        // Допустимий стан перевіряє сервіс. Результат — що сталося з трек-номером для Shopify
+        // (рядок requestShopifyFulfillment: "queued" | "disabled" | "skipped…"). «Буде передано в Shopify»
+        // повідомляємо лише тоді, коли завдання справді поставлено в чергу.
+        const shopifyOutcome: unknown = await markHandedOver(ctx, shipment.id);
         return {
           ok: true,
           message: "tracking.result.handedOver",
-          extra: order.source === "shopify" && tracking.pushToShopify ? ["tracking.result.shopifyQueued"] : [],
+          extra: shopifyOutcome === "queued" ? ["tracking.result.shopifyQueued"] : [],
           tone: "success",
         };
       }
@@ -1478,6 +1494,11 @@ function CreatedWaybill({
         </Text>
       ) : null}
       {!shipped ? <Banner tone="info">{t("order.waybill.notShipped")}</Banner> : null}
+      {s.deletedAtCarrier ? (
+        <Banner tone="critical" title={t("tracking.deleted.title")}>
+          {t("tracking.deleted.body")}
+        </Banner>
+      ) : null}
       {canHandOver || canRefresh ? (
         <Stack gap={2}>
           <Stack direction="horizontal" gap={2}>
@@ -1519,7 +1540,7 @@ function CreatedWaybill({
       ) : null}
 
       <Divider />
-      <TrackingSection shipment={s} />
+      <TrackingSection shipment={s} canHandOver={canHandOver} />
       <Divider />
       <DocumentsSection shipment={s} orderId={order.id} />
 
@@ -1556,7 +1577,7 @@ function CreatedWaybill({
 }
 
 /** Відстеження: статус перевізника, фактична передача, доставка, трек-номер у Shopify, події. */
-function TrackingSection({ shipment: s }: { shipment: Shipment }) {
+function TrackingSection({ shipment: s, canHandOver }: { shipment: Shipment; canHandOver: boolean }) {
   const t = useT();
   const locale = useLocale();
 
@@ -1625,6 +1646,8 @@ function TrackingSection({ shipment: s }: { shipment: Shipment }) {
       <KeyValueList items={kv} />
       <Text variant="body-sm" tone="subdued">
         {s.trackingSupported ? t("tracking.refresh.help") : t("tracking.unsupported")}
+        {/* Підказка про ручну передачу — лише коли кнопка «Передано перевізнику» є на екрані. */}
+        {!s.trackingSupported && canHandOver ? ` ${t("tracking.unsupportedManual")}` : null}
       </Text>
       {s.trackingSupported || events.length > 0 ? (
         <Stack gap={2}>
@@ -1811,7 +1834,7 @@ function NoWaybill({ data }: { data: Data }) {
     );
   } else if (!carrier.canCreate) {
     setup.push(
-      carrier.code === NOVA_POST_CARRIER_CODE ? (
+      carrier.isNovaPost ? (
         // Nova Post: реальні накладні вимкнено, доки власник свідомо не ввімкне їх змінною середовища.
         <Banner key="carrier" tone="info" title={t("tracking.waybill.novaPostDisabled.title", { carrier: carrier.displayName })}>
           <p>{t("tracking.waybill.novaPostDisabled.body")}</p>

@@ -42,7 +42,26 @@ function sampleRequest(overrides: Partial<CreateShipmentRequest> = {}): CreateSh
       company: null,
       phone: "+491511234567",
       email: "recipient@example.test",
-      address: { countryCode: "DE", city: "Berlin", postalCode: "10178", province: null, address1: "Teststrasse 5", address2: "Apt 3" },
+      address: {
+        countryCode: "DE",
+        city: "Berlin",
+        postalCode: "10178",
+        province: null,
+        address1: "Teststrasse 5",
+        address2: "Apt 3",
+        street: "Teststrasse",
+        building: "5",
+      },
+      registrationAddress: {
+        countryCode: "DE",
+        city: "Hamburg",
+        postalCode: "20095",
+        province: null,
+        address1: "Testweg 7",
+        address2: null,
+        street: "Testweg",
+        building: "7",
+      },
     },
     parcels: [
       { packageCode: "mailer_m", lengthCm: 35, widthCm: 25, heightCm: 8, actualWeightGrams: 473, volumetricWeightGrams: 1400, chargeableWeightGrams: 1400 },
@@ -133,7 +152,8 @@ describe("POST /shipments body mapping", () => {
         phone: "+491511234567",
         email: "recipient@example.test",
         countryCode: "DE",
-        addressParts: { city: "Berlin", street: "Teststrasse 5", postCode: "10178", note: "Apt 3" },
+        addressParts: { city: "Berlin", street: "Teststrasse", building: "5", postCode: "10178", note: "Apt 3" },
+        registrationAddressRecipient: { city: "Hamburg", street: "Testweg", zipCode: "20095", building: "7" },
       },
       invoice: {
         customerNumber: "1001",
@@ -192,12 +212,15 @@ describe("POST /shipments body mapping", () => {
     const req = sampleRequest();
     req.recipient = {
       ...req.recipient,
-      address: { countryCode: "US", city: "Austin", postalCode: "73301", province: "TX", address1: "1 Test Ave", address2: null },
+      address: { countryCode: "US", city: "Austin", postalCode: "73301", province: "TX", address1: "1 Test Ave", address2: null, street: "Test Ave", building: "1" },
+      registrationAddress: null,
     };
     const body = buildCreateShipmentBody(req, SETTINGS);
     expect(body.invoice).not.toHaveProperty("payerFeesCustoms");
     expect(body.sender).not.toHaveProperty("ioss");
-    expect(body.recipient.addressParts).toStrictEqual({ city: "Austin", region: "TX", street: "1 Test Ave", postCode: "73301" });
+    expect(body.recipient.addressParts).toStrictEqual({ city: "Austin", region: "TX", street: "Test Ave", building: "1", postCode: "73301" });
+    // Не ЄС-країна з особливими вимогами → без адреси реєстрації.
+    expect(body.recipient).not.toHaveProperty("registrationAddressRecipient");
   });
 
   it("IOSS only for EUR value up to 150", () => {
@@ -215,13 +238,22 @@ describe("POST /shipments body mapping", () => {
 
   it("sender without branch → addressParts from the sender address; empty optional fields are omitted", () => {
     const req = sampleRequest();
-    req.sender = { ...req.sender, branchCode: "", email: null, company: null, taxId: null, eori: "", ioss: null };
+    req.sender = {
+      ...req.sender,
+      branchCode: "",
+      company: null,
+      taxId: null,
+      eori: "",
+      ioss: null,
+      address: { ...req.sender.address, street: "Test street", building: "1" },
+    };
     const body = buildCreateShipmentBody(req, SETTINGS);
     expect(body.sender).toStrictEqual({
       name: "Test Sender",
       phone: "+380501234567",
+      email: "shop@example.test",
       countryCode: "UA",
-      addressParts: { city: "Kyiv", street: "Test street 1", postCode: "01001" },
+      addressParts: { city: "Kyiv", street: "Test street", building: "1", postCode: "01001" },
     });
     expect(body).not.toHaveProperty("payerContractNumber");
     expect(body).not.toHaveProperty("deliveryType");
@@ -229,6 +261,7 @@ describe("POST /shipments body mapping", () => {
 
   it("deliveryType: request serviceCode → settings → omitted; contract number passed when set", () => {
     expect(buildCreateShipmentBody(sampleRequest({ serviceCode: "express" }), { ...SETTINGS, deliveryType: "economy" }).deliveryType).toBe("express");
+    expect(buildCreateShipmentBody(sampleRequest({ serviceCode: " Express " }), SETTINGS).deliveryType).toBe("express");
     expect(buildCreateShipmentBody(sampleRequest({ serviceCode: null }), { ...SETTINGS, deliveryType: "economy" }).deliveryType).toBe("economy");
     const body = buildCreateShipmentBody(sampleRequest(), { payerType: "ThirdPerson", payerContractNumber: " 12345678 ", deliveryType: "" });
     expect(body.payerType).toBe("ThirdPerson");
@@ -260,7 +293,14 @@ describe("POST /shipments validation (never truncates personal data)", () => {
     req.recipient = {
       ...req.recipient,
       name: longName,
-      address: { ...req.recipient.address, address1: "S".repeat(101), city: "C".repeat(101), postalCode: "12345678901", address2: "A".repeat(101) },
+      address: {
+        ...req.recipient.address,
+        address1: `${"S".repeat(101)} 5`,
+        street: "S".repeat(101),
+        city: "C".repeat(101),
+        postalCode: "12345678901",
+        address2: "A".repeat(101),
+      },
     };
     const err = rejection(() => buildCreateShipmentBody(req, SETTINGS));
     expect(err.kind).toBe("rejected");
@@ -296,10 +336,122 @@ describe("POST /shipments validation (never truncates personal data)", () => {
     expect(noItems.details[0]!.carrierCode).toBe("invoice.items");
   });
 
-  it("domestic shipment (same country) has no invoice", () => {
+  it("domestic shipment (same country) has no invoice; email and registration address not required", () => {
     const req = sampleRequest({ customs: null });
-    req.recipient = { ...req.recipient, address: { ...req.recipient.address, countryCode: "UA" } };
-    expect(buildCreateShipmentBody(req, SETTINGS)).not.toHaveProperty("invoice");
+    req.recipient = { ...req.recipient, email: null, registrationAddress: null, address: { ...req.recipient.address, countryCode: "UA" } };
+    const body = buildCreateShipmentBody(req, SETTINGS);
+    expect(body).not.toHaveProperty("invoice");
+    expect(body.recipient).not.toHaveProperty("email");
+    expect(body.recipient).not.toHaveProperty("registrationAddressRecipient");
+  });
+
+  it("address delivery: building must be separate (never address1 in two fields), postCode required", () => {
+    const req = sampleRequest();
+    req.recipient = { ...req.recipient, address: { ...req.recipient.address, street: null, building: null, postalCode: null } };
+    const err = rejection(() => buildCreateShipmentBody(req, SETTINGS));
+    expect(err.details.map((d) => [d.carrierCode, d.field])).toEqual([
+      ["recipient.addressParts.building", "shipping.address1"],
+      ["recipient.addressParts.postCode", "shipping.postalCode"],
+    ]);
+    expect(err.details[0]!.message).toContain("separate field");
+    // Відправник з адреси (без відділення) — те саме, поле налаштувань відправника.
+    const sender = sampleRequest();
+    sender.sender = { ...sender.sender, branchCode: null };
+    expect(rejection(() => buildCreateShipmentBody(sender, SETTINGS)).details.map((d) => [d.carrierCode, d.field])).toEqual([
+      ["sender.addressParts.building", "shipper.address1"],
+    ]);
+    // Відділення одержувача → addressParts не потрібні взагалі.
+    const branch = sampleRequest();
+    branch.recipient = { ...branch.recipient, branchCode: "1234/5", address: { ...branch.recipient.address, street: null, building: null, postalCode: null } };
+    const body = buildCreateShipmentBody(branch, SETTINGS);
+    expect(body.recipient.divisionNumber).toBe("1234/5");
+    expect(body.recipient).not.toHaveProperty("addressParts");
+  });
+
+  it("region required when sender or recipient is US/IE/CA (US: two-letter state code)", () => {
+    const us = sampleRequest();
+    us.recipient = {
+      ...us.recipient,
+      registrationAddress: null,
+      address: { countryCode: "US", city: "Austin", postalCode: "73301", province: null, address1: "1 Test Ave", address2: null, street: "Test Ave", building: "1" },
+    };
+    expect(rejection(() => buildCreateShipmentBody(us, SETTINGS)).details.map((d) => [d.carrierCode, d.field])).toEqual([
+      ["recipient.addressParts.region", "shipping.province"],
+    ]);
+    us.recipient.address.province = "Texas";
+    expect(rejection(() => buildCreateShipmentBody(us, SETTINGS)).details[0]!.message).toContain("invalid format");
+    us.recipient.address.province = "TX";
+    // Відправник з адреси до США: region відправника теж обов'язковий.
+    us.sender = { ...us.sender, branchCode: null, address: { ...us.sender.address, street: "Test street", building: "1" } };
+    expect(rejection(() => buildCreateShipmentBody(us, SETTINGS)).details.map((d) => d.carrierCode)).toEqual(["sender.addressParts.region"]);
+    // Ірландія: регіон обов'язковий, але формат не перевіряється.
+    const ie = sampleRequest();
+    ie.recipient = { ...ie.recipient, registrationAddress: null, address: { ...ie.recipient.address, countryCode: "IE", province: "Co. Dublin" } };
+    expect(buildCreateShipmentBody(ie, SETTINGS).recipient.addressParts!.region).toBe("Co. Dublin");
+    // Інші країни — region необов'язковий.
+    expect(buildCreateShipmentBody(sampleRequest(), SETTINGS).recipient.addressParts).not.toHaveProperty("region");
+  });
+
+  it("email required for both parties on an international shipment", () => {
+    const req = sampleRequest();
+    req.recipient = { ...req.recipient, email: " " };
+    req.sender = { ...req.sender, email: null };
+    expect(rejection(() => buildCreateShipmentBody(req, SETTINGS)).details.map((d) => [d.carrierCode, d.field])).toEqual([
+      ["sender.email", "shipper.email"],
+      ["recipient.email", "email"],
+    ]);
+  });
+
+  it("DE/SK/HU/FR: registration address required; never substituted with the delivery address", () => {
+    for (const country of ["DE", "SK", "HU", "FR"]) {
+      const req = sampleRequest();
+      req.recipient = { ...req.recipient, registrationAddress: undefined, address: { ...req.recipient.address, countryCode: country } };
+      const err = rejection(() => buildCreateShipmentBody(req, SETTINGS));
+      expect(err.details.map((d) => d.carrierCode), country).toEqual(["recipient.registrationAddressRecipient"]);
+      expect(err.details[0]!.field).toBeUndefined();
+    }
+    const pl = sampleRequest();
+    pl.recipient = { ...pl.recipient, registrationAddress: null, address: { ...pl.recipient.address, countryCode: "PL" } };
+    expect(buildCreateShipmentBody(pl, SETTINGS).recipient).not.toHaveProperty("registrationAddressRecipient");
+    // Неповна адреса реєстрації → помилки полів (zipCode, не postCode).
+    const partial = sampleRequest();
+    partial.recipient = { ...partial.recipient, registrationAddress: { ...partial.recipient.registrationAddress!, postalCode: null, building: null } };
+    expect(rejection(() => buildCreateShipmentBody(partial, SETTINGS)).details.map((d) => d.carrierCode)).toEqual([
+      "recipient.registrationAddressRecipient.zipCode",
+      "recipient.registrationAddressRecipient.building",
+    ]);
+  });
+
+  it("deliveryType: only documented values are sent (never a calculation UUID)", () => {
+    const fromSettings = rejection(() => buildCreateShipmentBody(sampleRequest(), { ...SETTINGS, deliveryType: "4f6e-uuid" }));
+    expect(fromSettings.details.map((d) => [d.carrierCode, d.field])).toEqual([["deliveryType", "novaPost.deliveryType"]]);
+    const fromRequest = rejection(() => buildCreateShipmentBody(sampleRequest({ serviceCode: "0b6e2c1a-1111-4222-8333-444455556666" }), SETTINGS));
+    expect(fromRequest.details.map((d) => d.carrierCode)).toEqual(["serviceCode"]);
+  });
+
+  it("hsCode: digits only, 8–10 digits (exactly 10 for MD/CA), kg-only codes rejected", () => {
+    const dotted = sampleRequest();
+    dotted.customsItems = [{ ...dotted.customsItems[0]!, hsCode: "6109.10.00" }];
+    expect(buildCreateShipmentBody(dotted, SETTINGS).invoice!.items[0]!.hsCode).toBe("61091000");
+
+    const short = sampleRequest();
+    short.customsItems = [{ ...short.customsItems[0]!, hsCode: "610910" }];
+    expect(rejection(() => buildCreateShipmentBody(short, SETTINGS)).details.map((d) => [d.carrierCode, d.message])).toEqual([
+      ["invoice.items.0.hsCode", "invoice.items.0.hsCode: HS code must have 8 to 10 digits (UKT ZED)"],
+    ]);
+
+    const canada = sampleRequest();
+    canada.recipient = { ...canada.recipient, registrationAddress: null, address: { ...canada.recipient.address, countryCode: "CA", province: "ON" } };
+    canada.customsItems = [{ ...canada.customsItems[0]!, hsCode: "61091000" }];
+    expect(rejection(() => buildCreateShipmentBody(canada, SETTINGS)).details[0]!.message).toContain("exactly 10 digits");
+    canada.customsItems = [{ ...canada.customsItems[0]!, hsCode: "6109100010" }];
+    expect(buildCreateShipmentBody(canada, SETTINGS).invoice!.items[0]!.hsCode).toBe("6109100010");
+
+    for (const code of ["2106909800", "6309000010"]) {
+      const kg = sampleRequest();
+      kg.customsItems = [{ ...kg.customsItems[0]!, hsCode: code }];
+      expect(rejection(() => buildCreateShipmentBody(kg, SETTINGS)).details[0]!.message, code).toContain("kilograms");
+    }
   });
 
   it("ThirdPerson without contract, long reference, missing phone, missing dimensions, zero value → rejected", () => {
@@ -437,7 +589,8 @@ describe("tracking status codes", () => {
       {
         currentStatus: [{ number: "20450000000001", statusCode: "7", status: "Arrived (at the Division)", statusDate: "2026-11-25T08:00:00Z" }],
         historyOnlineTracking: [
-          { number: "20450000000001", date: "2026-11-25T08:00:00Z", code: "7", event: "ArrivalRecipientWarehouse", eventStatus: "Now", settlementName: "Berlin", countryCode: "DE" },
+          // countryCode у записі — країна ВІДПРАВНИКА (документація), тому в місце події не потрапляє.
+          { number: "20450000000001", date: "2026-11-25T08:00:00Z", code: "7", event: "ArrivalRecipientWarehouse", eventStatus: "Now", settlementName: "Berlin", divisionName: "Test branch 1", countryCode: "UA" },
           { number: "20450000000001", date: "2026-11-20 10:00:00", code: "1", event: "CreateID", eventStatus: "Passed", settlementName: "Kyiv", countryCode: "UA" },
           { number: "20450000000001", date: "2026-11-27T10:00:00Z", code: "9", event: "ReceivedWarehouseFuture", eventStatus: "Future" },
           { number: "20450000000001", date: null, code: "4", eventStatus: "Passed" },
@@ -448,8 +601,8 @@ describe("tracking status codes", () => {
     expect(snaps).toHaveLength(1);
     expect(snaps[0]).toMatchObject({ waybillNumber: "20450000000001", status: "out_for_delivery", carrierStatusCode: "7", carrierStatusText: "Arrived (at the Division)" });
     expect(snaps[0]!.events.map((e) => [e.code, e.status, e.location, e.description])).toEqual([
-      ["1", "created", "Kyiv, UA", "CreateID"],
-      ["7", "out_for_delivery", "Berlin, DE", "ArrivalRecipientWarehouse"],
+      ["1", "created", "Kyiv", "CreateID"],
+      ["7", "out_for_delivery", "Berlin, Test branch 1", "ArrivalRecipientWarehouse"],
     ]);
     // Дата без зони трактується як UTC (документація: ISO 8601, UTC).
     expect(snaps[0]!.events[0]!.occurredAt.toISOString()).toBe("2026-11-20T10:00:00.000Z");
@@ -492,14 +645,19 @@ describe("rates mapping", () => {
     ]);
   });
 
-  it("undocumented tariff name → UUID service code; no duties without invoice; DDP uses sender duties", () => {
-    const res = { services: [{ deliveryType: "uuid-x", deliveryTypeName: "special", cost: 5, senderPayerFeesCustomsCost: 7, recipientPayerFeesCustomsCost: 1 }] };
-    expect(mapCalculationToQuotes(res, { tariffCurrency: "UAH", incoterm: "DDP", invoiceSent: true })[0]).toMatchObject({
-      serviceCode: "uuid-x",
-      dutiesEstimate: { amount: "7.00", currency: "UAH" },
-      estimatedDeliveryDate: null,
-    });
+  it("tariffs without a documented deliveryTypeName are skipped (a UUID is never a service code)", () => {
+    const res = {
+      services: [
+        { deliveryType: "uuid-x", deliveryTypeName: "special", cost: 5 },
+        { deliveryType: "uuid-y", cost: 6 },
+        { deliveryType: "uuid-e", deliveryTypeName: "Economy", cost: 5, senderPayerFeesCustomsCost: 7, recipientPayerFeesCustomsCost: 1 },
+      ],
+    };
+    const quotes = mapCalculationToQuotes(res, { tariffCurrency: "UAH", incoterm: "DDP", invoiceSent: true });
+    expect(quotes).toHaveLength(1);
+    expect(quotes[0]).toMatchObject({ serviceCode: "economy", dutiesEstimate: { amount: "7.00", currency: "UAH" }, estimatedDeliveryDate: null });
     expect(mapCalculationToQuotes(res, { tariffCurrency: "UAH", incoterm: "DAP", invoiceSent: false })[0]!.dutiesEstimate).toBeNull();
+    expect(mapCalculationToQuotes({ services: [{ deliveryType: "uuid-y", cost: 6 }] }, { tariffCurrency: "UAH", incoterm: "DAP", invoiceSent: false })).toEqual([]);
     expect(mapCalculationToQuotes(null, { tariffCurrency: "UAH", incoterm: "DAP", invoiceSent: false })).toEqual([]);
   });
 

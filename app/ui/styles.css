@@ -2682,3 +2682,10 @@ textarea.ot-input {
     break-inside: avoid;
   }
 }
+
+/* Інвойс у друці: лінії підписів чорні й у темній темі (data-theme не залежить від носія). */
+@media print {
+  .ot-invoice__line {
+    border-bottom-color: #000000;
+  }
+}

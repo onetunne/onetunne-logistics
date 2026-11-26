@@ -24,7 +24,7 @@ interface Call {
   headers: Record<string, string>;
 }
 
-type Reply = { status: number; json?: unknown; text?: string; bytes?: Uint8Array; contentType?: string };
+type Reply = { status: number; json?: unknown; text?: string; bytes?: Uint8Array; contentType?: string; response?: Response };
 
 function fakeApi(handler: (call: Call) => Reply | Error, opts: { authError?: Error } = {}) {
   const calls: Call[] = [];
@@ -45,6 +45,7 @@ function fakeApi(handler: (call: Call) => Reply | Error, opts: { authError?: Err
     }
     const r = handler(call);
     if (r instanceof Error) throw r;
+    if (r.response) return r.response;
     if (r.status === 204) return new Response(null, { status: 204 });
     const payload = r.bytes ? new Uint8Array(r.bytes) : (r.text ?? (r.json === undefined ? "" : JSON.stringify(r.json)));
     return new Response(payload, { status: r.status, headers: { "content-type": r.contentType ?? "application/json" } });
@@ -94,7 +95,8 @@ function request(): CreateShipmentRequest {
       company: null,
       phone: "+491511234567",
       email: "recipient@example.test",
-      address: { countryCode: "DE", city: "Berlin", postalCode: "10178", province: null, address1: "Teststrasse 5", address2: null },
+      address: { countryCode: "DE", city: "Berlin", postalCode: "10178", province: null, address1: "Teststrasse 5", address2: null, street: "Teststrasse", building: "5" },
+      registrationAddress: { countryCode: "DE", city: "Berlin", postalCode: "10178", province: null, address1: "Teststrasse 5", address2: null, street: "Teststrasse", building: "5" },
     },
     parcels: [{ packageCode: "m", lengthCm: 35, widthCm: 25, heightCm: 8, actualWeightGrams: 473, volumetricWeightGrams: 1400, chargeableWeightGrams: 1400 }],
     customsItems: [
@@ -178,7 +180,11 @@ describe("NovaPostAdapter.createShipment", () => {
       payerType: "Sender",
       parcels: [{ actualWeight: 480, length: 350, width: 250, height: 80, insuranceCost: 49.8, insuranceCurrencyCode: "EUR" }],
       sender: { divisionNumber: "32521/1", countryCode: "UA" },
-      recipient: { countryCode: "DE", addressParts: { city: "Berlin" } },
+      recipient: {
+        countryCode: "DE",
+        addressParts: { city: "Berlin", street: "Teststrasse", building: "5", postCode: "10178" },
+        registrationAddressRecipient: { city: "Berlin", street: "Teststrasse", zipCode: "10178", building: "5" },
+      },
       invoice: { incoterm: "DAP", exportReason: "Selling", payerFeesCustoms: "Recipient", items: [{ actualWeight: 480, amount: 2, cost: 24.9 }] },
     });
     expect(post.body).not.toHaveProperty("payerContractNumber");
@@ -202,9 +208,11 @@ describe("NovaPostAdapter.createShipment", () => {
   });
 
   it.each([
-    [400, "rejected"],
+    // 400 без помилок полів — не доказ відмови (документований 400 «Internal TypeError error»): звірка, а не повтор.
+    [400, "unknown_outcome"],
     [404, "rejected"],
-    [409, "rejected"],
+    // 409 для POST /shipments не документований: «конфлікт» може означати, що відправлення вже існує.
+    [409, "unknown_outcome"],
     [422, "rejected"],
     [401, "auth"],
     [403, "auth"],
@@ -220,6 +228,19 @@ describe("NovaPostAdapter.createShipment", () => {
     expect(err.carrier).toBe("nova_post");
     // 401 → одне повторне отримання JWT, далі відмова.
     expect(api.authCalls()).toHaveLength(status === 401 ? 2 : 1);
+  });
+
+  it.each([
+    ["Internal TypeError error (documented gateway 400)", { status: 400, json: { errors: { errorMessage: "Internal TypeError error" } } }, "unknown_outcome"],
+    ["empty body", { status: 400, text: "" }, "unknown_outcome"],
+    ["unparseable body", { status: 400, text: "<html>Bad Request</html>", contentType: "text/html" }, "unknown_outcome"],
+    ["field validation errors", { status: 400, json: { errors: { "parcels.0.width": "The parcels.0.width field must be at least 1." } } }, "rejected"],
+    ["Invalid JSON format", { status: 400, json: { errors: { errorMessage: "Invalid JSON format" } } }, "rejected"],
+    ["Cid profile timeout", { status: 422, json: { errors: { errorMessage: "Cid profile timeout" } } }, "unavailable"],
+    ["Cid profile not found", { status: 422, json: { errors: { errorMessage: "Cid profile not found" } } }, "auth"],
+  ] as const)("POST /shipments %s → %s", async (_name, reply, kind) => {
+    const { adapter } = setup(() => reply);
+    expect((await carrierError(adapter.createShipment(request()))).kind).toBe(kind);
   });
 
   it("422 validation errors → rejected with details mapped to our fields, no secrets in message", async () => {
@@ -246,9 +267,44 @@ describe("NovaPostAdapter.createShipment", () => {
     }
   });
 
+  it.each([
+    ["ENOTFOUND", "unavailable"],
+    ["EAI_AGAIN", "unavailable"],
+    ["ECONNREFUSED", "unavailable"],
+    ["UND_ERR_CONNECT_TIMEOUT", "unavailable"],
+    // Не з переліку «до з'єднання» (обрив сокета після відправки) → результат невідомий.
+    ["UND_ERR_SOCKET", "unknown_outcome"],
+  ] as const)("network error code %s → %s", async (code, kind) => {
+    const { adapter } = setup(() => Object.assign(new TypeError("fetch failed"), { cause: { code } }));
+    expect((await carrierError(adapter.createShipment(request()))).kind).toBe(kind);
+  });
+
+  it("body stream fails after the status was received → unknown_outcome (2xx and 5xx)", async () => {
+    const broken = (status: number) =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"id":"'));
+            controller.error(new TypeError("terminated"));
+          },
+        }),
+        { status, headers: { "content-type": "application/json" } },
+      );
+    for (const status of [201, 503]) {
+      const { adapter } = setup(() => ({ status, response: broken(status) }));
+      expect((await carrierError(adapter.createShipment(request()))).kind, `status ${status}`).toBe("unknown_outcome");
+    }
+  });
+
+  it("401 → JWT refreshed → the repeated POST fails on the network → unknown_outcome", async () => {
+    let posts = 0;
+    const { adapter, api } = setup(() => (++posts === 1 ? { status: 401, json: { errors: { errorMessage: "Expired token" } } } : new TypeError("fetch failed")));
+    expect((await carrierError(adapter.createShipment(request()))).kind).toBe("unknown_outcome");
+    expect(api.authCalls()).toHaveLength(2);
+    expect(api.apiCalls()).toHaveLength(2);
+  });
+
   it("errors that guarantee nothing was sent → unavailable", async () => {
-    const refused = setup(() => Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } }));
-    expect((await carrierError(refused.adapter.createShipment(request()))).kind).toBe("unavailable");
 
     const authDown = setup(() => ({ status: 201, json: CREATED }), { authError: new TypeError("fetch failed") });
     expect((await carrierError(authDown.adapter.createShipment(request()))).kind).toBe("unavailable");
@@ -324,6 +380,19 @@ describe("NovaPostAdapter.findShipmentByReference", () => {
     expect(await both.adapter.findShipmentByReference("OT-1001-1")).toMatchObject({ found: true, cancelled: false, shipment: { carrierShipmentId: "2" } });
   });
 
+  it("deleted match is 'cancelled' only after a complete scan; otherwise not authoritative (manual review)", async () => {
+    // last_page > 5: активне відправлення з тим самим reference могло лишитися на непереглянутій сторінці.
+    const beyond = setup(pages([[item("1", "OT-1001-1", { deletedAt: "2026-11-26T11:00:00Z" })], ...Array.from({ length: 9 }, (_, i) => [item(String(i + 2), "OTHER")])], 10));
+    expect(await beyond.adapter.findShipmentByReference("OT-1001-1")).toEqual({ found: false, authoritative: false });
+    expect(beyond.api.apiCalls()).toHaveLength(5);
+    // Без last_page повноту перегляду не підтвердити.
+    const noLastPage = setup(() => ({ status: 200, json: { items: [item("1", "OT-1001-1", { deletedAt: "2026-11-26T11:00:00Z" })] } }));
+    expect(await noLastPage.adapter.findShipmentByReference("OT-1001-1")).toEqual({ found: false, authoritative: false });
+    // Порожня сторінка до last_page — теж неповний перегляд.
+    const gap = setup(pages([[item("1", "OT-1001-1", { deletedAt: "2026-11-26T11:00:00Z" })], []], 3));
+    expect(await gap.adapter.findShipmentByReference("OT-1001-1")).toEqual({ found: false, authoritative: false });
+  });
+
   it("not found → non-authoritative; stops at last_page and at 5 pages max", async () => {
     const two = setup(pages([[item("1", "OT-1000-1")], [item("2", "OT-1001-12")]]));
     expect(await two.adapter.findShipmentByReference("OT-1001-1")).toEqual({ found: false, authoritative: false });
@@ -359,6 +428,15 @@ describe("NovaPostAdapter.cancelShipment", () => {
     expect(await setup(() => ({ status: 422, json: { errors: { errorMessage: "deletion not allowed" } } })).adapter.cancelShipment(WAYBILL)).toEqual({ cancelled: false });
     expect(await setup(() => ({ status: 409, json: {} })).adapter.cancelShipment(WAYBILL)).toEqual({ cancelled: false });
     expect(await setup(() => ({ status: 400, text: "bad" })).adapter.cancelShipment(WAYBILL)).toEqual({ cancelled: false });
+  });
+
+  it("transient gateway errors are thrown as unavailable, not reported as a refusal", async () => {
+    const timeout = await carrierError(setup(() => ({ status: 422, json: { errors: { errorMessage: "Cid profile timeout" } } })).adapter.cancelShipment(WAYBILL));
+    expect(timeout.kind).toBe("unavailable");
+    const internal = await carrierError(setup(() => ({ status: 400, json: { errors: { errorMessage: "Internal TypeError error" } } })).adapter.cancelShipment(WAYBILL));
+    expect(internal.kind).toBe("unavailable");
+    const profile = await carrierError(setup(() => ({ status: 422, json: { errors: { errorMessage: "Cid profile not found" } } })).adapter.cancelShipment(WAYBILL));
+    expect(profile.kind).toBe("auth");
   });
 
   it("404 → rejected (not found); 401 → auth; 5xx/network → unavailable", async () => {
@@ -442,13 +520,13 @@ describe("NovaPostAdapter.getTracking", () => {
       carrierStatusText: "Customs clearance completed",
       statusAt: new Date("2026-11-24T15:30:00Z"),
       events: [
-        { status: "created", code: "1", occurredAt: new Date("2026-11-20T09:00:00Z"), location: "Kyiv, UA", description: "Shipment ID created" },
-        { status: "in_transit", code: "5", occurredAt: new Date("2026-11-21T08:00:00Z"), location: "Kyiv, UA", description: "Dispatched" },
-        { status: "customs", code: "119", occurredAt: new Date("2026-11-23T10:00:00Z"), location: "Leipzig, DE", description: "Customs clearance in progress" },
-        { status: "customs", code: "120", occurredAt: new Date("2026-11-24T15:30:00Z"), location: "Leipzig, DE", description: "Customs clearance completed" },
+        { status: "created", code: "1", occurredAt: new Date("2026-11-20T09:00:00Z"), location: "Kyiv", description: "Shipment ID created" },
+        { status: "in_transit", code: "5", occurredAt: new Date("2026-11-21T08:00:00Z"), location: "Kyiv", description: "Dispatched" },
+        { status: "customs", code: "119", occurredAt: new Date("2026-11-23T10:00:00Z"), location: "Leipzig", description: "Customs clearance in progress" },
+        { status: "customs", code: "120", occurredAt: new Date("2026-11-24T15:30:00Z"), location: "Leipzig", description: "Customs clearance completed" },
       ],
     });
-    expect(snaps[1]).toMatchObject({ waybillNumber: B, status: "delivered", carrierStatusCode: "9", events: [{ code: "1" }, { code: "9", location: "Warszawa, PL" }] });
+    expect(snaps[1]).toMatchObject({ waybillNumber: B, status: "delivered", carrierStatusCode: "9", events: [{ code: "1" }, { code: "9", location: "Warszawa, Test 1" }] });
   });
 
   it("chunks requests (20 numbers) and de-duplicates", async () => {
@@ -521,18 +599,36 @@ describe("NovaPostAdapter.quoteRates", () => {
     });
   });
 
-  it("currency comes from settings; no invoice for a domestic route; no duties without invoice", async () => {
+  it("response currency comes from settings; insuranceCost stays in the sender-country currency; no invoice for a domestic route", async () => {
     const { adapter, api } = setup(() => ({ status: 200, json: CALC }), {
       settings: { novaPost: { ...SETTINGS.novaPost, tariffCurrency: "PLN" }, shipper: {} },
     });
     const quotes = await adapter.quoteRates(
-      rateRequest({ destination: { countryCode: "UA", city: "Lviv", postalCode: "79000", province: null, address1: "", address2: null }, declaredValue: { amount: "100.00", currency: "PLN" } }),
+      rateRequest({ destination: { countryCode: "UA", city: "Lviv", postalCode: "79000", province: null, address1: "", address2: null }, declaredValue: { amount: "100.00", currency: "UAH" } }),
     );
     expect(quotes[0]).toMatchObject({ price: { amount: "615.40", currency: "PLN" }, dutiesEstimate: null });
     const body = api.apiCalls()[0]!.body as Record<string, unknown>;
     expect(body).not.toHaveProperty("invoice");
     expect(body).not.toHaveProperty("deliveryTypes");
     expect(body.sender).toEqual({ countryCode: "UA", addressParts: { city: "Kyiv", postCode: "01001" } });
+    // 100 UAH передаються як 100 (валюта країни відправника), а не перераховуються у валюту тарифу PLN.
+    expect((body.parcels as Array<{ insuranceCost: number }>)[0]!.insuranceCost).toBe(100);
+  });
+
+  it("declared value that cannot be expressed in the sender-country currency → not_configured, no request", async () => {
+    // Курси задані відносно валюти тарифу (EUR), а insuranceCost має бути в UAH: 100 EUR не можна надіслати як «100».
+    const eurTariff = setup(() => ({ status: 200, json: CALC }), {
+      settings: { novaPost: { ...SETTINGS.novaPost, tariffCurrency: "EUR" }, checkoutRates: { fxRates: [{ currency: "USD", rate: "0.9" }] } },
+    });
+    const err = await carrierError(eurTariff.adapter.quoteRates(rateRequest({ declaredValue: { amount: "100.00", currency: "EUR" } })));
+    expect(err.kind).toBe("not_configured");
+    expect(err.message).toContain("UAH");
+    expect(eurTariff.api.fetch).not.toHaveBeenCalled();
+    // Відправник не з України — валюта країни відправника невідома адаптеру.
+    const foreign = setup(() => ({ status: 200, json: CALC }));
+    const origin = { countryCode: "PL", city: "Warszawa", postalCode: "00-001", province: null, address1: "", address2: null };
+    expect((await carrierError(foreign.adapter.quoteRates(rateRequest({ origin })))).kind).toBe("not_configured");
+    expect(foreign.api.fetch).not.toHaveBeenCalled();
   });
 
   it("missing exchange rate → not_configured without a network call; API errors are classified", async () => {

@@ -33,8 +33,8 @@ const messages: MessageModule = {
     "tracking.field.delivered": "Доставлено",
     "tracking.notChecked": "Ще не перевірялося",
     "tracking.notYet": "Ще ні",
-    "tracking.unsupported":
-      "Перевізник не підтримує відстеження через API. Після фактичної передачі посилки позначте це вручну кнопкою «Передано перевізнику».",
+    "tracking.unsupported": "Перевізник не підтримує відстеження через API.",
+    "tracking.unsupportedManual": "Після фактичної передачі посилки позначте це вручну кнопкою «Передано перевізнику».",
     "tracking.refresh.button": "Оновити статус",
     "tracking.refresh.help": "Статус перевіряється періодично, якщо відстеження увімкнено в налаштуваннях. Можна оновити й вручну.",
     "tracking.events.title": "Події перевізника",
@@ -53,6 +53,9 @@ const messages: MessageModule = {
     "tracking.handover.confirm": "Так, посилку передано",
     "tracking.handover.source.manual": "підтвердив менеджер",
     "tracking.handover.source.tracking": "за даними перевізника",
+    "tracking.deleted.title": "Перевізник повідомляє: накладну видалено",
+    "tracking.deleted.body":
+      "Не передавайте посилку з цією накладною — позначити передачу перевізнику неможливо. Перевірте накладну в кабінеті перевізника; якщо її справді видалено — скасуйте накладну в застосунку та створіть нову.",
 
     // --- Трек-номер у Shopify ---
     "tracking.shopify.label": "Трек-номер у Shopify",
@@ -106,6 +109,7 @@ const messages: MessageModule = {
     "tracking.notSupported": "Перевізник не підтримує відстеження через API.",
     "tracking.carrierUnavailable": "Перевізник зараз недоступний — статус не оновлено. Спробуйте пізніше.",
     "shipment.alreadyHandedOver": "Посилку вже передано перевізнику.",
+    "shipment.deletedAtCarrier": "Перевізник повідомляє, що накладну видалено, — передачу не позначено. Скасуйте накладну й створіть нову.",
     "waybill.notActive": "Накладна неактивна (скасована або ще не створена).",
     "document.notAvailable": "Документ недоступний для цієї накладної.",
 
@@ -157,8 +161,8 @@ const messages: MessageModule = {
     "tracking.field.delivered": "Delivered",
     "tracking.notChecked": "Not checked yet",
     "tracking.notYet": "Not yet",
-    "tracking.unsupported":
-      "The carrier does not support tracking via API. After the parcel is actually handed over, mark it manually with “Handed to carrier”.",
+    "tracking.unsupported": "The carrier does not support tracking via API.",
+    "tracking.unsupportedManual": "After the parcel is actually handed over, mark it manually with “Handed to carrier”.",
     "tracking.refresh.button": "Refresh status",
     "tracking.refresh.help": "The status is checked periodically when tracking is enabled in settings. You can also refresh it manually.",
     "tracking.events.title": "Carrier events",
@@ -176,6 +180,9 @@ const messages: MessageModule = {
     "tracking.handover.confirm": "Yes, parcel handed over",
     "tracking.handover.source.manual": "confirmed by a manager",
     "tracking.handover.source.tracking": "according to the carrier",
+    "tracking.deleted.title": "The carrier reports this waybill as deleted",
+    "tracking.deleted.body":
+      "Do not hand over the parcel with this waybill — marking it as handed to the carrier is not possible. Check the waybill in the carrier portal; if it was really deleted, cancel the waybill in the app and create a new one.",
 
     "tracking.shopify.label": "Tracking number in Shopify",
     "tracking.shopify.sent": "Sent {time}",
@@ -224,6 +231,7 @@ const messages: MessageModule = {
     "tracking.notSupported": "The carrier does not support tracking via API.",
     "tracking.carrierUnavailable": "The carrier is unavailable right now — the status was not updated. Try again later.",
     "shipment.alreadyHandedOver": "The parcel has already been handed to the carrier.",
+    "shipment.deletedAtCarrier": "The carrier reports this waybill as deleted — the handover was not recorded. Cancel the waybill and create a new one.",
     "waybill.notActive": "The waybill is not active (cancelled or not created yet).",
     "document.notAvailable": "The document is not available for this waybill.",
 

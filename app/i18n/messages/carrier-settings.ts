@@ -39,7 +39,7 @@ const messages: MessageModule = {
     "settings.customs.invoiceType.proforma": "Проформа-інвойс (без продажу)",
     "settings.customs.hsTitle": "Коди УКТ ЗЕД (HS)",
     "settings.customs.hsNote":
-      "Nova Post приймає лише коди з 8–10 цифр (УКТ ЗЕД). 6-значні коди HS, які зазвичай вносять у Shopify, перевізник відхиляє. Змінити код: Shopify → Товари → товар → Запаси (Inventory) → «Код HS».",
+      "Nova Post приймає лише коди з 8–10 цифр (УКТ ЗЕД). 6-значні коди HS, які зазвичай вносять у Shopify, перевізник відхиляє. Змінити код: у Shopify відкрийте товар (або варіант) → блок запасів (Inventory) або доставки → «Код HS» (Harmonized System code).",
 
     // Nova Post
     "settings.novaPost.title": "Nova Post",
@@ -307,7 +307,7 @@ const messages: MessageModule = {
     "settings.customs.invoiceType.proforma": "Proforma invoice (no sale)",
     "settings.customs.hsTitle": "UKTZED (HS) codes",
     "settings.customs.hsNote":
-      "Nova Post accepts only 8–10 digit codes (UKTZED). The 6-digit HS codes usually entered in Shopify are rejected by the carrier. To change a code: Shopify → Products → product → Inventory → “HS code”.",
+      "Nova Post accepts only 8–10 digit codes (UKTZED). The 6-digit HS codes usually entered in Shopify are rejected by the carrier. To change a code: in Shopify open the product (or variant) → the Inventory or Shipping block → “HS code” (Harmonized System code).",
 
     "settings.novaPost.title": "Nova Post",
     "settings.novaPost.description":
