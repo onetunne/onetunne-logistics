@@ -47,10 +47,10 @@ export function documentErrorKey(status: number, body: string): string {
   return "tracking.documents.error.generic";
 }
 
-/** Ім'я файлу із заголовка Content-Disposition (лише безпечні символи). */
+/** Ім'я файлу із заголовка Content-Disposition: лише безпечні символи й не з крапки (інакше — запасне ім'я). */
 function fileNameFrom(response: Response, fallback: string): string {
   const header = response.headers.get("Content-Disposition") ?? "";
-  const match = /filename="?([A-Za-z0-9._-]+)"?/.exec(header);
+  const match = /filename="?([A-Za-z0-9][A-Za-z0-9._-]{0,150})"?\s*(?:;|$)/.exec(header);
   return match?.[1] ?? fallback;
 }
 

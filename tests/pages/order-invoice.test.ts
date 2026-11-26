@@ -1,14 +1,20 @@
+import fs from "node:fs";
+import path from "node:path";
 import { eq } from "drizzle-orm";
 import { createElement as h } from "react";
 import { renderToString } from "react-dom/server";
 import { Outlet, StaticRouterProvider, createStaticHandler, createStaticRouter } from "react-router";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { ShellData } from "~/components/shell-types";
-import { orders } from "~/db/schema";
-import { PERMISSIONS } from "~/domain/permissions";
+import { orderLineItems, orders } from "~/db/schema";
+import { PERMISSIONS, makeActor } from "~/domain/permissions";
+import { DemoShopifyGateway } from "~/integrations/shopify/types";
 import { resetEnvCache } from "~/lib/env.server";
+import { validateOrderById } from "~/modules/orders/workflow.server";
+import { cancelWaybill, createWaybill } from "~/modules/shipments/waybill.server";
 import { demoRoleCookie } from "~/server/cookies.server";
 import { getDemoRuntime } from "~/server/demo-runtime.server";
+import type { ServiceContext } from "~/server/types";
 
 /**
  * Комерційний інвойс для друку (/demo/orders/:orderId/invoice): loader (дозволи, 404) і серверний рендер.
@@ -158,5 +164,88 @@ describe("order invoice rendering", () => {
     expect(html).toContain("Бракує митних даних");
     expect(html).toMatch(/Позиція 1 \([^)]+\): HS-код, Митний опис/);
     expect(html).toContain(`href="/demo/orders/${id}"`);
+  });
+});
+
+describe("order invoice with a waybill", () => {
+  async function serviceCtx(): Promise<ServiceContext> {
+    const runtime = await getDemoRuntime();
+    return {
+      mode: "demo",
+      db: runtime.handle.db,
+      actor: makeActor({ id: "demo-owner", displayName: "Owner", role: "owner" }),
+      carriers: runtime.carriers,
+      shopify: new DemoShopifyGateway(),
+      now: () => new Date(),
+    };
+  }
+
+  /** Копія «чистого» демо-замовлення #1001 з новим номером (не впливає на інші тести). */
+  async function cleanOrder(): Promise<string> {
+    const { handle } = await getDemoRuntime();
+    const db = handle.db;
+    const [src] = await db.select().from(orders).where(eq(orders.orderNumber, "#1001"));
+    const { id: _id, createdAt: _c, updatedAt: _u, ...rest } = src!;
+    const [row] = await db
+      .insert(orders)
+      .values({ ...rest, orderNumber: "#INV-W1", status: "paid", version: 1, automationPaused: false })
+      .returning({ id: orders.id });
+    const items = await db.select().from(orderLineItems).where(eq(orderLineItems.orderId, src!.id));
+    for (const { id: _i, orderId: _o, ...item } of items) {
+      await db.insert(orderLineItems).values({ ...item, orderId: row!.id, shopifyLineItemId: null });
+    }
+    return row!.id;
+  }
+
+  it("shows the number of the created waybill and drops it after the waybill is cancelled", async () => {
+    const ctx = await serviceCtx();
+    const id = await cleanOrder();
+    expect((await load(id)).invoice.waybillNumber).toBeNull();
+    await validateOrderById(ctx, id);
+    const created = await createWaybill(ctx, id);
+    if (created.kind !== "created") throw new Error(`waybill not created: ${created.kind}`);
+    const number = created.shipment.waybillNumber;
+    expect(number).toBeTruthy();
+
+    const data = await load(id);
+    expect(data.orderNumber).toBe("#INV-W1");
+    expect(data.invoice.number).toBe("INV-INV-W1");
+    expect(data.invoice.waybillNumber).toBe(number);
+    const html = await render(id);
+    expect(html).toContain("Waybill / AWB No.");
+    expect(html).toContain(number!);
+    expect(html).not.toContain("Номер накладної з’явиться в інвойсі");
+
+    await cancelWaybill(ctx, created.shipment.id);
+    expect((await load(id)).invoice.waybillNumber).toBeNull();
+    expect(await render(id)).toContain("Номер накладної з’явиться в інвойсі");
+  });
+});
+
+describe("invoice print styles", () => {
+  /** Вміст усіх блоків @media print у styles.css (вкладені фігурні дужки враховуються). */
+  function printBlocks(css: string): string[] {
+    const blocks: string[] = [];
+    for (const m of css.matchAll(/@media print\s*\{/g)) {
+      let depth = 1;
+      let i = m.index + m[0].length;
+      const start = i;
+      while (i < css.length && depth > 0) {
+        if (css[i] === "{") depth++;
+        else if (css[i] === "}") depth--;
+        i++;
+      }
+      blocks.push(css.slice(start, i - 1));
+    }
+    return blocks;
+  }
+
+  it("prints the signature lines black even in the dark theme", () => {
+    const css = fs.readFileSync(path.resolve("app/ui/styles.css"), "utf8");
+    // На екрані лінія — кольору тексту теми (у темній темі майже біла).
+    expect(css).toMatch(/\.ot-invoice__line\s*\{[^}]*border-bottom:\s*1px solid var\(--ot-color-text\)/);
+    const rules = printBlocks(css).flatMap((b) => [...b.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((r) => ({ selectors: r[1]!, body: r[2]! })));
+    const line = rules.filter((r) => r.selectors.split(",").some((sel) => sel.trim() === ".ot-invoice__line"));
+    expect(line.some((r) => /border(-bottom)?-color:\s*#000(000)?\b/.test(r.body))).toBe(true);
   });
 });

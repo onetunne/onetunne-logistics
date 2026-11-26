@@ -34,8 +34,9 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   if (!UUID_RE.test(raw)) throw new Response("Not Found", { status: 404 });
   const orderId = raw.toLowerCase();
   try {
-    const invoice = await loadOrderInvoice(ctx, orderId);
-    const order = await loadOrderRow(ctx.db, orderId);
+    // Номер замовлення для заголовка: loadOrderInvoice його не повертає (лише номер інвойсу), тому окремий
+    // запит за первинним ключем — паралельно з побудовою інвойсу.
+    const [invoice, order] = await Promise.all([loadOrderInvoice(ctx, orderId), loadOrderRow(ctx.db, orderId)]);
     return {
       orderId,
       orderNumber: order.orderNumber,
