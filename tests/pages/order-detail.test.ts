@@ -5,9 +5,19 @@ import { Outlet, StaticRouterProvider, createStaticHandler, createStaticRouter }
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { ActionResult } from "~/components/action-banner";
 import type { ShellData } from "~/components/shell-types";
-import { orders, shipments } from "~/db/schema";
+import { orderLineItems, orders, shipments } from "~/db/schema";
 import { PERMISSIONS } from "~/domain/permissions";
-import { TEST_CARRIER_CODE } from "~/integrations/carriers";
+import { TEST_CARRIER_CODE, createCarrierRegistry } from "~/integrations/carriers";
+import type {
+  CarrierAdapter,
+  CarrierCapabilities,
+  CarrierDocument,
+  CarrierDocumentKind,
+  CarrierMode,
+  CreatedShipment,
+  LookupResult,
+  TrackingSnapshot,
+} from "~/integrations/carriers/types";
 import { resetEnvCache } from "~/lib/env.server";
 import { demoRoleCookie } from "~/server/cookies.server";
 import { getDemoRuntime } from "~/server/demo-runtime.server";
@@ -144,7 +154,8 @@ describe("order detail loader", () => {
     expect(data.items.length).toBeGreaterThan(0);
     expect(data.shipments).toEqual([]);
     expect(data.missingShipperFields).toEqual([]);
-    expect(data.carrier).toEqual({ displayName: expect.any(String), mode: "test", canCreate: true });
+    expect(data.carrier).toEqual({ code: TEST_CARRIER_CODE, displayName: expect.any(String), mode: "test", canCreate: true });
+    expect(data.shopifyPushEnabled).toBe(true);
     expect(data.countries.some((c) => c.code === "FR" && c.postalCodeExample)).toBe(true);
     // Відправник — лише перелік незаповнених полів, без значень налаштувань.
     expect(JSON.stringify(data)).not.toMatch(/accessToken|apiKey|password/i);
@@ -342,5 +353,256 @@ describe("order detail rendering (E2E contracts)", () => {
       expect(html).toContain(number);
       expect(html).not.toContain("Перевірити дані");
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Етап 3: відстеження, фактична передача перевізнику, документи, трек-номер у Shopify
+// ---------------------------------------------------------------------------
+
+const FAKE_CAPABILITIES: CarrierCapabilities = {
+  rates: false,
+  availability: false,
+  createShipment: true,
+  updateShipment: false,
+  cancelShipment: true,
+  documents: true,
+  tracking: true,
+  returns: false,
+  findByReference: false,
+  referenceLookupAuthoritative: false,
+  documentKinds: ["label", "invoice"],
+};
+
+/** Перевізник з відстеженням і документами (лише в тестах; нічого не надсилає). */
+class FakeTrackingCarrier implements CarrierAdapter {
+  readonly capabilities: CarrierCapabilities;
+  constructor(
+    readonly code = "fake_trk",
+    readonly displayName = "Fake tracking carrier",
+    readonly mode: CarrierMode = "test",
+    createShipment = true,
+  ) {
+    this.capabilities = { ...FAKE_CAPABILITIES, createShipment };
+  }
+  private n = 0;
+  snapshots = new Map<string, TrackingSnapshot>();
+  fail = false;
+  async createShipment(): Promise<CreatedShipment> {
+    this.n++;
+    const num = `FTR${String(this.n).padStart(8, "0")}`;
+    return { carrierShipmentId: `fake-${this.n}`, waybillNumber: num, trackingNumber: num, createdAt: new Date() };
+  }
+  async findShipmentByReference(): Promise<LookupResult> {
+    return { found: false, authoritative: false };
+  }
+  async cancelShipment() {
+    return { cancelled: true };
+  }
+  async getTracking(numbers: string[]): Promise<TrackingSnapshot[]> {
+    if (this.fail) throw new Error("carrier down");
+    return numbers.flatMap((n) => (this.snapshots.has(n) ? [this.snapshots.get(n)!] : []));
+  }
+  async getDocument(_ref: unknown, kind: CarrierDocumentKind): Promise<CarrierDocument> {
+    return { kind, format: "pdf", contentType: "application/pdf", content: new TextEncoder().encode("%PDF-1.4 fake"), fileName: `${kind}.pdf` };
+  }
+}
+
+/** Тимчасово додає перевізника в демо-реєстр (і робить його перевізником за замовчуванням). */
+async function withCarrier<T>(adapter: CarrierAdapter, fn: () => Promise<T>): Promise<T> {
+  const runtime = await getDemoRuntime();
+  const original = runtime.carriers;
+  runtime.carriers = createCarrierRegistry([...original.list(), adapter], adapter.code);
+  try {
+    return await fn();
+  } finally {
+    runtime.carriers = original;
+  }
+}
+
+let cloneCounter = 0;
+
+/** Копія «чистого» демо-замовлення #1001 з новим номером (не впливає на інші тести). */
+async function cleanOrder(patch: Partial<typeof orders.$inferInsert> = {}): Promise<string> {
+  const { handle } = await getDemoRuntime();
+  const db = handle.db;
+  const [src] = await db.select().from(orders).where(eq(orders.orderNumber, "#1001"));
+  const { id: _id, createdAt: _c, updatedAt: _u, ...rest } = src!;
+  cloneCounter++;
+  const [row] = await db
+    .insert(orders)
+    .values({ ...rest, orderNumber: `#T3-${cloneCounter}`, status: "paid", version: 1, automationPaused: false, ...patch })
+    .returning({ id: orders.id });
+  const items = await db.select().from(orderLineItems).where(eq(orderLineItems.orderId, src!.id));
+  for (const { id: _i, orderId: _o, ...item } of items) {
+    await db.insert(orderLineItems).values({ ...item, orderId: row!.id, shopifyLineItemId: null });
+  }
+  return row!.id;
+}
+
+async function withWaybill(patch: Partial<typeof orders.$inferInsert> = {}): Promise<{ id: string; shipmentId: string; number: string }> {
+  const id = await cleanOrder(patch);
+  expect(await act(id, { intent: "validate" })).toMatchObject({ ok: true, tone: "success" });
+  const created = await act(id, { intent: "createWaybill" });
+  expect(created).toMatchObject({ ok: true, message: "result.waybill.created" });
+  const data = await load(id);
+  const active = data.shipments.find((s) => s.active);
+  if (!active) throw new Error("no active shipment");
+  return { id, shipmentId: active.id, number: active.waybillNumber ?? "" };
+}
+
+describe("order detail: tracking and handover (stage 3)", () => {
+  it("exposes tracking fields, documents and Shopify state for a test waybill; tracking unsupported", async () => {
+    const { id, shipmentId } = await withWaybill();
+    const data = await load(id);
+    expect(data.shipments[0]).toMatchObject({
+      id: shipmentId,
+      status: "created",
+      trackingStatus: null,
+      carrierStatusCode: null,
+      carrierStatusText: null,
+      lastTrackedAt: null,
+      handedOverAt: null,
+      deliveredAt: null,
+      trackingSupported: false,
+      handoverAvailable: true,
+      trackingEvents: [],
+      documents: [],
+      shopify: { state: "not_applicable", sentAt: null },
+    });
+    expect(await act(id, { intent: "refreshTracking", shipmentId })).toEqual({ ok: false, error: "tracking.notSupported", params: {} });
+    expect(await act(id, { intent: "refreshTracking", shipmentId: "00000000-0000-4000-8000-000000000000" })).toEqual({
+      ok: false,
+      error: "error.notFound",
+    });
+
+    const html = await render(id);
+    expect(html).toContain("Посилку фізично передано перевізнику?");
+    expect(html).toContain("Натискайте лише після того, як посилку фізично передали перевізнику.");
+    expect(html).toContain("Замовлення не з Shopify — у Shopify нічого не надсилається.");
+    expect(html).toContain("Перевізник не підтримує відстеження через API.");
+    expect(html).toContain("Документи перевізника недоступні");
+    expect(html).toContain(`/demo/orders/${id}/invoice`);
+    expect(html).toContain("Комерційний інвойс для друку");
+    expect(html).not.toContain("Оновити статус");
+  });
+
+  it("markHandedOver: staff is refused on the server, owner marks once; Shopify tracking state follows", async () => {
+    const { handle } = await getDemoRuntime();
+    const { id, shipmentId } = await withWaybill({ source: "shopify", shopifyOrderId: "gid://shopify/Order/730001" });
+    expect((await load(id)).shipments[0]?.shopify.state).toBe("after_handover");
+
+    expect(await act(id, { intent: "markHandedOver", shipmentId }, "staff")).toEqual({ ok: false, error: "error.forbidden" });
+    expect((await load(id)).order.status).toBe("waybill_created");
+
+    expect(await act(id, { intent: "markHandedOver", shipmentId })).toEqual({
+      ok: true,
+      message: "tracking.result.handedOver",
+      extra: ["tracking.result.shopifyQueued"],
+      tone: "success",
+    });
+    let data = await load(id);
+    expect(data.order.status).toBe("handed_to_carrier");
+    expect(data.shipments[0]).toMatchObject({ handoverAvailable: false, shopify: { state: "pending", sentAt: null } });
+    expect(data.shipments[0]?.handedOverAt).toBeInstanceOf(Date);
+    expect(data.history.events.find((e) => e.type === "handed_over")).toMatchObject({ message: "manual" });
+
+    expect(await act(id, { intent: "markHandedOver", shipmentId })).toEqual({ ok: false, error: "shipment.alreadyHandedOver", params: {} });
+
+    const sentAt = new Date("2026-11-21T10:00:00Z");
+    await handle.db.update(shipments).set({ shopifyFulfilledAt: sentAt }).where(eq(shipments.id, shipmentId));
+    data = await load(id);
+    expect(data.shipments[0]?.shopify).toEqual({ state: "sent", sentAt });
+
+    const html = await render(id);
+    expect(html).toContain("Посилку передано перевізнику");
+    expect(html).toContain("підтвердив менеджер");
+    expect(html).not.toContain("Посилку фізично передано перевізнику?");
+    expect(html).not.toContain("Скасувати накладну");
+  });
+
+  it("refreshTracking with a tracking carrier: status, events newest first, handover by the carrier, documents", async () => {
+    const carrier = new FakeTrackingCarrier();
+    await withCarrier(carrier, async () => {
+      const { id, shipmentId, number } = await withWaybill();
+      let data = await load(id);
+      expect(data.shipments[0]).toMatchObject({ trackingSupported: true, documents: ["label", "invoice"], carrierName: "Fake tracking carrier" });
+
+      // Перевізник ще не знає номера — статус не змінився (лише час перевірки).
+      expect(await act(id, { intent: "refreshTracking", shipmentId }, "staff")).toEqual({
+        ok: true,
+        message: "tracking.result.unchanged",
+        tone: "info",
+      });
+      expect((await load(id)).shipments[0]?.lastTrackedAt).toBeInstanceOf(Date);
+
+      carrier.snapshots.set(number, {
+        waybillNumber: number,
+        status: "in_transit",
+        carrierStatusCode: "5",
+        carrierStatusText: "Прямує до країни призначення",
+        statusAt: new Date("2026-11-20T10:00:00Z"),
+        events: [
+          { status: "created", code: "1", occurredAt: new Date("2026-11-20T08:00:00Z"), location: null, description: "Створено" },
+          { status: "accepted", code: "4", occurredAt: new Date("2026-11-20T09:00:00Z"), location: "Kyiv, UA", description: "Прийнято" },
+          { status: "in_transit", code: "5", occurredAt: new Date("2026-11-20T10:00:00Z"), location: "Kyiv, UA", description: "У дорозі" },
+        ],
+      });
+      expect(await act(id, { intent: "refreshTracking", shipmentId })).toEqual({
+        ok: true,
+        message: "tracking.result.updated",
+        extra: ["tracking.result.handedOverByCarrier"],
+        tone: "success",
+      });
+      data = await load(id);
+      expect(data.order.status).toBe("in_transit");
+      const s = data.shipments[0]!;
+      expect(s).toMatchObject({
+        trackingStatus: "in_transit",
+        carrierStatusCode: "5",
+        carrierStatusText: "Прямує до країни призначення",
+        handoverAvailable: false,
+      });
+      expect(s.handedOverAt?.toISOString()).toBe("2026-11-20T09:00:00.000Z");
+      expect(s.trackingEvents.map((e) => [e.status, e.code])).toEqual([
+        ["in_transit", "5"],
+        ["accepted", "4"],
+        ["created", "1"],
+      ]);
+      expect(Object.keys(s.trackingEvents[0]!).sort()).toEqual(["code", "description", "id", "location", "occurredAt", "status"]);
+      expect(data.history.events.find((e) => e.type === "tracking_status")).toMatchObject({ trackingStatus: "in_transit" });
+
+      // Повторне оновлення без змін і збій перевізника.
+      expect(await act(id, { intent: "refreshTracking", shipmentId })).toMatchObject({ ok: true, message: "tracking.result.unchanged" });
+      carrier.fail = true;
+      expect(await act(id, { intent: "refreshTracking", shipmentId })).toEqual({ ok: false, error: "tracking.carrierUnavailable", params: {} });
+      carrier.fail = false;
+
+      const html = await render(id);
+      expect(html).toContain("Оновити статус");
+      expect(html).toContain("Події перевізника");
+      expect(html).toContain("Прямує до країни призначення (код 5)");
+      expect(html).toContain("Прийнято перевізником");
+      expect(html).toContain("Етикетка (маркування)");
+      expect(html).toContain("Комерційний інвойс перевізника");
+      expect(html).not.toContain("Посилку фізично передано перевізнику?");
+    });
+  });
+
+  it("explains that real Nova Post waybills are disabled until the owner enables them", async () => {
+    const id = await cleanOrder();
+    expect(await act(id, { intent: "validate" })).toMatchObject({ ok: true });
+    // Nova Post без дозволу на створення накладних (як у робочому режимі без NOVA_POST_SHIPMENTS_ENABLED).
+    await withCarrier(new FakeTrackingCarrier("nova_post", "Nova Post", "live", false), async () => {
+      const data = await load(id);
+      expect(data.carrier).toEqual({ code: "nova_post", displayName: "Nova Post", mode: "live", canCreate: false });
+      const html = await render(id);
+      expect(html).toContain("Nova Post: створення реальних накладних вимкнено");
+      expect(html).toContain("NOVA_POST_SHIPMENTS_ENABLED=true");
+      expect(html).not.toContain("Створити накладну");
+      expect(html).not.toContain("Створити тестову накладну");
+    });
+    // Тестовий перевізник демо — без змін.
+    expect(await render(id)).toContain("Створити тестову накладну");
   });
 });

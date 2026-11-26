@@ -2425,3 +2425,260 @@ textarea.ot-input {
     break-inside: avoid;
   }
 }
+
+/* ==========================================================================
+   Комерційний інвойс для друку (app/pages/order-invoice.tsx)
+   На екрані — аркуш у темі застосунку; у друці — лише документ, чорним на білому, A4.
+   ========================================================================== */
+
+.ot-invoice {
+  width: 100%;
+  max-width: 210mm;
+  min-width: 0;
+  margin: 0 auto;
+  padding: var(--ot-space-5);
+  background: var(--ot-color-surface);
+  color: var(--ot-color-text);
+  border: 1px solid var(--ot-color-border);
+  border-radius: var(--ot-radius-card);
+  box-shadow: var(--ot-shadow-card);
+  font-size: var(--ot-font-size-sm);
+  line-height: 1.45;
+}
+
+.ot-invoice p {
+  margin: 0;
+}
+
+.ot-invoice__header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: var(--ot-space-4);
+  padding-bottom: var(--ot-space-4);
+  border-bottom: 2px solid var(--ot-color-text);
+}
+
+.ot-invoice__title {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.2;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.ot-invoice__meta,
+.ot-invoice__totals {
+  display: grid;
+  gap: 2px var(--ot-space-4);
+  margin: 0;
+}
+
+.ot-invoice__meta-row {
+  display: grid;
+  grid-template-columns: minmax(120px, auto) minmax(0, 1fr);
+  gap: var(--ot-space-3);
+}
+
+.ot-invoice__meta-row dt {
+  color: var(--ot-color-text-subdued);
+}
+
+.ot-invoice__meta-row dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
+.ot-invoice__parties {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--ot-space-4);
+  padding: var(--ot-space-4) 0;
+  border-bottom: 1px solid var(--ot-color-border-strong);
+}
+
+.ot-invoice__party {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ot-invoice__label {
+  display: block;
+  margin: 0 0 var(--ot-space-1);
+  font-size: var(--ot-font-size-caption);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ot-color-text-subdued);
+}
+
+.ot-invoice__party-name {
+  font-weight: 600;
+}
+
+.ot-invoice__table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  padding: var(--ot-space-4) 0;
+}
+
+.ot-invoice__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.ot-invoice__table th,
+.ot-invoice__table td {
+  padding: var(--ot-space-1) var(--ot-space-2);
+  border: 1px solid var(--ot-color-border-strong);
+  text-align: start;
+  vertical-align: top;
+}
+
+.ot-invoice__table th {
+  font-size: var(--ot-font-size-caption);
+  font-weight: 600;
+  background: var(--ot-color-surface-subdued);
+}
+
+.ot-invoice__num {
+  text-align: end !important;
+  white-space: nowrap;
+}
+
+.ot-invoice__desc {
+  display: block;
+  font-weight: 600;
+}
+
+.ot-invoice__sub {
+  display: block;
+  font-size: var(--ot-font-size-caption);
+  color: var(--ot-color-text-subdued);
+}
+
+.ot-invoice__totals {
+  width: 100%;
+  max-width: 340px;
+  margin-left: auto;
+}
+
+.ot-invoice__totals .ot-invoice__meta-row dd {
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+}
+
+.ot-invoice__grand {
+  padding-top: var(--ot-space-1);
+  border-top: 1px solid var(--ot-color-text);
+}
+
+.ot-invoice__declaration {
+  margin-top: var(--ot-space-5);
+  padding-top: var(--ot-space-4);
+  border-top: 1px solid var(--ot-color-border-strong);
+}
+
+.ot-invoice__signature {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--ot-space-5);
+  margin-top: var(--ot-space-6);
+}
+
+.ot-invoice__line {
+  display: block;
+  height: 0;
+  margin-bottom: var(--ot-space-1);
+  border-bottom: 1px solid var(--ot-color-text);
+}
+
+.ot-invoice__missing {
+  color: var(--ot-color-critical);
+  font-weight: 600;
+}
+
+@media (max-width: 599.98px) {
+  .ot-invoice {
+    padding: var(--ot-space-3);
+  }
+}
+
+@media print {
+  @page {
+    size: A4;
+    margin: 12mm;
+  }
+
+  .ot-no-print,
+  .ot-shell__footer,
+  .ot-shell:has(.ot-invoice-page) .ot-shell__banner,
+  .ot-invoice-page .ot-page__header {
+    display: none !important;
+  }
+
+  .ot-shell:has(.ot-invoice-page) .ot-shell__content {
+    padding: 0 !important;
+  }
+
+  .ot-shell:has(.ot-invoice-page) .ot-shell__main {
+    min-height: 0;
+  }
+
+  .ot-invoice-page,
+  .ot-invoice {
+    max-width: none;
+  }
+
+  .ot-invoice {
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    background: #ffffff;
+    color: #000000;
+    font-size: 9.5pt;
+  }
+
+  .ot-invoice__meta-row dt,
+  .ot-invoice__label,
+  .ot-invoice__sub,
+  .ot-invoice__missing {
+    color: #000000;
+  }
+
+  .ot-invoice__header,
+  .ot-invoice__grand {
+    border-color: #000000;
+  }
+
+  .ot-invoice__table th,
+  .ot-invoice__table td,
+  .ot-invoice__parties,
+  .ot-invoice__declaration {
+    border-color: #555555;
+  }
+
+  .ot-invoice__table th {
+    background: #eeeeee;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .ot-invoice__table-wrap {
+    overflow: visible;
+  }
+
+  .ot-invoice__table thead {
+    display: table-header-group;
+  }
+
+  .ot-invoice__table tr,
+  .ot-invoice__totals,
+  .ot-invoice__declaration {
+    break-inside: avoid;
+  }
+}
