@@ -90,9 +90,23 @@ tests/            unit + інтеграційні тести (PGlite)
 - Тести етапу 2 — `tests/stage2` з імітацією Admin API (`fixtures.ts`); реальний API перевіряє власник на тестовому магазині.
 
 ## Етап 3 (перевізник)
-- Аналіз API: `docs/carrier-api-analysis.md`. Документація: nova.global/partners_api (розділи `_<name>_en.html`),
-  api-portal.novapost.com (`.md`-версії сторінок, `llms.txt`). Хости дозволено в середовищі `onetunne-logistics`.
-- Nova Post API v1.0: `integrations/carriers/nova-post/` (JWT-клієнт, розрахунок вартості, перевірка ключа при старті).
+- Аналіз API: `docs/carrier-api-analysis.md`; архітектура перевізників: `docs/carrier-architecture.md`.
+  Документація: nova.global/partners_api (розділи `_<name>_en.html`), api-portal.novapost.com (`.md`-версії, `llms.txt`),
+  shopify.dev (`.md`). Хости дозволено в середовищі `onetunne-logistics`.
+- Nova Post API v1.0: `integrations/carriers/nova-post/` — `client.server.ts` (JWT, таймаути, маскування секретів),
+  `mapping.ts` (чисте відображення запитів/відповідей), `tracking-codes.ts`, `adapter.server.ts` (NovaPostAdapter).
+  Реєструється в production лише з `NOVA_POSHTA_API_KEY`; РЕАЛЬНЕ створення накладних — лише з
+  `NOVA_POST_SHIPMENTS_ENABLED=true` (окремий дозвіл власника), інакше `not_configured` без мережевого запиту.
+- Класифікація помилок створення критична для дублікатів: сумнівне → `unknown_outcome` (звірка/ручний розгляд),
+  `rejected` — лише коли перевізник точно відхилив дані. Пошук за `clientOrder` неавторитетний.
+- Митниця: `modules/customs/invoice.ts` (інвойс, митні позиції), `address-parts.ts` (вулиця/будинок — лише однозначно).
+  Nova Post: HS 8–10 цифр, вага позицій = вага посилки, адреса реєстрації для DE/SK/HU/FR — лише з налаштування власника.
+- Тарифи Checkout: `modules/rates/*` + `routes/carrier-service.tsx` (CarrierService; запит Shopify не підписаний →
+  секретний токен у шляху, маскується в журналах). Підключення до магазину — лише кнопкою власника.
+- Відстеження: `modules/tracking/tracking.server.ts` (завдання `tracking.poll`), статус «Передано перевізнику» — лише за
+  фактом. Трек-номер у Shopify: `modules/shopify-sync/fulfillment.server.ts` (fulfillmentCreate, звірка за трек-номером,
+  `notifyCustomer` за замовчуванням false).
+- Документи: `pages/order-document.tsx` (PDF перевізника через fetch), `pages/order-invoice.tsx` (друк інвойсу).
 - Nova Global Partners API: Basic auth + company_id за договором; поки `not_configured`.
 
 ## Нотатки для наступних етапів
