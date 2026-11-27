@@ -16,6 +16,8 @@ import {
   stockReservations,
   warehouses,
 } from "~/db/schema";
+import { DEMO_MATERIAL_HISTORY, DEMO_PRODUCTION_HISTORY } from "~/db/seed/demo-history.server";
+import { DEMO_MATERIALS } from "~/db/seed/demo-warehouse.server";
 import { makeActor, type Actor } from "~/domain/permissions";
 import { DICTIONARIES } from "~/i18n";
 import { STOCK_LEVEL_STATUSES } from "~/modules/inventory/alerts";
@@ -737,9 +739,25 @@ describe("movement history", () => {
     expect(byActor.actors.map((a) => a.id)).toContain(STAFF.id);
     const materials = await loadHistory("?kind=material");
     for (const r of materials.rows) expect(r.itemKind).toBe("material");
-    // Дата за Києвом: сьогодні є рухи, завтра — немає.
+    // Дата за Києвом: сьогодні є рухи, завтра — немає. Рухи вигаданої історії демо (виробництво, витрата матеріалів,
+    // db/seed/demo-history.server.ts) — у минулих днях: «сьогодні» + «до вчора» = усі.
     const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Kyiv" }).format(new Date());
-    expect((await loadHistory(`?from=${today}&to=${today}`)).total).toBe(all.total);
+    const yesterday = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Kyiv" }).format(new Date(Date.now() - 24 * 3600 * 1000));
+    const todayTotal = (await loadHistory(`?from=${today}&to=${today}`)).total;
+    const earlierTotal = (await loadHistory(`?to=${yesterday}`)).total;
+    expect(todayTotal).toBeGreaterThan(0);
+    // У минулих днях — рівно рухи історії: запуск кожної позиції, надходження кожного рядка, списання кожного рядка з
+    // браком, витрата матеріалів і перенесені назад opening матеріалів (opening товарів — сьогодні, як знімок).
+    const plans = DEMO_PRODUCTION_HISTORY;
+    const historyMovements =
+      plans.reduce((s, b) => s + b.lines.length, 0) +
+      plans.reduce((s, b) => s + b.receipts.reduce((n, r) => n + r.lines.length, 0), 0) +
+      plans.reduce((s, b) => s + b.receipts.reduce((n, r) => n + r.lines.filter((l) => (l.defective ?? 0) > 0).length, 0), 0) +
+      DEMO_MATERIAL_HISTORY.reduce((s, d) => s + Object.keys(d.use).length, 0) +
+      DEMO_MATERIALS.length;
+    expect(historyMovements).toBe(5 + 6 + 3 + 44 + 9);
+    expect(earlierTotal).toBe(historyMovements);
+    expect(todayTotal + earlierTotal).toBe(all.total);
     const tomorrow = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Kyiv" }).format(new Date(Date.now() + 36 * 3600 * 1000));
     expect((await loadHistory(`?from=${tomorrow}`)).total).toBe(0);
     expect((await loadHistory("?from=2026-02-30")).filters.from).toBeNull();

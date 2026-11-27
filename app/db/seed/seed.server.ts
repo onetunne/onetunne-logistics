@@ -60,6 +60,7 @@ import {
   type DemoOrderSeed,
 } from "./demo-data";
 import { isDemoWarehouseSeeded, seedDemoWarehouse, upgradeDemoWarehouseForCollections } from "./demo-warehouse.server";
+import { seedDemoWarehouseHistory } from "./demo-history.server";
 
 /** Довідкові дані, потрібні в обох режимах (ідемпотентно; наявні записи не перезаписуються). */
 export async function seedReferenceData(db: Db, settingsOverrides: Partial<AllSettings> = {}): Promise<void> {
@@ -244,6 +245,9 @@ export async function seedDemoData(ctx: ServiceContext): Promise<void> {
   await seedDemoWarehouse(ctx);
   // Демо-база зі складом, заповнена до появи колекцій: шаблони «на колекцію» й габарити варіантів — один раз.
   if (collectionsCreated && warehouseSeededBefore) await upgradeDemoWarehouseForCollections(ctx);
+  // Етап 5: вигадана історія виробництва (90 днів) і витрати матеріалів (30 днів) — після складу (облік уже відкрито);
+  // окремо ідемпотентно — і для демо-баз зі складом, заповнених до її появи (один раз). Кінцеві залишки не змінюються.
+  await seedDemoWarehouseHistory(ctx);
 }
 
 /**

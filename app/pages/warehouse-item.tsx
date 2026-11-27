@@ -34,7 +34,7 @@ import {
   type StockTrackingState,
   type WriteOffReason,
 } from "~/modules/warehouse/constants";
-import { movementDeltaParts, reasonKey, signedNumber } from "~/modules/warehouse/format";
+import { movementDeltaParts, reasonKey, receivePreview, signedNumber } from "~/modules/warehouse/format";
 import { findOrderByNumber } from "~/modules/warehouse/lookup.server";
 import {
   OPERATION_PERMISSIONS,
@@ -934,6 +934,8 @@ function ReceiveForm({
   const d = asInt(damaged) ?? 0;
   const orderLinked = ORDER_LINKED_REASONS.includes(reason);
   const shopifyReturn = pushesToShopify && (SHOPIFY_RESTOCK_REASONS as readonly string[]).includes(reason);
+  // Для матеріалу — без «доступно» (резервів немає; «доступно для продажу» стосується товарів).
+  const preview = receivePreview(item, q, d);
   return (
     <Form method="post">
       <OperationFields intent="receive" operationId={operationId} />
@@ -1038,11 +1040,7 @@ function ReceiveForm({
           />
         ) : null}
         <NoteField id="wh-receive-note" />
-        {q + d > 0 ? (
-          <Text variant="body-sm">
-            {t("warehouse.op.receive.preview", { onHand: item.onHand + q, available: item.available + q, defective: item.defective + d })}
-          </Text>
-        ) : null}
+        {q + d > 0 ? <Text variant="body-sm">{t(preview.key, preview.params)}</Text> : null}
         <div>
           <Button type="submit" variant="primary" loading={busy} disabled={busy || q + d === 0}>
             {t("warehouse.op.receive.submit")}

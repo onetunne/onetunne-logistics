@@ -402,6 +402,8 @@ const num = (s) => {
 };
 
 /** Дата за київським часом через n днів у форматі інтерфейсу (ДД.ММ.РРРР). */
+// Номер засіяної партії «у виробництві» — PB-<рік за Києвом>-0001 (seedDemoWarehouse), не прив'язуємося до 2026.
+const SEEDED_BATCH = `PB-${new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Kyiv", year: "numeric" }).format(new Date())}-0001`;
 const kyivDate = (n = 0) =>
   new Intl.DateTimeFormat("uk-UA", { timeZone: "Europe/Kyiv", day: "2-digit", month: "2-digit", year: "numeric" }).format(new Date(Date.now() + n * 86_400_000));
 /** Дата збігається з «сьогодні + n» (±1 день — запас на північ і округлення прогнозу). */
@@ -434,6 +436,20 @@ async function pickRows(page) {
 const today = () => new Date(Date.now() + 2 * 3600_000).toISOString().slice(0, 10);
 const inDays = (n) => new Date(Date.now() + n * 86_400_000).toISOString().slice(0, 10);
 const COST_RE = /собіварт|₴|\bUAH\b|unit cost|cost per/i;
+/**
+ * Вигадана історія демо (app/db/seed/demo-history.server.ts), уже наявна в новому демо: дві завершені партії
+ * (надходження 62/57 днів тому — вчасно; 19 днів тому — із запізненням) і витрата матеріалів за 30 днів.
+ * Числа — з DEMO_PRODUCTION_HISTORY / DEMO_MATERIAL_HISTORY (тест tests/stage5/seed-production-history.test.ts).
+ */
+const DEMO_HISTORY = {
+  good90: 114, defective90: 4, completed90: 2, onTime90: 1,
+  good30: 22, defective30: 1,
+  boltsUsed30: 6,
+  fenderBatches: 1,
+  // Власник, аналітика: «Вартість запасу» — 5 товарів історії за собівартістю останнього надходження, решта — без неї.
+  inventoryValue: "28 931,21 грн",
+  valueMissing: "Без собівартості: 4 позиції (61 шт.)",
+};
 
 // ---------------------------------------------------------------------------
 // Сценарій
@@ -489,6 +505,8 @@ try {
     state.kpi = { atRisk: Number(risk?.[2]), out: Number(risk?.[1]), recs: Number(rec?.[2]), units: num(rec?.[1]) };
     ck(state.kpi.atRisk === 2 && state.kpi.out === 0, `KPI: 2 at risk, 0 out of stock (${JSON.stringify(state.kpi)})`);
     ck(state.kpi.recs === 2 && state.kpi.units === 40, `KPI: 2 items / 40 units to produce (${JSON.stringify(state.kpi)})`);
+    const valueKpi = txt.match(/Вартість запасу.{0,120}/)?.[0] ?? "—";
+    ck(valueKpi.includes(DEMO_HISTORY.inventoryValue) && valueKpi.includes(DEMO_HISTORY.valueMissing), `owner KPI «Вартість запасу» = ${DEMO_HISTORY.inventoryValue}, ${DEMO_HISTORY.valueMissing} (${valueKpi})`);
 
     const riskRows = (await tableRows(p, "Позиції під ризиком")) ?? [];
     const bagRisk = riskRows.find((r) => r._text.includes("OT-BG-BLK"));
@@ -868,19 +886,30 @@ try {
     const stats = async () => (await p.locator("main section", { hasText: "Статистика виробництва" }).last().innerText()).replace(/\s+/g, " ");
     let t = await stats();
     // Партія E2E: 8 якісних + 2 браку, потім решта 10 + 10 — разом 28 якісних і 2 браку; отримано до планової дати.
+    // Плюс вигадана історія демо (DEMO_HISTORY): 90 днів — 114 якісних і 4 браку, 2 завершені партії (1 вчасно).
     const good = num(t.match(/([\d\s]+) Отримано якісних/)?.[1]);
-    ck(good === 28, `good units received = 28 (${good}; ${t.slice(0, 200)})`);
-    ck(/Брак \(частка\)/.test(t) && /\b2 \(6[,.]\d+\s?%\)/.test(t), `defective 2 (6,7 %) shown (${t.match(/[^.]{0,40}Брак \(частка\)[^.]{0,40}/)?.[0]})`);
-    ck(/1 з 1 з плановою датою/.test(t), "1 of 1 batches with a planned date received on time");
-    ck(/Брак за моделями/.test(t) && /Брак за кольорами/.test(t) && /Model X/.test(t) && /Чорний/.test(t), "defects by model and by colour");
+    const good90 = 28 + DEMO_HISTORY.good90;
+    ck(good === good90, `good units received = ${good90} (E2E 28 + demo history ${DEMO_HISTORY.good90}) (${good}; ${t.slice(0, 200)})`);
+    const defective90 = 2 + DEMO_HISTORY.defective90;
+    const rate90 = ((defective90 * 100) / (good90 + defective90)).toFixed(1).replace(".", ",");
+    ck(
+      /Брак \(частка\)/.test(t) && new RegExp(`\\b${defective90} \\(${rate90}\\s?%\\)`).test(t),
+      `defective ${defective90} (${rate90} %) shown (${t.match(/[^.]{0,40}Брак \(частка\)[^.]{0,40}/)?.[0]})`,
+    );
+    const onTime = 1 + DEMO_HISTORY.onTime90;
+    const completed = 1 + DEMO_HISTORY.completed90;
+    ck(new RegExp(`${onTime} з ${completed} з плановою датою`).test(t), `${onTime} of ${completed} batches with a planned date received on time (E2E + demo history)`);
+    ck(/із запізненням: 1/.test(t), "the late demo history batch is counted as late");
+    ck(/Брак за моделями/.test(t) && /Брак за кольорами/.test(t) && /Model X/.test(t) && /10x2\.5/.test(t) && /Чорний/.test(t) && /Сірий/.test(t), "defects by model and by colour");
     ck(/Собівартість отриманого/.test(t), "owner sees the cost of units received");
-    for (const [label, period] of [["30 днів", "30"], ["Рік", "365"]]) {
+    for (const [label, period, expected] of [["30 днів", "30", 28 + DEMO_HISTORY.good30], ["Рік", "365", good90]]) {
       await p.locator("main a", { hasText: new RegExp(`^${label}$`) }).first().click();
       await p.waitForURL(new RegExp(`stats=${period}`));
       await settle(p);
       await p.waitForTimeout(250);
       t = await stats();
-      ck(num(t.match(/([\d\s]+) Отримано якісних/)?.[1]) === 28, `period ${label}: same receipts (today) counted`);
+      const got = num(t.match(/([\d\s]+) Отримано якісних/)?.[1]);
+      ck(got === expected, `period ${label}: E2E receipts (today) + demo history in the period = ${expected} (${got})`);
     }
   });
 
@@ -896,11 +925,11 @@ try {
       return listRows();
     };
     let rows = await filter("model", "Model S");
-    ck(rows.length === 1 && rows[0].includes("PB-2026-0001"), `model=Model S → seeded batch only (${rows.length})`);
+    ck(rows.length === 1 && rows[0].includes(SEEDED_BATCH), `model=Model S → seeded batch only (${rows.length})`);
     rows = await filter("color", "Білий");
-    ck(rows.length === 1 && rows[0].includes("PB-2026-0001"), `colour=Білий → seeded batch only (${rows.length})`);
+    ck(rows.length === 1 && rows[0].includes(SEEDED_BATCH), `colour=Білий → seeded batch only (${rows.length})`);
     rows = await filter("product", "Крило заднє");
-    ck(rows.length === 2, `product=Крило заднє → both batches with fenders (${rows.length})`);
+    ck(rows.length === 2 + DEMO_HISTORY.fenderBatches, `product=Крило заднє → seeded, E2E and demo history batches with fenders (${rows.length})`);
     rows = await filter("q", null);
     ck(rows.length === 1 && rows[0].includes("E2E batch"), `search «E2E batch» → the E2E batch (${rows.length})`);
 
@@ -1364,7 +1393,8 @@ try {
     await go(p, state.materialHref);
     const t = await mainText(p);
     const used = num(t.match(/([\d\s]+) Витрачено за 30 днів/)?.[1] ?? t.match(/Витрачено за 30 днів ([\d\s]+)/)?.[1]);
-    ck(used === 1, `bolts used in the last 30 days = 1 (#1002) (${used}; ${t.match(/.{0,30}Витрачено за 30 днів.{0,30}/)?.[0]})`);
+    const boltsUsed = DEMO_HISTORY.boltsUsed30 + 1;
+    ck(used === boltsUsed, `bolts used in the last 30 days = ${boltsUsed} (demo history ${DEMO_HISTORY.boltsUsed30} + #1002) (${used}; ${t.match(/.{0,30}Витрачено за 30 днів.{0,30}/)?.[0]})`);
     ck(/Вистачить на, днів/.test(t) && !/Витрат не було — прогнозу немає/.test(t), "days-of-stock forecast shown (usage exists)");
     ck(!/Доступно для продажу/.test(t) && !/Зарезервовано/.test(t), "material card without product-only figures (available / reserved)");
     await go(p, "/demo/warehouse/materials");
@@ -1768,6 +1798,9 @@ try {
     "Чорний", "Білий", "Чорні", "Сірі", "Сірий", "Чорна", "Стандарт", "Коробка S", "Коробка M", "Коробка L", "Пакет-конверт M",
     "Наклейка з логотипом", "Інструкція з монтажу крила", "Візитка «Дякуємо»", "Болти M5 (комплект)", "Скотч пакувальний",
     "Стандартний комплект", "Крило: болти та інструкція", "Тримачі білі та крила Model S", "Демо-виробник", "Основний склад",
+    // Вигадана історія виробництва демо (назви партій, примітка, причини браку в примітках рухів).
+    "Грипси й тримачі чорні", "Крила Model X і покришки", "DEMO · історія виробництва", "Потертості на поверхні",
+    "Тріщина кріплення", "Деформація кронштейна",
     // Етап 5: вигадані колекції й шаблони «на колекцію».
     "Крила та захист", "Аксесуари на кермо", "Шини та колеса", "Світло та безпека", "Шини: фіксація скотчем",
     "Крило Model S: скотч для кронштейна",

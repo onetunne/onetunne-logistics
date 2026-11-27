@@ -136,6 +136,24 @@ describe("materials: usage over 30 days and days left (S5-PKG)", () => {
     expect(makeT("uk")("warehouseInsights.material.daysLeftValue", { days: 21 })).toBe("Вистачить на 21 день");
   });
 
+  it("low-stock threshold is a caption under the stock, not a separate column (the table fits 1280 px with actions)", async () => {
+    for (const locale of ["uk", "en"] as const) {
+      setContext(OWNER, locale);
+      const t = makeT(locale);
+      const route = { path: "warehouse/materials", loader: materialsPage.loader, action: materialsPage.action, Component: materialsPage.default };
+      const html = await renderPage(route as never, "/demo/warehouse/materials?q=MU-", OWNER, locale);
+      // Типовий поріг (матеріали MU-* без власного порогу) — підпис «Поріг «мало»: N (типовий)» у клітинці залишку.
+      const caption = t("packaging.materials.thresholdCaption", { value: t("packaging.materials.thresholdDefault", { value: "5" }) });
+      expect(html, locale).toContain(esc(caption));
+      const headers = [...html.matchAll(/<th\b[^>]*>([\s\S]*?)<\/th>/g)].map((mm) => mm[1]!.replace(/<[^>]+>/g, "").trim());
+      const thresholdHeader = locale === "uk" ? "Поріг «мало»" : "Low-stock threshold";
+      expect(headers.some((hh) => hh.includes(thresholdHeader)), headers.join(" | ")).toBe(false);
+      expect(headers).toContain(t("packaging.materials.col.stock"));
+      expect(headers).toContain(t("common.actions"));
+    }
+    expect(makeT("uk")("packaging.materials.thresholdCaption", { value: "7" })).toBe("Поріг «мало»: 7");
+  });
+
   it("material card: on hand, defective, usage and days left — no available / reserved / in production", async () => {
     for (const actor of [OWNER, STAFF]) {
       setContext(actor);

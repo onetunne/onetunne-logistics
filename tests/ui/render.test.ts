@@ -393,4 +393,16 @@ describe("mobile CSS contracts (app/ui/styles.css)", () => {
     expect(css).toMatch(/\.ot-tabs__list\[data-fade="end"\] \{[^}]*mask-image/);
     expect(css).toMatch(/@media \(max-width: 599\.98px\) \{[^@]*\.ot-invoice__scroll-hint \{\s*display: block;/);
   });
+
+  it("table scroll box contains absolutely positioned descendants (hidden field labels) — no page-wide horizontal scroll", async () => {
+    const fs = await import("node:fs");
+    const css = fs.readFileSync("app/ui/styles.css", "utf8");
+    // Без position на .ot-dt__scroll підпис .ot-visually-hidden (position: absolute) поля в рядку таблиці
+    // позиціюється відносно зовнішнього блоку, не обрізається прокруткою таблиці й розширює сторінку
+    // (E2E R7: власник, «Пакувальні матеріали», 1024 px — прокрутка сторінки на 70 px).
+    const rule = css.match(/(?:^|\n)\.ot-dt__scroll \{([^}]*)\}/)?.[1] ?? "";
+    expect(rule).toMatch(/overflow-x: auto;/);
+    expect(rule).toMatch(/position: relative;/);
+    expect(css).toMatch(/\.ot-visually-hidden \{[^}]*position: absolute !important;/);
+  });
 });

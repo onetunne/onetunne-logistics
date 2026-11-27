@@ -9,6 +9,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { auditLog, inventoryMovements, orders } from "~/db/schema";
 import { makeActor } from "~/domain/permissions";
 import { inventoryKeys } from "~/modules/inventory/keys";
+import { kyivYear } from "~/modules/production/calc";
 import { setOrderAutomationPaused } from "~/modules/orders/workflow.server";
 import { updateSetting } from "~/modules/settings/settings.server";
 import { ASSISTANT_TOOLS, runAssistantTool, toolDefinitionsFor } from "~/modules/assistant/tools.server";
@@ -31,7 +32,7 @@ let env: TestEnv;
 let batchNumber: string;
 beforeAll(async () => {
   env = await createTestEnv();
-  batchNumber = `PB-${new Date().getUTCFullYear()}-0001`;
+  batchNumber = `PB-${kyivYear(new Date())}-0001`;
   await insertProduct(env.handle.db, "Duplicate SKU one", [{ sku: "DUP-1" }]);
   await insertProduct(env.handle.db, "Duplicate SKU two", [{ sku: "dup-1" }]);
 });

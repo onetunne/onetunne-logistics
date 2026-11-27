@@ -374,16 +374,27 @@ export default function MaterialsPage() {
     {
       key: "stock",
       header: t("packaging.materials.col.stock"),
+      // Поріг «мало» — підписом під залишком (окрема колонка не вміщалася на ПК 1280 px разом із діями).
       render: (r) => (
-        <Stack as="span" direction="horizontal" gap={2} align="center">
-          <Text as="span" numeric weight="semibold">
-            {formatNumber(r.onHand, locale)} {unitLabel(r.unit)}
+        <Stack as="span" gap={1}>
+          <Stack as="span" direction="horizontal" gap={2} align="center">
+            <Text as="span" numeric weight="semibold">
+              {formatNumber(r.onHand, locale)} {unitLabel(r.unit)}
+            </Text>
+            {r.active ? (
+              <Badge size="sm" tone={STATUS_TONE[r.status] ?? "neutral"}>
+                {t(`stockLevel.${r.status}`)}
+              </Badge>
+            ) : null}
+          </Stack>
+          <Text as="span" variant="caption" tone="subdued" numeric>
+            {t("packaging.materials.thresholdCaption", {
+              value:
+                r.lowStockThreshold === null
+                  ? t("packaging.materials.thresholdDefault", { value: formatNumber(r.threshold, locale) })
+                  : formatNumber(r.threshold, locale),
+            })}
           </Text>
-          {r.active ? (
-            <Badge size="sm" tone={STATUS_TONE[r.status] ?? "neutral"}>
-              {t(`stockLevel.${r.status}`)}
-            </Badge>
-          ) : null}
         </Stack>
       ),
     },
@@ -408,13 +419,6 @@ export default function MaterialsPage() {
             {t("warehouseInsights.material.noUsage")}
           </Text>
         ),
-    },
-    {
-      key: "threshold",
-      header: t("packaging.materials.col.threshold"),
-      hideOnMobile: true,
-      render: (r) =>
-        r.lowStockThreshold === null ? t("packaging.materials.thresholdDefault", { value: r.threshold }) : formatNumber(r.threshold, locale),
     },
     {
       key: "box",

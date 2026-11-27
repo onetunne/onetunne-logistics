@@ -1770,7 +1770,11 @@ textarea.ot-input {
   min-width: 0;
 }
 
+/* position: relative — блок прокрутки стає контейнером для абсолютно позиційованих нащадків (ot-visually-hidden
+   підписи полів у рядках, напр. «Надійшло» в «Пакувальних матеріалах»): інакше вони виходять за межі прокрутки
+   таблиці й дають горизонтальну прокрутку всієї сторінки (власник, 1024 px: +70 px). */
 .ot-dt__scroll {
+  position: relative;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
 }

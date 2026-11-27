@@ -26,6 +26,7 @@ import { inventoryKeys } from "~/modules/inventory/keys";
 import { applyMovements, ensureStockItemForMaterial, ensureStockItemsForVariants, type MovementInput } from "~/modules/inventory/ledger.server";
 import { initializeInventory } from "~/modules/inventory/opening.server";
 import { getDefaultWarehouse } from "~/modules/inventory/warehouse.server";
+import { kyivYear } from "~/modules/production/calc";
 import type { ServiceContext } from "~/server/types";
 import { DEMO_PRODUCTS } from "./demo-data";
 
@@ -139,7 +140,7 @@ export async function seedDemoWarehouse(ctx: ServiceContext): Promise<void> {
       const [batch] = await tx
         .insert(productionBatches)
         .values({
-          number: `PB-${ctx.now().getUTCFullYear()}-0001`,
+          number: `PB-${kyivYear(ctx.now())}-0001`,
           title: "Тримачі білі та крила Model S",
           status: "in_production",
           plannedReadyDate: ready,

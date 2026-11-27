@@ -636,7 +636,11 @@ describe("list, filters and open production", () => {
     expect(byProduct.rows.map((r) => r.id)).toEqual([bag.batchId]);
     expect(byProduct.rows[0]).toMatchObject({ overdue: true, totals: { ordered: 3, remaining: 3 }, productCount: 1 });
     expect(byProduct.rows[0]!.products[0]).toMatchObject({ title: "Тестова сумка" });
-    expect((await listBatches(db(), { colors: ["Сірий"] }, { today })).rows.map((r) => r.id)).toEqual([bag.batchId]);
+    // Сірий — ця партія й партія вигаданої історії демо із сірими грипсами (db/seed/demo-history.server.ts).
+    const grey = await listBatches(db(), { colors: ["Сірий"] }, { today });
+    expect(grey.rows.map((r) => r.id)).toContain(bag.batchId);
+    expect(grey.rows.map((r) => r.title).sort()).toEqual(["Грипси й тримачі чорні", "Сумки"]);
+    expect((await listBatches(db(), { colors: ["Сірий"], productIds: [other.productId] }, { today })).rows.map((r) => r.id)).toEqual([bag.batchId]);
     expect((await listBatches(db(), { models: ["S"], productIds: [other.productId] }, { today })).total).toBe(0);
     expect((await listBatches(db(), { overdue: true }, { today })).rows.map((r) => r.id)).toContain(bag.batchId);
     expect((await listBatches(db(), { search: "сумки" }, { today })).rows.map((r) => r.id)).toContain(bag.batchId);

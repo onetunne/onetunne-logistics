@@ -38,6 +38,12 @@ vi.mock("~/server/context.server", () => ({
     return m.ctx;
   },
 }));
+// Точні підсумки нижче — лише для вигаданих партій цього тесту: демо-база без вигаданої історії виробництва й витрати
+// матеріалів (db/seed/demo-history.server.ts; її статистику перевіряє tests/stage5/seed-production-history.test.ts).
+vi.mock("~/db/seed/demo-history.server", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/db/seed/demo-history.server")>()),
+  seedDemoWarehouseHistory: async () => ({ batches: 0, receipts: 0, materialMovements: 0 }),
+}));
 
 let env: TestEnv;
 let page: typeof import("~/pages/production");

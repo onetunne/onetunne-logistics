@@ -42,4 +42,12 @@ export const inventoryKeys = {
   shopifyExternal: (conflictId: string) => key("shopify_external", conflictId),
   /** Ручна операція з форми/команди (uuid генерується при відкритті форми або командою Telegram). */
   manual: (operationId: string, suffix?: string) => (suffix ? key("manual", operationId, suffix) : key("manual", operationId)),
+  /**
+   * Лише демо-дані: вигадана витрата матеріалу в історії демо (db/seed/demo-history.server.ts) — один раз на
+   * (запис плану DEMO_MATERIAL_HISTORY, матеріал). Префікс demo_history: не збігається з жодною подією робочого режиму.
+   */
+  demoMaterialHistory: (planIndex: number, materialId: string) => key("demo_history", "material", planIndex, materialId),
 } as const;
+
+/** Префікс ключів вигаданої історії демо (перевірка «історію вже створено»). */
+export const DEMO_HISTORY_KEY_PREFIX = "demo_history:";

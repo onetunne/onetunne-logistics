@@ -15,6 +15,7 @@ import {
   warehouses,
 } from "~/db/schema";
 import { DEMO_PRODUCTS } from "~/db/seed/demo-data";
+import { DEMO_PRODUCTION_HISTORY } from "~/db/seed/demo-history.server";
 import { DEMO_COLLECTION_TEMPLATES } from "~/db/seed/demo-warehouse.server";
 import { resetDemoData, seedDemoData } from "~/db/seed/seed.server";
 import { makeActor, SYSTEM_ACTOR, type Actor } from "~/domain/permissions";
@@ -58,8 +59,9 @@ describe("demo warehouse data", () => {
     expect(materials.map((x) => x.kind)).toEqual(expect.arrayContaining(["sticker", "instruction", "card", "bolt"]));
     expect(await countOf(kitTemplates)).toBeGreaterThanOrEqual(1);
     expect((await env.handle.db.select().from(kitTemplateLines)).length).toBeGreaterThan(0);
-    const [batch] = await env.handle.db.select().from(productionBatches);
-    expect(batch).toMatchObject({ status: "in_production" });
+    // Демо-партія у виробництві (крім неї — завершені партії вигаданої історії, db/seed/demo-history.server.ts).
+    const [batch, ...more] = await env.handle.db.select().from(productionBatches).where(eq(productionBatches.status, "in_production"));
+    expect(more).toEqual([]);
     expect(batch!.number).toMatch(/^PB-\d{4}-0001$/);
     const inProduction = (await getBalances(env.handle.db, {}, { limit: 500 })).rows.filter((r) => r.inProduction > 0);
     expect(inProduction.map((r) => [r.sku, r.inProduction]).sort()).toEqual([
@@ -161,7 +163,8 @@ describe("demo reset", () => {
     await resetDemoData(env.ctx(OWNER));
     expect(await countOf(warehouses)).toBe(1);
     expect(await countOf(packagingMaterials)).toBeGreaterThan(0);
-    expect(await countOf(productionBatches)).toBe(1);
+    // Демо-партія у виробництві + завершені партії вигаданої історії.
+    expect(await countOf(productionBatches)).toBe(1 + DEMO_PRODUCTION_HISTORY.length);
     const [w] = await env.handle.db.select().from(warehouses);
     expect(w!.inventoryInitializedAt).toBeInstanceOf(Date);
   });

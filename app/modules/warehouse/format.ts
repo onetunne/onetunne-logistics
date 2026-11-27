@@ -34,3 +34,21 @@ export function signedNumber(value: number, format: (n: number) => string = Stri
 export function reasonKey(reason: string | null | undefined): string | null {
   return reason ? `warehouse.reason.${reason}` : null;
 }
+
+export type ReceivePreviewKey = "warehouse.op.receive.preview" | "warehouse.op.receive.previewMaterial";
+
+/**
+ * Підсумок «Після операції» у формі надходження на картці позиції (клієнт): якісні + пошкоджені одиниці.
+ * Для матеріалу «доступно» не показується: резервів у матеріалів немає (доступно = фактично), а «доступно для продажу»
+ * стосується лише товарів — тож для матеріалу лише фактично й брак (окремий текст).
+ */
+export function receivePreview(
+  item: { kind: string; onHand: number; available: number; defective: number },
+  good: number,
+  damaged: number,
+): { key: ReceivePreviewKey; params: Record<string, number> } {
+  const onHand = item.onHand + good;
+  const defective = item.defective + damaged;
+  if (item.kind === "material") return { key: "warehouse.op.receive.previewMaterial", params: { onHand, defective } };
+  return { key: "warehouse.op.receive.preview", params: { onHand, available: item.available + good, defective } };
+}

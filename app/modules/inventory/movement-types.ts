@@ -137,8 +137,9 @@ export const MOVEMENT_REASON_CODES = [
   // Синхронізація залишків Shopify (inventory-sync/accept.server.ts, conflicts.server.ts)
   "shopify_conflict",
   "shopify_auto_accept",
-  // Демо-дані
+  // Демо-дані (db/seed): початкові залишки й вигадана історія пакування
   "demo_seed",
+  "demo_history",
 ] as const;
 export type MovementReasonCode = (typeof MOVEMENT_REASON_CODES)[number];
 
