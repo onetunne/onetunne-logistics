@@ -24,6 +24,10 @@ export const JOB = {
   collectionsPage: "shopify.collections_page",
   /** Етап 5: повна синхронізація колекцій — членство товарів (сторінка). */
   collectionMembershipsPage: "shopify.collection_memberships_page",
+  /** Етап 5: щоденна планова повна синхронізація колекцій (ланцюжок; collections.server.ts). */
+  scheduledCollectionsSync: "shopify.collections_scheduled",
+  /** Етап 5: перевірка/оновлення підписок на webhooks (webhook-subscriptions.server.ts). */
+  ensureWebhooks: "shopify.ensure_webhooks",
 } as const;
 
 /** dedupeKey завдання синхронізації замовлення (webhooks, імпорт, повторне читання після скасування накладної). */

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, like, sql } from "drizzle-orm";
 import type { DatabaseHandle, Db } from "~/db/client.server";
 import { MIGRATIONS_FOLDER } from "~/db/migrate.server";
 import {
@@ -22,7 +22,17 @@ import { QueueingShopifyGateway } from "~/integrations/shopify/queueing-gateway.
 import { runJobsOnce } from "~/modules/jobs/worker.server";
 import { createKitTemplate, getKitTemplate, resolveKitMaterials } from "~/modules/packaging/kits.server";
 import { createMaterial } from "~/modules/packaging/materials.server";
-import { applyProductCollections, startCollectionsSync, upsertCollections } from "~/modules/shopify-sync/collections.server";
+import {
+  COLLECTION_RECHECK_MAX_DEFER_MS,
+  SCHEDULED_COLLECTIONS_SYNC_DEDUPE_KEY,
+  SCHEDULED_COLLECTIONS_SYNC_INTERVAL_MS,
+  applyProductCollections,
+  collectionRecheckDedupeKey,
+  runScheduledCollectionsSync,
+  scheduleCollectionSync,
+  startCollectionsSync,
+  upsertCollections,
+} from "~/modules/shopify-sync/collections.server";
 import { createSyncHandlers } from "~/modules/shopify-sync/handlers.server";
 import { JOB } from "~/modules/shopify-sync/jobs";
 import { recordInstallation } from "~/modules/shopify-sync/sync.server";
@@ -233,6 +243,110 @@ describe("membership consistency", () => {
   });
 });
 
+describe("smart collections: Shopify updates membership asynchronously (NEW-G4-1)", () => {
+  const rechecksOf = (gid: string) =>
+    h.db
+      .select()
+      .from(jobs)
+      .where(and(eq(jobs.type, JOB.syncCollection), eq(jobs.status, "queued"), like(jobs.dedupeKey, `collection:${gid}:recheck:%`)));
+  /** Імітація часу: відкладене завдання стає готовим зараз. */
+  const makeDue = (dedupeKey: string) =>
+    h.db.update(jobs).set({ runAt: new Date(Date.now() - 1000) }).where(and(eq(jobs.dedupeKey, dedupeKey), eq(jobs.status, "queued")));
+  const minutesFrom = (from: Date, at: Date) => Math.round((at.getTime() - from.getTime()) / 60_000);
+
+  it("collections/create read before Shopify's membership job finishes is corrected by the delayed re-check, no new webhook needed", async () => {
+    store.products.set(P(60), gqlProduct(60, { title: "Крило з тегом fender" }));
+    await webhook("products/create", { admin_graphql_api_id: P(60) });
+    await run();
+    expect(await membership(P(60))).toEqual([]);
+    // Власник створює автоматичну колекцію (умова: тег fender). Webhook приходить, а Job Shopify ще не додав товари.
+    store.collections.set(C(60), { collection: gqlCollection(60, { title: "Крила (автоматична)" }), products: [] });
+    const before = new Date();
+    expect(await webhook("collections/create", { admin_graphql_api_id: C(60) })).toBe("queued");
+    await run();
+    const template = await createKitTemplate(ctx, {
+      name: "Крила: болти (автоматична колекція)",
+      appliesTo: "collections",
+      lines: [{ materialId: bolts, quantity: 1, per: "item" }],
+      collectionIds: [(await localCollection(C(60))).id],
+    });
+    expect(template.id).toBeTruthy();
+    const order = await orderWith(P(60), 2);
+    expect(await boltsFor(order)).toBe(0);
+    // Дві відкладені перевірки (2 і 15 хв), кожна зі своїм ключем.
+    const rechecks = await rechecksOf(C(60));
+    expect(rechecks.map((j) => minutesFrom(before, j.runAt)).sort((a, b) => a - b)).toEqual([2, 15]);
+    // Shopify завершує асинхронне оновлення членства; жодного webhook (ні collections/update, ні products/update).
+    store.collections.get(C(60))!.products = [P(60)];
+    await run();
+    expect(await boltsFor(order)).toBe(0); // перевірка ще не настала
+    await makeDue(collectionRecheckDedupeKey(C(60), 2 * 60_000));
+    await run();
+    expect(await membership(P(60))).toEqual([C(60)]);
+    expect(await boltsFor(order)).toBe(2);
+    expect(await deadJobs()).toEqual([]);
+    // Пізніша перевірка (15 хв) нічого не ламає: членство вже збігається.
+    await makeDue(collectionRecheckDedupeKey(C(60), 15 * 60_000));
+    fake.calls.length = 0;
+    await run();
+    expect(ops("OtCollection")).toHaveLength(1);
+    expect(ops("OtProductCollections")).toHaveLength(0);
+    expect(await membership(P(60))).toEqual([C(60)]);
+  });
+
+  it("a repeated webhook defers the queued re-checks (no duplicates), but not beyond an hour after the first", async () => {
+    const t0 = new Date();
+    await scheduleCollectionSync(h.db, SHOP, C(61), t0);
+    await scheduleCollectionSync(h.db, SHOP, C(61), new Date(t0.getTime() + 60_000));
+    let rechecks = await rechecksOf(C(61));
+    expect(rechecks.map((j) => minutesFrom(t0, j.runAt)).sort((a, b) => a - b)).toEqual([3, 16]);
+    const nowJobs = await h.db.select().from(jobs).where(and(eq(jobs.dedupeKey, `collection:${C(61)}`), eq(jobs.status, "queued")));
+    expect(nowJobs).toHaveLength(1);
+    // Постійні зміни колекції: перевірка не відкладається безкінечно.
+    await scheduleCollectionSync(h.db, SHOP, C(61), new Date(t0.getTime() + 5 * 3600_000));
+    rechecks = await rechecksOf(C(61));
+    for (const j of rechecks) expect(j.runAt.getTime() - j.createdAt.getTime()).toBeLessThanOrEqual(COLLECTION_RECHECK_MAX_DEFER_MS + 1000);
+    await h.db.delete(jobs).where(like(jobs.dedupeKey, `collection:${C(61)}%`));
+  });
+
+  it("a daily scheduled full sync picks up membership Shopify changed without any webhook, and keeps the chain going", async () => {
+    await h.db.delete(jobs);
+    // Членство змінилося «тихо» (напр., асинхронна обробка умов тривала довше за перевірки або webhook загубився).
+    store.collections.set(C(62), { collection: gqlCollection(62, { title: "Тихо змінена" }), products: [P(2)] });
+    // Ланцюжок: одне очікуване завдання; запуск обробником (як за розкладом).
+    const start = new Date();
+    await h.db.insert(jobs).values({ type: JOB.scheduledCollectionsSync, payload: {}, dedupeKey: SCHEDULED_COLLECTIONS_SYNC_DEDUPE_KEY, runAt: start });
+    await run();
+    expect(await membership(P(2))).toContain(C(62));
+    const next = await h.db
+      .select()
+      .from(jobs)
+      .where(and(eq(jobs.dedupeKey, SCHEDULED_COLLECTIONS_SYNC_DEDUPE_KEY), eq(jobs.status, "queued")));
+    expect(next).toHaveLength(1);
+    expect(next[0]!.runAt.getTime() - start.getTime()).toBeGreaterThanOrEqual(SCHEDULED_COLLECTIONS_SYNC_INTERVAL_MS - 1000);
+    expect(await deadJobs()).toEqual([]);
+  });
+
+  it("the scheduled check does not start a second full sync while one runs, nor before the first products sync", async () => {
+    await h.db.delete(jobs);
+    await startCollectionsSync(h.db, SHOP);
+    expect(await runScheduledCollectionsSync(h.db)).toBe("already_running");
+    expect(await h.db.select().from(jobs).where(eq(jobs.type, JOB.collectionsPage))).toHaveLength(1);
+    await h.db.delete(jobs);
+    const [inst] = await h.db.select().from(shopInstallations).where(eq(shopInstallations.shop, SHOP));
+    await h.db.update(shopInstallations).set({ productsSyncedAt: null }).where(eq(shopInstallations.shop, SHOP));
+    try {
+      expect(await runScheduledCollectionsSync(h.db)).toBe("not_ready");
+      expect(await h.db.select().from(jobs).where(eq(jobs.type, JOB.collectionsPage))).toHaveLength(0);
+    } finally {
+      await h.db.update(shopInstallations).set({ productsSyncedAt: inst!.productsSyncedAt }).where(eq(shopInstallations.shop, SHOP));
+    }
+    expect(await runScheduledCollectionsSync(h.db)).toBe("queued");
+    await run();
+    expect(await deadJobs()).toEqual([]);
+  });
+});
+
 describe("migration 0007 on a database with stage-5 kit data", () => {
   it("adds collections, kit filters and targets without touching existing templates", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ot-mig7-"));
@@ -256,6 +370,34 @@ describe("migration 0007 on a database with stage-5 kit data", () => {
       expect(p).toMatchObject({ title: "Old product", collectionsSyncedAt: null });
       await raw.db.update(kitTemplates).set({ appliesTo: "collections" }).where(and(eq(kitTemplates.id, kit!.id)));
       await expect(raw.db.execute(sql`update kit_templates set applies_to = 'bogus'`)).rejects.toThrow();
+    } finally {
+      await raw.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("migration 0009 on a database with an installation from before stage 5 (NEW-G4-2)", () => {
+  it("adds the webhook subscription columns; the existing installation is then re-registered (no key yet)", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ot-mig9-"));
+    fs.mkdirSync(path.join(dir, "meta"));
+    const journal = JSON.parse(fs.readFileSync(path.join(MIGRATIONS_FOLDER, "meta/_journal.json"), "utf8")) as { entries: Array<{ idx: number; tag: string }> };
+    const target = journal.entries.find((e) => e.tag.includes("shop_webhook_subscriptions"));
+    expect(target).toBeDefined();
+    const previous = { ...journal, entries: journal.entries.filter((e) => e.idx < target!.idx) };
+    fs.writeFileSync(path.join(dir, "meta/_journal.json"), JSON.stringify(previous));
+    for (const e of previous.entries) fs.copyFileSync(path.join(MIGRATIONS_FOLDER, `${e.tag}.sql`), path.join(dir, `${e.tag}.sql`));
+    const raw = await openRaw();
+    try {
+      await raw.migrate(dir);
+      const registeredAt = "2026-11-25T10:00:00.000Z";
+      await raw.db.execute(
+        sql`insert into shop_installations (shop, scopes, webhooks_registered_at) values ('old.myshopify.com', 'read_products', ${registeredAt}::timestamptz)`,
+      );
+      await raw.migrate(MIGRATIONS_FOLDER);
+      const [row] = await raw.db.select().from(shopInstallations);
+      expect(row).toMatchObject({ shop: "old.myshopify.com", scopes: "read_products", webhookTopics: null, webhooksConfigKey: null });
+      expect(row!.webhooksRegisteredAt?.toISOString()).toBe(registeredAt);
     } finally {
       await raw.close();
       fs.rmSync(dir, { recursive: true, force: true });

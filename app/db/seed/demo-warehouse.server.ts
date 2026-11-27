@@ -2,8 +2,11 @@
  * ВИГАДАНІ демо-дані складу (етап 5): пакувальні матеріали (коробки з габаритами), шаблони комплектації,
  * виробнича партія «у виробництві» та початкові залишки (знімок демо-кількостей «Shopify» + резерви відкритих
  * замовлень через initializeInventory). Ідемпотентно: якщо матеріали вже є — нічого не робить.
+ * Демо-бази, заповнені до появи колекцій, отримують шаблони «на колекцію» й габарити варіантів окремо
+ * (upgradeDemoWarehouseForCollections — один раз, разом зі створенням демо-колекцій).
  */
-import { count, eq, inArray } from "drizzle-orm";
+import { and, count, eq, inArray, isNull } from "drizzle-orm";
+import type { DbOrTx } from "~/db/client.server";
 import {
   collections,
   kitTemplateCollections,
@@ -24,6 +27,7 @@ import { applyMovements, ensureStockItemForMaterial, ensureStockItemsForVariants
 import { initializeInventory } from "~/modules/inventory/opening.server";
 import { getDefaultWarehouse } from "~/modules/inventory/warehouse.server";
 import type { ServiceContext } from "~/server/types";
+import { DEMO_PRODUCTS } from "./demo-data";
 
 interface DemoMaterialSeed {
   code: string;
@@ -122,26 +126,8 @@ export async function seedDemoWarehouse(ctx: ServiceContext): Promise<void> {
       await tx.insert(kitTemplateProducts).values({ templateId: fender!.id, productId: fenderProduct.id });
     }
 
-    // 3a. Шаблони «на колекцію» (вигадані колекції — seedDemoCollections): покришки колекції «Шини та колеса» —
-    //     скотч для фіксації; крила Model S колекції «Крила та захист» — скотч для кронштейна (фільтр моделі:
-    //     Model X тієї самої колекції його не отримує).
-    const demoCollections = new Map(
-      (await tx.select({ id: collections.id, handle: collections.handle }).from(collections)).map((c) => [c.handle, c.id]),
-    );
-    const collectionTemplates = [
-      { name: "Шини: фіксація скотчем", collection: "tires-and-wheels", priority: 5, models: [] as string[], quantity: 2 },
-      { name: "Крило Model S: скотч для кронштейна", collection: "fenders-and-protection", priority: 9, models: ["Model S"], quantity: 1 },
-    ];
-    for (const ct of collectionTemplates) {
-      const collectionId = demoCollections.get(ct.collection);
-      if (!collectionId) continue;
-      const [tpl] = await tx
-        .insert(kitTemplates)
-        .values({ name: ct.name, appliesTo: "collections", priority: ct.priority, variantModels: ct.models })
-        .returning({ id: kitTemplates.id });
-      await tx.insert(kitTemplateLines).values({ templateId: tpl!.id, materialId: materialIds.get("tape")!, quantity: ct.quantity, per: "item" });
-      await tx.insert(kitTemplateCollections).values({ templateId: tpl!.id, collectionId });
-    }
+    // 3a. Шаблони «на колекцію» (вигадані колекції — seedDemoCollections).
+    await seedDemoCollectionTemplates(tx);
 
     // 4. Виробнича партія у виробництві (запуск: in_production +).
     const variants = await tx
@@ -196,4 +182,80 @@ export async function seedDemoWarehouse(ctx: ServiceContext): Promise<void> {
       );
     }
   });
+}
+
+/**
+ * Шаблони «на колекцію» (вигадані колекції — seedDemoCollections): покришки колекції «Шини та колеса» — скотч для
+ * фіксації; крила Model S колекції «Крила та захист» — скотч для кронштейна (фільтр моделі: Model X тієї самої колекції
+ * його не отримує). Ідемпотентно за назвою шаблону; без колекції або матеріалу «скотч» шаблон пропускається.
+ * Повертає кількість створених.
+ */
+export const DEMO_COLLECTION_TEMPLATES = [
+  { name: "Шини: фіксація скотчем", collection: "tires-and-wheels", priority: 5, models: [] as string[], quantity: 2 },
+  { name: "Крило Model S: скотч для кронштейна", collection: "fenders-and-protection", priority: 9, models: ["Model S"], quantity: 1 },
+] as const;
+
+export async function seedDemoCollectionTemplates(tx: DbOrTx): Promise<number> {
+  const demoCollections = new Map(
+    (await tx.select({ id: collections.id, handle: collections.handle }).from(collections).where(isNull(collections.deletedAt))).map((c) => [
+      c.handle,
+      c.id,
+    ]),
+  );
+  const [tape] = await tx.select({ id: packagingMaterials.id }).from(packagingMaterials).where(eq(packagingMaterials.code, "tape"));
+  if (!tape) return 0;
+  const existing = new Set(
+    (
+      await tx
+        .select({ name: kitTemplates.name })
+        .from(kitTemplates)
+        .where(inArray(kitTemplates.name, DEMO_COLLECTION_TEMPLATES.map((t) => t.name)))
+    ).map((r) => r.name),
+  );
+  let created = 0;
+  for (const ct of DEMO_COLLECTION_TEMPLATES) {
+    const collectionId = demoCollections.get(ct.collection);
+    if (!collectionId || existing.has(ct.name)) continue;
+    const [tpl] = await tx
+      .insert(kitTemplates)
+      .values({ name: ct.name, appliesTo: "collections", priority: ct.priority, variantModels: [...ct.models] })
+      .returning({ id: kitTemplates.id });
+    await tx.insert(kitTemplateLines).values({ templateId: tpl!.id, materialId: tape.id, quantity: ct.quantity, per: "item" });
+    await tx.insert(kitTemplateCollections).values({ templateId: tpl!.id, collectionId });
+    created += 1;
+  }
+  return created;
+}
+
+/**
+ * Вигадані габарити демо-варіантів (за SKU) — для автоматичного підбору коробки. Заповнюються лише там, де всі три
+ * габарити порожні (внесене вручну не перезаписується). Повертає кількість оновлених варіантів.
+ */
+export async function seedDemoVariantDimensions(db: DbOrTx): Promise<number> {
+  let updated = 0;
+  for (const p of DEMO_PRODUCTS) {
+    for (const v of p.variants) {
+      if (!v.dimsMm) continue;
+      const rows = await db
+        .update(productVariants)
+        .set({ lengthMm: v.dimsMm[0], widthMm: v.dimsMm[1], heightMm: v.dimsMm[2], updatedAt: new Date() })
+        .where(and(eq(productVariants.sku, v.sku), isNull(productVariants.lengthMm), isNull(productVariants.widthMm), isNull(productVariants.heightMm)))
+        .returning({ id: productVariants.id });
+      updated += rows.length;
+    }
+  }
+  return updated;
+}
+
+/**
+ * Демо-база, заповнена до появи колекцій (склад уже є, колекції щойно створено): шаблони «на колекцію» і габарити
+ * варіантів, як у новій демо-базі. Викликається лише разом зі створенням демо-колекцій — шаблон, який власник пізніше
+ * видалив, після перезапуску не з'являється знову.
+ */
+export async function upgradeDemoWarehouseForCollections(ctx: ServiceContext): Promise<{ templates: number; variants: number }> {
+  if (!(await isDemoWarehouseSeeded(ctx))) return { templates: 0, variants: 0 };
+  return ctx.db.transaction(async (tx) => ({
+    templates: await seedDemoCollectionTemplates(tx),
+    variants: await seedDemoVariantDimensions(tx),
+  }));
 }

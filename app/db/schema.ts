@@ -361,6 +361,15 @@ export const orders = pgTable(
      * очищає значення. null — розбіжностей позицій із Shopify немає.
      */
     shopifyLinesPendingAt: timestamp("shopify_lines_pending_at", { withTimezone: true }),
+    /**
+     * Етап 5: чи виконав Shopify одиниці позицій, що потребують доставки (LineItem.requiresShipping; виконання —
+     * LineItem.unfulfilledQuantity < quantity), — уточнює часткове виконання (partially_fulfilled):
+     * false — виконано лише позиції без доставки (цифрові подарункові картки, цифрові товари, які Shopify виконує
+     * автоматично), фізичні товари не відправлено → це не «виконано поза застосунком», накладна застосунку дозволена;
+     * true — виконано (або могло бути виконано) одиниці фізичних позицій; null — невідомо (дані до етапу 5 / відповідь
+     * без цих полів) → як true (безпечніше). domain/order-status.ts isFulfilledInShopify.
+     */
+    shopifyShippableFulfilled: boolean("shopify_shippable_fulfilled"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -630,7 +639,19 @@ export const shopInstallations = pgTable("shop_installations", {
   installedAt: timestamp("installed_at", { withTimezone: true }).notNull().defaultNow(),
   uninstalledAt: timestamp("uninstalled_at", { withTimezone: true }),
   scopes: text("scopes"),
+  /** Остання ПОВНІСТЮ успішна реєстрація підписок на webhooks (modules/shopify-sync/webhook-subscriptions.server.ts). */
   webhooksRegisteredAt: timestamp("webhooks_registered_at", { withTimezone: true }),
+  /**
+   * Етап 5: теми webhooks, підписку на які Shopify підтвердив під час останньої реєстрації (через кому; показ на
+   * сторінці «Синхронізація Shopify»). null — встановлення до етапу 5 (теми не записувалися).
+   */
+  webhookTopics: text("webhook_topics"),
+  /**
+   * Етап 5: відбиток конфігурації підписок (теми, адреси, SHOPIFY_APP_URL) на момент останньої повністю успішної
+   * реєстрації. Відрізняється від поточного (нові теми після оновлення, null — до етапу 5) → фонове завдання
+   * перереєстровує підписки з офлайн-сесією, без повторної авторизації власника.
+   */
+  webhooksConfigKey: text("webhooks_config_key"),
   productsSyncedAt: timestamp("products_synced_at", { withTimezone: true }),
   /** Етап 5: остання завершена повна синхронізація колекцій і членства товарів (collections.server.ts). */
   collectionsSyncedAt: timestamp("collections_synced_at", { withTimezone: true }),

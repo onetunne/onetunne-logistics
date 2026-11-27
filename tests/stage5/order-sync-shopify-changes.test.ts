@@ -13,18 +13,21 @@ import {
 } from "~/db/schema";
 import type { DatabaseHandle } from "~/db/client.server";
 import { DEMO_SETTINGS, seedReferenceData } from "~/db/seed/seed.server";
+import { isFulfilledInShopify } from "~/domain/order-status";
 import { ForbiddenError, makeActor } from "~/domain/permissions";
 import type { GqlOrder, GqlProduct } from "~/integrations/shopify/graphql";
 import { QueueingShopifyGateway } from "~/integrations/shopify/queueing-gateway.server";
 import { initializeInventory } from "~/modules/inventory/opening.server";
-import { confirmShippedOutsideApp } from "~/modules/orders/shipped-outside.server";
+import { startPacking } from "~/modules/packing/packing.server";
+import { loadOrderRow } from "~/modules/orders/repository.server";
+import { confirmShippedOutsideApp, shippedOutsideAvailable, shippedOutsideState } from "~/modules/orders/shipped-outside.server";
 import { validateOrderById } from "~/modules/orders/workflow.server";
 import { updateSetting } from "~/modules/settings/settings.server";
 import { reissueWaybill } from "~/modules/shipments/reissue.server";
 import { cancelWaybillDetailed, createWaybill } from "~/modules/shipments/waybill.server";
 import { createSyncHandlers } from "~/modules/shopify-sync/handlers.server";
 import { JOB } from "~/modules/shopify-sync/jobs";
-import { mapOrder, mapProduct } from "~/modules/shopify-sync/mappers";
+import { mapOrder, mapProduct, shippableFulfilled } from "~/modules/shopify-sync/mappers";
 import { hasPendingShopifyLineChanges } from "~/modules/shopify-sync/pending-lines.server";
 import { upsertOrder, upsertProduct } from "~/modules/shopify-sync/sync.server";
 import { markHandedOver } from "~/modules/tracking/tracking.server";
@@ -285,6 +288,43 @@ describe("orders fulfilled in Shopify outside the app (inventory-3/5, regression
     await expect(confirmShippedOutsideApp(ctx, o.id)).rejects.toMatchObject({ code: "order.shippedOutside.activeWaybill" });
   });
 
+  it("is refused while Shopify line changes are pending; after the re-read it writes off the current quantity (G1a-NEW-1)", async () => {
+    const before = await balance(h.db, item);
+    await shopifyHas(order(9406, { lineItems: lines(line(9406, 2)) }));
+    const shipment = await readyWaybill(9406);
+    expect(await reservedFor(9406)).toBe(2);
+    // Shopify: 1 одиницю повернуто й поповнено (currentQuantity 1), решту відправлено іншим перевізником (FULFILLED).
+    const changed = await shopifyHas(order(9406, { minutes: 5, displayFulfillmentStatus: "FULFILLED", lineItems: lines(line(9406, 2, 1)) }));
+    expect(changed.result).toBe("conflict_reported");
+    const o = await orderRow(9406);
+    expect(o.shopifyLinesPendingAt).not.toBeNull();
+    // Скасування накладної ставить повторне читання в чергу, але обробник ще не виконав його.
+    expect((await cancelWaybillDetailed(ctx, shipment.id, { purpose: "correction" })).shopifyResync).toBe("queued");
+    const pending = await loadOrderRow(h.db, o.id);
+    expect(shippedOutsideState(pending, false)).toBe("shopify_lines_pending");
+    expect(shippedOutsideAvailable(pending, false)).toBe(false);
+    for (const actor of [MANAGER, OWNER]) {
+      await expect(confirmShippedOutsideApp({ ...ctx, actor }, o.id)).rejects.toMatchObject({
+        code: "order.shippedOutside.shopifyLinesPending",
+        status: 409,
+      });
+    }
+    const [l] = await lineRows(9406);
+    expect(await movementCount(h.db, { key: `consume:${l!.id}` })).toBe(0);
+    expect((await orderRow(9406)).status).toBe("awaiting_review");
+    expect(await balance(h.db, item)).toMatchObject({ onHand: before.onHand, reserved: before.reserved + 2 });
+
+    // Повторне читання застосовує позиції (резерв 1) і знімає позначку → підтвердження списує 1, а не 2.
+    await runQueuedOrderSync(9406);
+    const synced = await loadOrderRow(h.db, o.id);
+    expect(synced.shopifyLinesPendingAt).toBeNull();
+    expect(await reservedFor(9406)).toBe(1);
+    expect(shippedOutsideState(synced, false)).toBe("available");
+    expect(await confirmShippedOutsideApp({ ...ctx, actor: MANAGER }, o.id)).toMatchObject({ kind: "confirmed", movements: 1 });
+    expect(await balance(h.db, item)).toMatchObject({ onHand: before.onHand - 1, reserved: before.reserved });
+    expect(await movementCount(h.db, { key: `consume:${l!.id}` })).toBe(1);
+  });
+
   it("a pre-snapshot order first seen fulfilled is neither reserved nor corrected; confirming it does not write off", async () => {
     const before = await balance(h.db, item);
     await shopifyHas(order(9405, { placed: -60, minutes: -50, displayFulfillmentStatus: "FULFILLED", lineItems: lines(line(9405, 2)) }));
@@ -294,6 +334,77 @@ describe("orders fulfilled in Shopify outside the app (inventory-3/5, regression
     expect(await balance(h.db, item)).toMatchObject({ onHand: before.onHand, reserved: before.reserved });
     expect(await confirmShippedOutsideApp(ctx, (await orderRow(9405)).id)).toMatchObject({ kind: "confirmed" });
     expect(await balance(h.db, item)).toMatchObject({ onHand: before.onHand, reserved: before.reserved });
+  });
+});
+
+describe("partial fulfillment of items that need no shipping (gift cards, digital) — G1a-NEW-3", () => {
+  /** Фізична позиція (requiresShipping) з unfulfilledQuantity; за замовчуванням — нічого не виконано. */
+  const holder = (n: number, quantity: number, unfulfilledQuantity = quantity, currentQuantity = quantity) =>
+    line(n, quantity, currentQuantity, { unfulfilledQuantity, requiresShipping: true });
+  /** Цифрова подарункова картка: без доставки, Shopify виконав її автоматично. */
+  const giftCard = (n: number) => ({
+    ...gqlOrder(n).lineItems.nodes[0]!,
+    id: `gid://shopify/LineItem/${n}9`,
+    title: "Gift card",
+    sku: "SKU-2",
+    quantity: 1,
+    currentQuantity: 1,
+    unfulfilledQuantity: 0,
+    requiresShipping: false,
+    variant: { id: "gid://shopify/ProductVariant/201", product: { id: "gid://shopify/Product/2" } },
+  });
+
+  it("maps the per-line facts conservatively (unknown → treated as fulfilled)", () => {
+    const n = 9600;
+    expect(shippableFulfilled([line(n, 1)])).toBeNull(); // старі дані без полів
+    expect(shippableFulfilled([holder(n, 2), giftCard(n)])).toBe(false);
+    expect(shippableFulfilled([holder(n, 2, 1), giftCard(n)])).toBe(true); // 1 фізичну одиницю виконано
+    expect(shippableFulfilled([holder(n, 2, 1, 1), giftCard(n)])).toBe(true); // повернення — неоднозначно → як виконано
+    expect(shippableFulfilled([holder(n, 2, 0, 0), giftCard(n)])).toBe(false); // повністю повернено — відправляти нічого
+    expect(isFulfilledInShopify("partially_fulfilled", false)).toBe(false);
+    expect(isFulfilledInShopify("partially_fulfilled", null)).toBe(true);
+    expect(isFulfilledInShopify("partially_fulfilled")).toBe(true);
+    expect(isFulfilledInShopify("fulfilled", false)).toBe(true);
+    expect(isFulfilledInShopify("unfulfilled", true)).toBe(false);
+  });
+
+  it("an order whose only fulfilled line is a gift card is processed, gets a waybill and can be packed (auto mode)", async () => {
+    await upsertProduct(h.db, mapProduct(gqlProduct(2)), "EUR");
+    await updateSetting(h.db, OWNER, "automation", { mode: "auto", globalPause: false });
+    try {
+      const r = await shopifyHas(order(9601, { displayFulfillmentStatus: "PARTIALLY_FULFILLED", lineItems: lines(holder(9601, 1), giftCard(9601)) }));
+      expect(r.result).toBe("created");
+    } finally {
+      await updateSetting(h.db, OWNER, "automation", { mode: "semi", globalPause: false });
+    }
+    const o = await orderRow(9601);
+    expect(o).toMatchObject({ fulfillmentStatus: "partially_fulfilled", shopifyShippableFulfilled: false });
+    expect((await openIssues(9601)).map((i) => i.code)).not.toContain("SHOPIFY_FULFILLED_OUTSIDE_APP");
+    const [shipment] = await h.db.select().from(shipments).where(eq(shipments.orderId, o.id));
+    expect(shipment).toMatchObject({ status: "created" });
+    expect((await startPacking(ctx, o.id)).kind).toBe("started");
+    // «Відправлено поза застосунком» — ні: Shopify не виконав фізичних товарів.
+    await cancelWaybillDetailed(ctx, shipment!.id, { purpose: "correction" });
+    await expect(confirmShippedOutsideApp(ctx, o.id)).rejects.toMatchObject({ code: "order.shippedOutside.notFulfilledInShopify" });
+  });
+
+  it("physical units fulfilled in Shopify block the waybill (owner too); a cancelled fulfillment lifts the block", async () => {
+    await shopifyHas(order(9602, { displayFulfillmentStatus: "PARTIALLY_FULFILLED", lineItems: lines(holder(9602, 2), giftCard(9602)) }));
+    const o = await orderRow(9602);
+    await validateOrderById(ctx, o.id, "manual");
+    expect((await orderRow(9602)).status).toBe("awaiting_review");
+    // Той самий статус «частково виконано», але тепер Shopify виконав 1 фізичну одиницю поза застосунком.
+    expect(
+      (await shopifyHas(order(9602, { minutes: 5, displayFulfillmentStatus: "PARTIALLY_FULFILLED", lineItems: lines(holder(9602, 2, 1), giftCard(9602)) }))).result,
+    ).toBe("conflict_reported");
+    expect((await orderRow(9602)).shopifyShippableFulfilled).toBe(true);
+    expect((await openIssues(9602)).map((i) => i.code)).toContain("SHOPIFY_FULFILLED_OUTSIDE_APP");
+    expect(await createWaybill(ctx, o.id)).toMatchObject({ kind: "blocked", reason: "fulfilled_in_shopify" });
+    // Виконання скасовано в Shopify — попередження закривається, накладну знову можна створити.
+    await shopifyHas(order(9602, { minutes: 6, displayFulfillmentStatus: "PARTIALLY_FULFILLED", lineItems: lines(holder(9602, 2), giftCard(9602)) }));
+    const [issue] = await h.db.select().from(issues).where(and(eq(issues.orderId, o.id), eq(issues.code, "SHOPIFY_FULFILLED_OUTSIDE_APP")));
+    expect(issue).toMatchObject({ status: "resolved", resolution: "shopify_applied" });
+    expect((await createWaybill(ctx, o.id)).kind).toBe("created");
   });
 });
 

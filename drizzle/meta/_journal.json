@@ -57,6 +57,20 @@
       "when": 1795767228341,
       "tag": "0007_kit_collections",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1795774439665,
+      "tag": "0008_order_shippable_fulfilled",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1795777550299,
+      "tag": "0009_shop_webhook_subscriptions",
+      "breakpoints": true
     }
   ]
 }

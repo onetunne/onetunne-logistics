@@ -35,6 +35,7 @@ import {
   adjustPackedLine,
   confirmCancelledPackingReturned,
   confirmPacked,
+  confirmParcelWeight,
   recordScan,
   saveOrderParcel,
   savePackingParcel,
@@ -45,6 +46,7 @@ import {
   type ScanResult,
 } from "~/modules/packing/packing.server";
 import { CameraScanGate, type CameraFrameResult } from "~/modules/packing/camera-gate";
+import { mismatchNeedsReissue } from "~/modules/packing/parcel-compare";
 import { INITIAL_SCAN_FEEDBACK, scanFeedbackReducer } from "~/modules/packing/scan-feedback";
 import {
   NO_BOX,
@@ -230,26 +232,37 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<P
         if (formString(form, "target") === "order") {
           // До накладної (пакування ще немає): ручне коригування замовлення, яке використає нова накладна.
           const r = await saveOrderParcel(ctx, orderId, input);
+          // Зважена вага менша за 90 % ваги товарів за Shopify — накладна її не використає (див. попередження вгорі).
+          const ignored = r.weightCheck?.use === "ignored";
           return {
             ok: true,
             message: r.changed.length > 0 ? "packing.parcel.savedOrder" : "packing.parcel.noChanges",
             params: { count: r.changed.length },
-            tone: r.changed.length > 0 ? "success" : "info",
+            extra: ignored ? ["packing.parcel.weightIgnoredSaved"] : [],
+            tone: ignored ? "warning" : r.changed.length > 0 ? "success" : "info",
           };
         }
         const r = await savePackingParcel(ctx, orderId, input);
+        const ignored = r.weightCheck?.use === "ignored";
         return {
           ok: true,
           message: r.changed.length > 0 ? "packing.parcel.saved" : "packing.parcel.noChanges",
           params: { count: r.changed.length },
-          extra: r.mismatch ? ["packing.parcel.mismatch"] : [],
-          tone: r.mismatch ? "warning" : r.changed.length > 0 ? "success" : "info",
+          extra: [...(ignored ? ["packing.parcel.weightIgnoredSaved"] : []), ...(r.mismatch ? ["packing.parcel.mismatch"] : [])],
+          tone: r.mismatch || ignored ? "warning" : r.changed.length > 0 ? "success" : "info",
         };
+      }
+      case "confirmWeight": {
+        // Рішення власника: зважена вага правильна (ваги товарів у Shopify завищені) — її використає нова накладна.
+        const r = await confirmParcelWeight(ctx, orderId, { weightGrams: formString(form, "weightGrams") });
+        if (r.kind === "confirmed") return { ok: true, message: "packing.weightCheck.confirmed", tone: "success" };
+        return { ok: true, message: r.kind === "already_confirmed" ? "packing.weightCheck.alreadyConfirmed" : "packing.weightCheck.notNeeded", tone: "info" };
       }
       case "confirm": {
         const override = form.has("override") ? { override: { reason: formString(form, "overrideReason").slice(0, MAX_OVERRIDE_REASON_LENGTH) } } : {};
-        // Відбиток переліку матеріалів, який бачив пакувальник: інший план на сервері → повторне підтвердження.
-        const expectedMaterials = form.has("materialsKey") ? formString(form, "materialsKey") : null;
+        // Відбиток переліку матеріалів, який бачив пакувальник (форма надсилає його завжди): інший план на сервері — або
+        // запит без відбитка (застаріла сторінка) — повторне підтвердження зі свіжим переліком (packing.error.materialsChanged).
+        const expectedMaterials = formString(form, "materialsKey");
         return confirmResult(await confirmPacked(ctx, orderId, Number(formString(form, "version")), { ...override, expectedMaterials }));
       }
       case "unpack": {
@@ -381,6 +394,7 @@ export default function PackingOrderPage() {
             {data.canOverride ? <p>{t("packing.screen.shopifyLinesPending.owner")}</p> : null}
           </Banner>
         ) : null}
+        {data.weightCheck ? <WeightCheckBanner data={data} /> : null}
         {data.mismatch ? <MismatchBanner data={data} /> : null}
         <Grid columns={{ xs: 1, lg: 2 }} gap={4}>
           <Stack gap={4}>
@@ -1000,6 +1014,14 @@ function ParcelCard({ data }: { data: Data }) {
             })}
           </Text>
         ) : null}
+        {data.waybillWeightIgnored ? (
+          <Text variant="body-sm" tone="subdued">
+            {t("packing.waybillWeight.ignored", {
+              manual: formatWeight(data.waybillWeightIgnored.manualGrams, locale),
+              goods: formatWeight(data.waybillWeightIgnored.goodsGrams, locale),
+            })}
+          </Text>
+        ) : null}
         {!editable ? (
           isShipped(data.order.status) || data.order.status === "cancelled" ? null : (
             <Text tone="subdued">{t("packing.parcel.startFirst")}</Text>
@@ -1076,7 +1098,7 @@ function ParcelForm({ data }: { data: Data }) {
       ? t("packing.parcel.estimateHint", { weight: formatWeight(prefill.weightGrams, locale) })
       : t("packing.parcel.weighHint")
     : savedWeightShown
-      ? t("packing.parcel.savedHint")
+      ? t(data.weightCheck?.use === "ignored" ? "packing.parcel.savedIgnoredHint" : "packing.parcel.savedHint")
       : prefill.weightGrams
         ? t("packing.parcel.manualEstimateHint", { weight: formatWeight(prefill.weightGrams, locale) })
         : t("packing.parcel.manualHint");
@@ -1201,13 +1223,59 @@ function CancelledAfterPackingBanner({ data }: { data: Data }) {
   );
 }
 
+/**
+ * Зважена вага менша за 90 % ваги товарів за даними Shopify: накладна (нова/переоформлена) її не використає, доки
+ * власник не підтвердить, що зважено правильно (ваги товарів у Shopify завищені) — confirmParcelWeight.
+ */
+function WeightCheckBanner({ data }: { data: Data }) {
+  const t = useT();
+  const locale = useLocale();
+  const busy = useBusy();
+  const check = data.weightCheck!;
+  const params = {
+    manual: formatWeight(check.manualGrams, locale),
+    goods: formatWeight(check.goodsGrams, locale),
+    min: formatWeight(check.minGrams, locale),
+  };
+  if (check.use === "owner_verified") {
+    return <Banner tone="info">{t("packing.weightCheck.verified", params)}</Banner>;
+  }
+  return (
+    <Banner tone="warning" title={t("packing.weightCheck.title")}>
+      <Stack gap={2}>
+        <p>{t("packing.weightCheck.body", params)}</p>
+        <p>{t("packing.weightCheck.fix")}</p>
+        {data.canOverride ? (
+          <Form method="post">
+            <input type="hidden" name="intent" value="confirmWeight" />
+            <input type="hidden" name="weightGrams" value={check.manualGrams} />
+            <ConfirmSubmitButton
+              loading={busy("confirmWeight")}
+              title={t("packing.weightCheck.confirmTitle")}
+              confirmLabel={t("packing.weightCheck.confirm")}
+              cancelLabel={t("common.cancel")}
+              message={<Text>{t("packing.weightCheck.confirmBody", params)}</Text>}
+            >
+              {t("packing.weightCheck.button", params)}
+            </ConfirmSubmitButton>
+          </Form>
+        ) : (
+          <p>{t("packing.weightCheck.askOwner")}</p>
+        )}
+      </Stack>
+    </Banner>
+  );
+}
+
 function MismatchBanner({ data }: { data: Data }) {
   const t = useT();
   const locale = useLocale();
   const can = useCan();
   const href = useHref();
   const m = data.mismatch!;
-  const canReissue = can("waybills.manage") && can("waybills.create");
+  // Лише вага, яку нова накладна теж проігнорує, — переоформлення не допоможе (причина — ваги товарів у Shopify).
+  const reissueHelps = mismatchNeedsReissue(m);
+  const canReissue = can("waybills.manage") && can("waybills.create") && reissueHelps;
   const packed = data.order.status === "packed";
   return (
     <Banner
@@ -1218,6 +1286,14 @@ function MismatchBanner({ data }: { data: Data }) {
       {m.weight ? (
         <p>{t("packing.mismatch.weight", { waybill: formatWeight(m.weight.waybillGrams, locale), packed: formatWeight(m.weight.packedGrams, locale) })}</p>
       ) : null}
+      {m.weight?.ignoredByWaybill ? (
+        <p>
+          {t("packing.mismatch.weightIgnored", {
+            packed: formatWeight(m.weight.packedGrams, locale),
+            goods: formatWeight(m.weight.ignoredByWaybill.goodsGrams, locale),
+          })}
+        </p>
+      ) : null}
       {m.dims ? (
         <p>
           {t(m.dims.exceeds ? "packing.mismatch.dimsExceeds" : "packing.mismatch.dims", {
@@ -1226,8 +1302,8 @@ function MismatchBanner({ data }: { data: Data }) {
           })}
         </p>
       ) : null}
-      <p>{t(packed ? "packing.mismatch.packedHint" : "packing.mismatch.hint")}</p>
-      {!canReissue ? <p>{t("packing.mismatch.askManager")}</p> : null}
+      {reissueHelps ? <p>{t(packed ? "packing.mismatch.packedHint" : "packing.mismatch.hint")}</p> : null}
+      {reissueHelps && !canReissue ? <p>{t("packing.mismatch.askManager")}</p> : null}
     </Banner>
   );
 }
@@ -1321,7 +1397,7 @@ function ConfirmCard({ data, open, packed }: { data: Data; open: boolean; packed
                   {noBox ? <Text>{t("packing.confirm.noBox")}</Text> : null}
                   {otherLinesText ? <Text>{t("packing.confirm.dialogOtherLines", { list: otherLinesText })}</Text> : null}
                   {previousBoxesText ? <Text>{t("packing.confirm.previousBoxes", { list: previousBoxesText })}</Text> : null}
-                  {data.mismatch ? <Text>{t("packing.confirm.dialogMismatch")}</Text> : null}
+                  {mismatchNeedsReissue(data.mismatch) ? <Text>{t("packing.confirm.dialogMismatch")}</Text> : null}
                   <Text variant="body-sm" tone="subdued">
                     {t("packing.confirm.notShipped")}
                   </Text>

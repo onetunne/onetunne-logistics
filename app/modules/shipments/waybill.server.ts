@@ -14,7 +14,7 @@ import { randomUUID } from "node:crypto";
 import { and, desc, eq, inArray, isNull, like, max, sql } from "drizzle-orm";
 import type { DbOrTx, Tx } from "~/db/client.server";
 import { issues, orderChanges, orderPacking, orders, shipmentEvents, shipments } from "~/db/schema";
-import { assertTransition, isFulfilledInShopify, isShipped } from "~/domain/order-status";
+import { assertTransition, isOrderFulfilledInShopify, isShipped } from "~/domain/order-status";
 import { requirePermission } from "~/domain/permissions";
 import { DomainError, NotFoundError } from "~/lib/errors";
 import { redact } from "~/lib/logger.server";
@@ -40,12 +40,12 @@ import { syncOrderReservations } from "~/modules/inventory/reservations.server";
 import type { SelectBoxReason } from "~/modules/packaging/box-selection";
 import {
   chooseParcelPackage,
-  isManualWeightPlausible,
+  manualWeightUse,
   parcelWeightItems,
   type ParcelBoxPlan,
   type ParcelSource,
 } from "~/modules/packaging/parcel";
-import { planParcelBox } from "~/modules/packaging/parcel.server";
+import { isParcelWeightOwnerVerified, planParcelBox } from "~/modules/packaging/parcel.server";
 import { closePackingOnOrderCancel, openCancelledAfterPackingIssue } from "~/modules/packing/lifecycle.server";
 import { enqueueOrderResync, shopifyLinesPending, type ResyncQueueResult } from "~/modules/shopify-sync/pending-lines.server";
 
@@ -186,11 +186,22 @@ export type BuiltShipmentRequest = CreateShipmentRequest & {
   autoBoxReason: SelectBoxReason | null;
   parcelWeightSource: "manual" | "computed";
   /**
-   * Зважену вручну вагу (orders.parcel_weight_grams) не надіслано: вона менша за розрахункову вагу товарів
-   * (isManualWeightPlausible) — застаріла або описка; надіслано розрахункову. null — не було або прийнято.
+   * Зважену вручну вагу (orders.parcel_weight_grams) не надіслано: вона менша за 90 % розрахункової ваги товарів
+   * (manualWeightUse = ignored) і власник її не підтвердив — застаріла, описка або завищені ваги товарів у Shopify;
+   * надіслано розрахункову. null — не було або прийнято. Показується на екрані пакування й у картці накладної.
    */
   manualWeightIgnored: { manualGrams: number; goodsGrams: number } | null;
+  /** Надіслано зважену вагу, меншу за 90 % ваги товарів, бо її підтвердив власник (manualWeightUse = owner_verified). */
+  manualWeightOwnerVerified: boolean;
 };
+
+export interface BuildShipmentRequestOptions {
+  /**
+   * Власник підтвердив поточну зважену вагу (isParcelWeightOwnerVerified): вона надсилається, навіть якщо менша за
+   * 90 % ваги товарів за даними Shopify. createWaybill визначає це з історії замовлення.
+   */
+  manualWeightOwnerVerified?: boolean;
+}
 
 /**
  * parcelPlan — коробка, визначена до побудови (planParcelBox: вибрана вручну або підібрана автоматично).
@@ -203,6 +214,7 @@ export function buildShipmentRequest(
   reference: string,
   issuedAt?: Date,
   parcelPlan?: ParcelBoxPlan | null,
+  opts: BuildShipmentRequestOptions = {},
 ): BuiltShipmentRequest {
   const defaultPkg =
     settings.packaging.packages.find((p) => p.code === settings.packaging.defaultPackageCode) ??
@@ -217,11 +229,12 @@ export function buildShipmentRequest(
     volumetricDivisor: settings.packaging.volumetricDivisor,
   });
   // Етап 5: зважена вага посилки (разом з упаковкою) замінює розрахункову фактичну — якщо правдоподібна: вага, менша
-  // за вагу самих товарів, застаріла (позиції змінилися після зважування) або описка — недодекларування перевізнику
-  // й митниці не допускаємо, надсилаємо розрахункову (відмінність видно у знімку запиту й на екрані пакування).
+  // за 90 % ваги самих товарів, застаріла (позиції змінилися після зважування) або описка — недодекларування
+  // перевізнику й митниці не допускаємо, надсилаємо розрахункову (видно у знімку запиту, на екрані пакування й у
+  // картці накладної). Виняток — власник підтвердив зважену вагу (ваги товарів у Shopify завищені).
   const goodsGrams = computed.actualWeightGrams - pkg.tareWeightGrams;
-  const manualWeight =
-    order.parcelWeightGrams && isManualWeightPlausible(order.parcelWeightGrams, goodsGrams) ? order.parcelWeightGrams : null;
+  const use = order.parcelWeightGrams ? manualWeightUse(order.parcelWeightGrams, goodsGrams, Boolean(opts.manualWeightOwnerVerified)) : null;
+  const manualWeight = order.parcelWeightGrams && use !== "ignored" ? order.parcelWeightGrams : null;
   const weights = manualWeight
     ? {
         actualWeightGrams: manualWeight,
@@ -243,6 +256,7 @@ export function buildShipmentRequest(
     autoBoxReason: parcelPlan?.autoReason ?? null,
     parcelWeightSource: manualWeight ? "manual" : "computed",
     manualWeightIgnored: order.parcelWeightGrams && !manualWeight ? { manualGrams: order.parcelWeightGrams, goodsGrams } : null,
+    manualWeightOwnerVerified: use === "owner_verified",
     sender: {
       name: s.contactName,
       company: s.companyName || null,
@@ -317,6 +331,7 @@ function requestSnapshot(req: BuiltShipmentRequest) {
     autoBoxReason: req.autoBoxReason,
     parcelWeightSource: req.parcelWeightSource,
     manualWeightIgnored: req.manualWeightIgnored,
+    manualWeightOwnerVerified: req.manualWeightOwnerVerified,
     destinationCountry: req.recipient.address.countryCode,
     parcels: req.parcels,
     customsItems: req.customsItems,
@@ -425,7 +440,8 @@ export async function createWaybill(
     // Етап 5: будь-яке джерело (вручну, масово, автоматизація, переоформлення). Перевіряється під блокуванням рядка
     // замовлення — паралельна синхронізація Shopify не проскочить між перевіркою й записом «creating».
     if (shopifyLinesPending(order)) return { kind: "result", result: { kind: "blocked", reason: "shopify_lines_pending" } };
-    if (isFulfilledInShopify(order.fulfillmentStatus)) {
+    // Часткове виконання лише позицій без доставки (цифрова подарункова картка) — не блокує (isFulfilledInShopify).
+    if (isOrderFulfilledInShopify(order)) {
       return { kind: "result", result: { kind: "blocked", reason: "fulfilled_in_shopify", params: { fulfillment: order.fulfillmentStatus ?? "" } } };
     }
     if (source === "automation") {
@@ -459,10 +475,12 @@ export async function createWaybill(
     await resetStaleParcelOverride(tx, ctx, order);
     const freshOrder = await loadOrderRow(tx, orderId);
     const parcelPlan = await planParcelBox(tx, freshOrder, items);
+    // Етап 5: зважена вага, яку підтвердив власник (менша за 90 % ваги товарів за Shopify), — надсилається.
+    const weightOpts: BuildShipmentRequestOptions = { manualWeightOwnerVerified: await isParcelWeightOwnerVerified(tx, freshOrder) };
     let shipment: ShipmentRow;
     let request: BuiltShipmentRequest;
     if (last && last.status === "failed") {
-      request = buildShipmentRequest(freshOrder, items, settings, last.carrierReference, ctx.now(), parcelPlan);
+      request = buildShipmentRequest(freshOrder, items, settings, last.carrierReference, ctx.now(), parcelPlan, weightOpts);
       const [row] = await tx
         .update(shipments)
         .set({
@@ -484,7 +502,7 @@ export async function createWaybill(
     } else {
       const generation = (last?.generation ?? 0) + 1;
       const id = randomUUID();
-      request = buildShipmentRequest(freshOrder, items, settings, referenceFor(freshOrder, generation, id), ctx.now(), parcelPlan);
+      request = buildShipmentRequest(freshOrder, items, settings, referenceFor(freshOrder, generation, id), ctx.now(), parcelPlan, weightOpts);
       const [row] = await tx
         .insert(shipments)
         .values({
@@ -1013,7 +1031,7 @@ export async function createWaybills(ctx: ServiceContext, orderIds: string[]): P
 export async function processPaidOrder(ctx: ServiceContext, orderId: string) {
   const order = await loadOrderRow(ctx.db, orderId);
   // Етап 5: уже виконане в Shopify поза застосунком — нічого автоматично (createWaybill теж заблокує).
-  if (isFulfilledInShopify(order.fulfillmentStatus)) return { validated: false, waybill: null, reason: "fulfilled_in_shopify" } as const;
+  if (isOrderFulfilledInShopify(order)) return { validated: false, waybill: null, reason: "fulfilled_in_shopify" } as const;
   const decision = await automationDecision(ctx.db, order);
   if (!decision.run) return { validated: false, waybill: null, reason: decision.reason } as const;
   const summary = await ctx.db.transaction((tx: Tx) => validateOrderInTx(tx, ctx, orderId, "automation"));

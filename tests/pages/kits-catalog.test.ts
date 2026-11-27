@@ -4,8 +4,11 @@ import { renderToString } from "react-dom/server";
 import { Outlet, StaticRouterProvider, createStaticHandler, createStaticRouter } from "react-router";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ShellData } from "~/components/shell-types";
-import { auditLog, collections, jobs, kitTemplateProducts, packagingMaterials, products, shopInstallations } from "~/db/schema";
+import fs from "node:fs";
+import path from "node:path";
+import { auditLog, collections, jobs, kitTemplateProducts, packagingMaterials, productVariants, products, shopInstallations } from "~/db/schema";
 import { DICTIONARIES } from "~/i18n";
+import { kitProductMatchesQuery } from "~/modules/packaging/kit-options";
 import { MAX_KIT_PRODUCT_OPTIONS } from "~/modules/packaging/kits.server";
 import { JOB } from "~/modules/shopify-sync/jobs";
 import type { RequestContext } from "~/server/types";
@@ -144,6 +147,21 @@ describe("large catalogue (production-6)", () => {
     // SKU / модель варіанта теж шукаються; «%» — звичайний символ.
     expect((await load(`?edit=new&pq=OT-FK-S`)).productOptions.map((p) => p.title)).toEqual(["Крило заднє"]);
     expect((await load(`?edit=new&pq=${encodeURIComponent("%")}`)).productOptions).toEqual([]);
+  });
+
+  it("a product the catalogue search finds by barcode, handle or variant title is not hidden by the form's own filter (NEW-G4-3)", async () => {
+    await env.handle.db
+      .insert(productVariants)
+      .values({ productId: zeta, title: "Graphite edition", sku: "OT-ZETA-1", barcode: "4820000099991", price: "10.00", currency: "EUR" });
+    for (const text of ["4820000099991", "zeta-fender", "Graphite"]) {
+      const { productOptions } = await load(`?edit=new&pq=${encodeURIComponent(text)}`);
+      expect(productOptions.map((p) => p.id), text).toEqual([zeta]);
+      // Ті самі рядки форма потім фільтрує тим самим текстом (раніше — лише назва/SKU/модель/колір → «Немає товарів»).
+      expect(productOptions.every((p) => kitProductMatchesQuery(p, text)), text).toBe(true);
+    }
+    expect(kitProductMatchesQuery((await load(`?edit=new&pq=zeta`)).productOptions[0]!, "no such text")).toBe(false);
+    // Форма використовує саме цей фільтр.
+    expect(fs.readFileSync(path.resolve("app/pages/kits.tsx"), "utf8")).toContain("kitProductMatchesQuery(p, q)");
   });
 });
 

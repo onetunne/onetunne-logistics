@@ -13,8 +13,10 @@
  *    (reason = "fits"); неточний підбір (лише за вагою / частина без габаритів) для накладної не використовується.
  * 4. "default_package" — типова упаковка з налаштувань «Упаковка».
  * Вага: orders.parcel_weight_grams (зважена посилка) замінює розрахункову фактичну — незалежно від джерела габаритів,
- * якщо вона правдоподібна (isManualWeightPlausible: не менша за 90 % розрахункової ваги товарів); неправдоподібна
- * (застаріла після зміни позицій або описка 30 замість 300) — не надсилається, береться розрахункова.
+ * якщо вона правдоподібна (isManualWeightPlausible: не менша за 90 % розрахункової ваги товарів) або власник
+ * підтвердив її (manualWeightUse: ваги товарів у Shopify завищені); інакше (застаріла після зміни позицій, описка
+ * 30 замість 300) — не надсилається, береться розрахункова, а екран пакування й картка замовлення це пояснюють
+ * (parcelWeightCheck, manualWeightIgnoredOf).
  * Розрахункова вага товарів — parcelGoods (ті самі позиції й кількості, що й для підбору коробки): автоматично
  * підібрана коробка завжди перевірена саме на ту вагу товарів, яку отримує накладна.
  *
@@ -164,4 +166,60 @@ export const MANUAL_WEIGHT_MIN_GOODS_PERCENT = 90;
 export function isManualWeightPlausible(manualGrams: number, goodsGrams: number): boolean {
   if (!positive(manualGrams)) return false;
   return manualGrams * 100 >= Math.max(0, goodsGrams) * MANUAL_WEIGHT_MIN_GOODS_PERCENT;
+}
+
+/** Розрахункова вага товарів посилки без тари, г (parcelWeightItems — ті самі позиції й кількості, що й у накладній). */
+export function parcelGoodsWeightGrams(items: readonly ParcelLine[]): number {
+  return parcelWeightItems(items).reduce((s, i) => s + i.weightGrams * i.quantity, 0);
+}
+
+/** Найменша правдоподібна зважена вага (ціле, г) для ваги товарів — межа isManualWeightPlausible. */
+export function minPlausibleManualWeight(goodsGrams: number): number {
+  const goods = Math.max(0, goodsGrams);
+  return Math.floor((goods * MANUAL_WEIGHT_MIN_GOODS_PERCENT + 99) / 100);
+}
+
+/**
+ * Як накладна використає зважену вручну вагу (orders.parcel_weight_grams):
+ * - plausible — не менша за 90 % ваги товарів, надсилається;
+ * - owner_verified — менша, але власник підтвердив, що зважено правильно (ваги товарів у Shopify завищені), надсилається;
+ * - ignored — менша й не підтверджена: надсилається розрахункова вага (застаріле значення, описка або завищені ваги
+ *   товарів у Shopify — тоді їх варто виправити в Shopify або попросити власника підтвердити вагу).
+ */
+export type ManualWeightUse = "plausible" | "owner_verified" | "ignored";
+
+export function manualWeightUse(manualGrams: number, goodsGrams: number, ownerVerified: boolean): ManualWeightUse {
+  if (isManualWeightPlausible(manualGrams, goodsGrams)) return "plausible";
+  return ownerVerified && positive(manualGrams) ? "owner_verified" : "ignored";
+}
+
+/**
+ * Зважена вага менша за 90 % ваги товарів — попередження на екрані пакування й у картці замовлення (null — ваги
+ * немає або вона правдоподібна). use: owner_verified — накладна її використає; ignored — не використає.
+ */
+export interface ParcelWeightCheck {
+  manualGrams: number;
+  goodsGrams: number;
+  /** Найменша вага, яку накладна прийме без підтвердження власника. */
+  minGrams: number;
+  use: Exclude<ManualWeightUse, "plausible">;
+}
+
+export function parcelWeightCheck(manualGrams: number | null | undefined, goodsGrams: number, ownerVerified: boolean): ParcelWeightCheck | null {
+  if (!positive(manualGrams)) return null;
+  const use = manualWeightUse(manualGrams, goodsGrams, ownerVerified);
+  return use === "plausible" ? null : { manualGrams, goodsGrams, minGrams: minPlausibleManualWeight(goodsGrams), use };
+}
+
+/**
+ * Знімок запиту накладної: зважену вручну вагу НЕ надіслано (manualWeightIgnored у buildShipmentRequest) — для
+ * пояснення на екрані пакування й на сторінці замовлення. null — надіслано або ручної ваги не було.
+ */
+export function manualWeightIgnoredOf(requestSnapshot: unknown): { manualGrams: number; goodsGrams: number } | null {
+  if (!requestSnapshot || typeof requestSnapshot !== "object") return null;
+  const v = (requestSnapshot as Record<string, unknown>).manualWeightIgnored;
+  if (!v || typeof v !== "object") return null;
+  const { manualGrams, goodsGrams } = v as Record<string, unknown>;
+  const isCount = (x: unknown): x is number => typeof x === "number" && Number.isSafeInteger(x) && x >= 0;
+  return isCount(manualGrams) && manualGrams > 0 && isCount(goodsGrams) ? { manualGrams, goodsGrams } : null;
 }

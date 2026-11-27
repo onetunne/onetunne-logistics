@@ -13,7 +13,7 @@
  */
 import { and, eq, inArray } from "drizzle-orm";
 import { inventoryBalances, stockItems } from "~/db/schema";
-import { isFulfilledInShopify, type OrderStatus } from "~/domain/order-status";
+import { isOrderFulfilledInShopify, type OrderStatus } from "~/domain/order-status";
 import { requirePermission } from "~/domain/permissions";
 import { effectiveLineQuantity } from "~/modules/inventory/quantities";
 import { getDefaultWarehouse } from "~/modules/inventory/warehouse.server";
@@ -98,7 +98,7 @@ export async function loadPickList(ctx: ServiceContext, orderIds: readonly strin
       out.skipped.push({ orderId: id, orderNumber, reason: "not_in_queue" });
       continue;
     }
-    if (isFulfilledInShopify(order.fulfillmentStatus)) {
+    if (isOrderFulfilledInShopify(order)) {
       out.skipped.push({ orderId: id, orderNumber, reason: "fulfilled_in_shopify" });
       continue;
     }

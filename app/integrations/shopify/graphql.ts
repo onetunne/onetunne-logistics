@@ -24,7 +24,7 @@ const orderFields = (lineItemsFirst: number) => `
   lineItems(first: ${lineItemsFirst}) {
     pageInfo { hasNextPage }
     nodes {
-      id createdAt title variantTitle sku quantity currentQuantity
+      id createdAt title variantTitle sku quantity currentQuantity unfulfilledQuantity requiresShipping
       originalUnitPriceSet { ${MONEY} }
       image { url }
       variant { id product { id } }
@@ -213,6 +213,14 @@ export interface GqlOrder {
       quantity: number;
       /** Без повернених і видалених одиниць (LineItem.currentQuantity, 2026-10). Відсутнє в старих тестових даних. */
       currentQuantity?: number;
+      /**
+       * Етап 5: «The number of units not yet fulfilled» (LineItem.unfulfilledQuantity, Int!, 2026-10). Невиконаних не
+       * більше, ніж quantity − виконані, тож unfulfilledQuantity ≥ quantity ⇒ жодної одиниці позиції не виконано (за
+       * будь-якого врахування повернень). Відсутнє в старих тестових даних.
+       */
+      unfulfilledQuantity?: number;
+      /** Етап 5: «Whether physical shipping is required for the variant» (LineItem.requiresShipping, Boolean!, 2026-10). */
+      requiresShipping?: boolean;
       originalUnitPriceSet: GqlMoney;
       image: { url: string } | null;
       /** null — варіант (або товар) видалено в Shopify після замовлення (REST: «can be null if … deleted»). */

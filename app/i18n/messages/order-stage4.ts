@@ -109,6 +109,13 @@ const messages: MessageModule = {
       "Shopify не показує це замовлення виконаним — позначити відправленим поза застосунком не можна (інакше склад застосунку й Shopify розійдуться).",
     "order.shippedOutside.activeWaybill":
       "У замовлення є накладна застосунку: підтвердьте передачу перевізнику в картці накладної або спершу скасуйте накладну.",
+    "order.shopifyFulfillment.nonShippingOnly.title": "Shopify виконав лише позиції без доставки",
+    "order.shopifyFulfillment.nonShippingOnly.body":
+      "Shopify позначив замовлення частково виконаним, бо виконав позиції, що не потребують доставки (наприклад, цифрову подарункову картку — Shopify зазвичай виконує її автоматично). Фізичні товари ще не відправлено: накладну, пакування й передачу перевізнику робить застосунок, як зазвичай.",
+    "order.shippedOutside.shopifyLinesPending":
+      "Shopify змінив позиції замовлення (кількість, повернення або видалення), а застосунок їх ще не застосував. Спершу натисніть «Прочитати замовлення з Shopify ще раз» і дочекайтеся оновлення позицій — інакше склад списав би застарілі кількості й розійшовся з Shopify.",
+    "order.shippedOutside.linesPending":
+      "«Відправлено поза застосунком» стане доступним після повторного читання замовлення з Shopify: позиції змінено в Shopify, а застосунок їх ще не застосував (склад списав би застарілі кількості).",
 
     // --- Стан передачі виправлених даних у Shopify ---
     "order.shopifySync.title": "Синхронізація з Shopify",
@@ -251,6 +258,13 @@ const messages: MessageModule = {
       "Shopify does not show this order as fulfilled — it cannot be marked as shipped outside the app (the app's and Shopify's stock would diverge).",
     "order.shippedOutside.activeWaybill":
       "The order has an app waybill: confirm the handover to the carrier in the waybill card or cancel the waybill first.",
+    "order.shopifyFulfillment.nonShippingOnly.title": "Shopify fulfilled only items without shipping",
+    "order.shopifyFulfillment.nonShippingOnly.body":
+      "Shopify marked the order as partially fulfilled because it fulfilled items that need no shipping (for example a digital gift card — Shopify usually fulfils it automatically). The physical goods have not been shipped yet: the app creates the waybill, packing and carrier handover as usual.",
+    "order.shippedOutside.shopifyLinesPending":
+      "Shopify changed the order items (quantity, refund or removal) and the app has not applied them yet. First press “Read the order from Shopify again” and wait for the items to update — otherwise the stock would write off outdated quantities and diverge from Shopify.",
+    "order.shippedOutside.linesPending":
+      "“Shipped outside the app” becomes available after a fresh read of the order from Shopify: the items were changed in Shopify and the app has not applied them yet (the stock would write off outdated quantities).",
 
     "order.shopifySync.title": "Shopify sync",
     "order.shopifySync.label": "Corrected contacts and address in Shopify",

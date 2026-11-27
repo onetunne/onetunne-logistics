@@ -114,7 +114,7 @@ describe("shipped outside the app (order card + Problems)", () => {
     const id = await cloneOrder({ status: "awaiting_review", fulfillmentStatus: "fulfilled" });
     const { handle } = await getDemoRuntime();
     const data = await load(id, "owner");
-    expect(data.order).toMatchObject({ fulfilledInShopify: true, shippedOutsideAvailable: true });
+    expect(data.order).toMatchObject({ fulfilledInShopify: true, shippedOutside: "available" });
     const owner = await render(id, "owner");
     expect(owner).toContain("Замовлення виконано в Shopify поза застосунком");
     expect(owner).toContain("Відправлено поза застосунком");
@@ -149,6 +149,78 @@ describe("shipped outside the app (order card + Problems)", () => {
     const [after] = await handle.db.select().from(issues).where(eq(issues.id, issue!.id));
     expect(after).toMatchObject({ status: "resolved", resolution: "shipped_outside_app" });
     expect(await actProblems({ intent: "shippedOutside", issueId: issue!.id }, "owner")).toMatchObject({ ok: false, error: "problems.error.notFound" });
+  });
+});
+
+describe("shipped outside the app while Shopify line changes are pending (G1a-NEW-1)", () => {
+  async function problemsGroup(orderId: string) {
+    const request = new Request("http://localhost/demo/problems?q=%23G1A", { headers: await headers("owner") });
+    const data = await problems.loader({ request, params: {}, context: {} } as never);
+    return data.groups.find((g) => g.orderId === orderId);
+  }
+
+  it("the order card and Problems hide the action and explain the re-read; the action is refused", async () => {
+    const id = await cloneOrder({ status: "awaiting_review", fulfillmentStatus: "fulfilled", shopifyLinesPendingAt: new Date() });
+    const { handle } = await getDemoRuntime();
+    const [issue] = await handle.db
+      .insert(issues)
+      .values({ orderId: id, code: "SHOPIFY_FULFILLED_OUTSIDE_APP", severity: "warning", params: { status: "fulfilled" }, fingerprint: `${id}:SHOPIFY_FULFILLED_OUTSIDE_APP:` })
+      .returning();
+
+    const data = await load(id, "owner");
+    expect(data.order).toMatchObject({ fulfilledInShopify: true, shopifyLinesPending: true, shippedOutside: "shopify_lines_pending" });
+    const html = await render(id, "owner");
+    expect(html).not.toContain('value="shippedOutside"');
+    expect(html).toContain("стане доступним після повторного читання замовлення з Shopify");
+    expect(html).toContain("Позиції змінено в Shopify — застосунок їх ще не застосував");
+    expect(await problemsGroup(id)).toMatchObject({ shippedOutside: "shopify_lines_pending" });
+
+    expect(await act(id, { intent: "shippedOutside" }, "owner")).toMatchObject({ ok: false, error: "order.shippedOutside.shopifyLinesPending" });
+    expect(await actProblems({ intent: "shippedOutside", issueId: issue!.id }, "owner")).toMatchObject({
+      ok: false,
+      error: "order.shippedOutside.shopifyLinesPending",
+    });
+    const [o] = await handle.db.select({ status: orders.status }).from(orders).where(eq(orders.id, id));
+    expect(o!.status).toBe("awaiting_review");
+
+    // Позиції застосовано (повторне читання) → дія знову доступна.
+    await handle.db.update(orders).set({ shopifyLinesPendingAt: null }).where(eq(orders.id, id));
+    expect((await load(id, "owner")).order).toMatchObject({ shippedOutside: "available" });
+    expect(await problemsGroup(id)).toMatchObject({ shippedOutside: "available" });
+    expect(await actProblems({ intent: "shippedOutside", issueId: issue!.id }, "owner")).toMatchObject({ ok: true, message: "order.shippedOutside.result.done" });
+  });
+
+  it("Problems does not offer the action while an app waybill is active", async () => {
+    const id = await cloneOrder();
+    expect(await act(id, { intent: "validate" }, "owner")).toMatchObject({ ok: true });
+    expect(await act(id, { intent: "createWaybill" }, "owner")).toMatchObject({ ok: true, message: "result.waybill.created" });
+    const { handle } = await getDemoRuntime();
+    await handle.db.update(orders).set({ fulfillmentStatus: "fulfilled" }).where(eq(orders.id, id));
+    await handle.db
+      .insert(issues)
+      .values({ orderId: id, code: "SHOPIFY_FULFILLED_OUTSIDE_APP", severity: "warning", params: { status: "fulfilled" }, fingerprint: `${id}:SHOPIFY_FULFILLED_OUTSIDE_APP:` });
+    expect(await problemsGroup(id)).toMatchObject({ shippedOutside: "unavailable" });
+  });
+});
+
+describe("partially fulfilled in Shopify only by items without shipping (G1a-NEW-3)", () => {
+  it("the order card explains it and offers the waybill; no 'shipped outside' action", async () => {
+    const id = await cloneOrder({ status: "awaiting_review", fulfillmentStatus: "partially_fulfilled", shopifyShippableFulfilled: false });
+    const data = await load(id, "owner");
+    expect(data.order).toMatchObject({ fulfilledInShopify: false, nonShippingFulfilledOnly: true, shippedOutside: "unavailable" });
+    const html = await render(id, "owner");
+    expect(html).toContain("Shopify виконав лише позиції без доставки");
+    expect(html).not.toContain("Замовлення виконано в Shopify поза застосунком");
+    expect(html).toContain('value="createWaybill"');
+    expect(html).not.toContain('value="shippedOutside"');
+    expect(await act(id, { intent: "validate" }, "owner")).toMatchObject({ ok: true });
+    expect(await act(id, { intent: "createWaybill" }, "owner")).toMatchObject({ ok: true, message: "result.waybill.created" });
+  });
+
+  it("unknown per-line facts (data before the change) still block as fulfilled", async () => {
+    const id = await cloneOrder({ status: "awaiting_review", fulfillmentStatus: "partially_fulfilled", shopifyShippableFulfilled: null });
+    expect((await load(id, "owner")).order).toMatchObject({ fulfilledInShopify: true, nonShippingFulfilledOnly: false });
+    expect(await act(id, { intent: "createWaybill" }, "owner")).toMatchObject({ message: "result.waybill.blocked.fulfilled_in_shopify" });
   });
 });
 

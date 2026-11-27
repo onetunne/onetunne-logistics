@@ -330,6 +330,8 @@ const messages: MessageModule = {
     "shopify.jobs.type.deleteCollection": "Видалення колекції",
     "shopify.jobs.type.collectionsPage": "Повна синхронізація колекцій",
     "shopify.jobs.type.collectionMembershipsPage": "Повна синхронізація товарів у колекціях",
+    "shopify.jobs.type.scheduledCollectionsSync": "Щоденна синхронізація колекцій (за розкладом)",
+    "shopify.jobs.type.ensureWebhooks": "Перевірка підписок на webhooks",
   },
   en: {
     "settings.customs.registrationConfirm": "I confirm: the shipping address matches the recipient's registered address, and this is allowed by Nova Post rules",
@@ -642,6 +644,8 @@ const messages: MessageModule = {
     "shopify.jobs.type.deleteCollection": "Collection deletion",
     "shopify.jobs.type.collectionsPage": "Full collection sync",
     "shopify.jobs.type.collectionMembershipsPage": "Full sync of products in collections",
+    "shopify.jobs.type.scheduledCollectionsSync": "Daily collection sync (scheduled)",
+    "shopify.jobs.type.ensureWebhooks": "Webhook subscription check",
   },
 };
 

@@ -17,7 +17,9 @@
  * 3. Рівні локації для відстежуваних невідкритих варіантів → initializeInventory зі знімком `location`.
  *
  * Варіанти, що з'являються після ініціалізації (новий колір, товар почав відстежуватися), відкриваються автоматично
- * тією самою формулою після синхронізації товару (openNewVariantsFromShopify у обробнику shopify.sync_product).
+ * тією самою формулою після синхронізації товару (openNewVariantsFromShopify у обробнику shopify.sync_product) — з
+ * тією самою вимогою актуальних позицій: варіант замовлення з неперенесеними змінами позицій або позиціями без
+ * current_quantity лишається невідкритим до наступної синхронізації товару (variantsOnUnsettledOrders).
  * Нічого не записує в Shopify.
  */
 import { and, count, eq, exists, isNotNull, isNull, notInArray, sql } from "drizzle-orm";
@@ -34,6 +36,7 @@ import {
   type InitializeInventoryResult,
   type OpeningLevel,
   type OpeningSnapshot,
+  variantsOnUnsettledOrders,
 } from "~/modules/inventory/opening.server";
 import { getDefaultWarehouse } from "~/modules/inventory/warehouse.server";
 import { ensureWarehouseLocation } from "~/modules/inventory-sync/location.server";
@@ -187,7 +190,15 @@ export async function openNewVariantsFromShopify(
     if (!product) return null;
     productId = product.id;
   }
-  const candidates = await unopenedVariants(db, warehouse.id, productId);
+  const unopened = await unopenedVariants(db, warehouse.id, productId);
+  if (unopened.length === 0) return null;
+  // Варіанти замовлень з неактуальними щодо Shopify позиціями (неперенесені зміни / без current_quantity) не
+  // відкриваються: Σ формули взяв би застарілу кількість (G1a-NEW-2). Наступна синхронізація товару (або
+  // сторінка «Склад → синхронізація товарів») спробує знову, коли позиції оновляться. Ту саму перевірку
+  // openInventory повторює в транзакції (deferUnsettledOrders).
+  const unsettled = await variantsOnUnsettledOrders(db, unopened.map((v) => v.id));
+  const candidates = unopened.filter((v) => !unsettled.has(v.id));
+  if (unsettled.size > 0) logger.info("inventory.auto_open_deferred", { reason: "orders_not_ready", variants: unopened.length - candidates.length });
   if (candidates.length === 0) return null;
   const location = await ensureWarehouseLocation(db, admin, warehouse);
   if (location.status !== "ready") {
@@ -196,5 +207,5 @@ export async function openNewVariantsFromShopify(
   }
   const snapshot = await readLocationSnapshot(admin, location.locationId, candidates);
   if (snapshot.levels.size === 0) return null;
-  return openInventory({ db, actor: SYSTEM_ACTOR, now: () => new Date() }, { snapshot, onlyIfInitialized: true });
+  return openInventory({ db, actor: SYSTEM_ACTOR, now: () => new Date() }, { snapshot, onlyIfInitialized: true, deferUnsettledOrders: true });
 }

@@ -12,12 +12,20 @@ import { shopifySessions } from "~/db/schema";
 import { getEnv } from "~/lib/env.server";
 import { getProductionRuntime } from "~/server/production-runtime.server";
 import { logger } from "~/lib/logger.server";
-import { WEBHOOK_TOPICS } from "~/modules/shopify-sync/webhooks.server";
 import { recordInstallation } from "~/modules/shopify-sync/sync.server";
+import {
+  WEBHOOK_SUBSCRIPTIONS,
+  enqueueWebhookSubscriptionCheck,
+  recordWebhookRegistration,
+  webhookConfigKey,
+} from "~/modules/shopify-sync/webhook-subscriptions.server";
 
-/** Shop-specific підписки (реєструються через API після встановлення — без Shopify CLI). */
+/**
+ * Shop-specific підписки (реєструються через API після встановлення — без Shopify CLI). Для вже встановленого
+ * застосунку нові теми підписуються фоновим завданням (webhook-subscriptions.server.ts), без повторної авторизації.
+ */
 const WEBHOOKS = Object.fromEntries(
-  WEBHOOK_TOPICS.map((topic) => [topic, { deliveryMethod: DeliveryMethod.Http, callbackUrl: "/webhooks/shopify" }]),
+  WEBHOOK_SUBSCRIPTIONS.map(({ topic, callbackUrl }) => [topic, { deliveryMethod: DeliveryMethod.Http as const, callbackUrl }]),
 );
 
 /** Стабільна версія GraphQL Admin API. */
@@ -37,20 +45,25 @@ async function createShopify() {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     sessionStorage: new DrizzleSessionStoragePostgres(runtime.handle.db as any, shopifySessions),
     distribution: AppDistribution.AppStore,
-    webhooks: {
-      ...WEBHOOKS,
-      APP_UNINSTALLED: { deliveryMethod: DeliveryMethod.Http, callbackUrl: "/webhooks/app/uninstalled" },
-      APP_SCOPES_UPDATE: { deliveryMethod: DeliveryMethod.Http, callbackUrl: "/webhooks/app/scopes_update" },
-    },
+    webhooks: WEBHOOKS,
     hooks: {
       afterAuth: async ({ session }) => {
-        // Після встановлення/повторної авторизації: підписки на webhooks і перша синхронізація товарів.
+        // Після встановлення/повторної авторизації: запис встановлення (перша синхронізація товарів) і підписки на
+        // webhooks. Збій реєстрації не скасовує запис встановлення — підписки повторить фонове завдання.
+        const db = runtime.handle.db;
         try {
-          const shopify = await getShopify();
-          await shopify.registerWebhooks({ session });
-          await recordInstallation(runtime.handle.db, session.shop, session.scope ?? null);
+          await recordInstallation(db, session.shop, session.scope ?? null);
         } catch (e) {
           logger.error("shopify.after_auth_failed", { error: e });
+        }
+        try {
+          const shopify = await getShopify();
+          const result = await shopify.registerWebhooks({ session });
+          const outcome = await recordWebhookRegistration(db, session.shop, webhookConfigKey(env.SHOPIFY_APP_URL ?? ""), result);
+          if (!outcome.complete) await enqueueWebhookSubscriptionCheck(db, { force: true, runAt: new Date(Date.now() + 60_000) });
+        } catch (e) {
+          logger.error("shopify.webhooks_register_failed", { error: e });
+          await enqueueWebhookSubscriptionCheck(db, { force: true, runAt: new Date(Date.now() + 60_000) }).catch(() => undefined);
         }
       },
     },
@@ -63,6 +76,16 @@ async function createShopify() {
 export type ShopifyAppInstance = Awaited<ReturnType<typeof createShopify>>;
 
 const g = globalThis as unknown as { __otShopify?: Promise<ShopifyAppInstance> };
+
+/**
+ * Перереєстрація підписок для встановленого магазину (фонове завдання shopify.ensure_webhooks): офлайн-сесія з бази
+ * (unauthenticated.admin сам оновлює прострочений офлайн-токен), без участі власника.
+ */
+export async function registerShopWebhooks(shop: string) {
+  const shopify = await getShopify();
+  const { session } = await shopify.unauthenticated.admin(shop);
+  return shopify.registerWebhooks({ session });
+}
 
 export function getShopify(): Promise<ShopifyAppInstance> {
   if (!g.__otShopify) {

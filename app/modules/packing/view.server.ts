@@ -12,14 +12,14 @@
 import { eq } from "drizzle-orm";
 import type { DbOrTx } from "~/db/client.server";
 import { packagingMaterials, type OrderPriority, type PackagingMaterialKind } from "~/db/schema";
-import { isFulfilledInShopify, type OrderStatus } from "~/domain/order-status";
+import { isOrderFulfilledInShopify, isShipped, type OrderStatus } from "~/domain/order-status";
 import { can, requirePermission } from "~/domain/permissions";
 import { effectiveLineQuantity } from "~/modules/inventory/quantities";
 import { loadLineItems, loadOrderRow } from "~/modules/orders/repository.server";
 import { boxInnerDims, selectBox, type SelectBoxFlags, type SelectBoxReason } from "~/modules/packaging/box-selection";
 import { consumedMaterialsFor, materialsPlanKey, planPackingMaterials, type PackingMaterialLine } from "~/modules/packaging/consumption.server";
-import { parcelWeightItems } from "~/modules/packaging/parcel";
-import { loadBoxCandidates, toBoxSelectionItems, type BoxCandidate, type LineItems } from "~/modules/packaging/parcel.server";
+import { manualWeightIgnoredOf, parcelGoodsWeightGrams, type ParcelWeightCheck } from "~/modules/packaging/parcel";
+import { loadBoxCandidates, loadParcelWeightCheck, toBoxSelectionItems, type BoxCandidate, type LineItems } from "~/modules/packaging/parcel.server";
 import { isReissuable } from "~/modules/shipments/reissue.server";
 import { getSettings } from "~/modules/settings/settings.server";
 import { availableDocumentKinds } from "~/modules/shipments/documents.server";
@@ -171,6 +171,13 @@ export interface PackingScreen {
   };
   waybillParcel: ParcelMeasure | null;
   mismatch: ParcelMismatch | null;
+  /**
+   * Збережена вага менша за 90 % ваги товарів за даними Shopify: use = ignored — накладна її не використає (перевірити
+   * ваги товарів у Shopify; власник може підтвердити вагу — confirmParcelWeight); owner_verified — підтверджено.
+   */
+  weightCheck: ParcelWeightCheck | null;
+  /** Активну накладну створено з розрахунковою вагою: зважену (manualGrams) не використано (знімок запиту). */
+  waybillWeightIgnored: { manualGrams: number; goodsGrams: number } | null;
   /** Запаковано, а дійсної накладної немає (скасовано після «Запаковано»): спершу розпакувати, потім нова накладна. */
   packedWithoutWaybill: boolean;
   /** Для цього пакування матеріали вже списано (повторне «Запаковано» не списує вдруге). */
@@ -320,7 +327,7 @@ export async function loadPackingScreen(ctx: Pick<ServiceContext, "db" | "carrie
   );
 
   // Розрахункова вага: товари (ті самі позиції, що й у накладній) + тара коробки (або типової упаковки).
-  const goodsGrams = parcelWeightItems(items).reduce((s, i) => s + i.weightGrams * i.quantity, 0);
+  const goodsGrams = parcelGoodsWeightGrams(items);
   const defaultPkg = settings.packaging.packages.find((p) => p.code === settings.packaging.defaultPackageCode) ?? settings.packaging.packages[0];
   const defaultTareGrams = defaultPkg?.tareWeightGrams ?? 0;
   const prefill = parcelPrefill(box, goodsGrams, defaultTareGrams);
@@ -332,7 +339,7 @@ export async function loadPackingScreen(ctx: Pick<ServiceContext, "db" | "carrie
   const adapter = shipment ? ctx.carriers.get(shipment.carrierCode) : undefined;
   const packable = isPackableShipment(shipment);
   const linesPending = shopifyLinesPending(order);
-  const fulfilledInShopify = isFulfilledInShopify(order.fulfillmentStatus) && order.status !== "cancelled";
+  const fulfilledInShopify = isOrderFulfilledInShopify(order) && order.status !== "cancelled";
   const cancelled = order.status === "cancelled" ? await openCancelledAfterPacking(db, id) : null;
   const materials = await planPackingMaterials(db, id, currentBoxId);
   const consumedBefore = packing ? await consumedMaterialsFor(db, packing.id) : [];
@@ -402,6 +409,9 @@ export async function loadPackingScreen(ctx: Pick<ServiceContext, "db" | "carrie
     },
     waybillParcel: shipment && shipment.status === "created" ? waybillParcel(shipment) : null,
     mismatch: await parcelMismatchFor(db, order, packing, shipment),
+    // Після передачі / скасування накладну вже не переоформити — попередження про вагу не потрібне.
+    weightCheck: isShipped(order.status) || order.status === "cancelled" ? null : await loadParcelWeightCheck(db, order, items),
+    waybillWeightIgnored: manualWeightIgnoredOf(createdWaybill?.requestSnapshot),
     packedWithoutWaybill: order.status === "packed" && !packable && !isDeletedAtCarrier(shipment),
     materialsConsumed: packing ? await materialsConsumedFor(db, packing.id) : false,
     // «Почати/продовжити»: нове пакування або «Накладна створена» з розпочатим пакуванням (напр. після переоформлення).
@@ -424,6 +434,9 @@ export interface PackingSummary {
   progress: Pick<ChecklistProgress, "packedUnits" | "requiredUnits" | "overUnits" | "complete">;
   parcel: { weightGrams: number | null; dimsMm: Dims | null };
   mismatch: ParcelMismatch | null;
+  /** Див. PackingScreen.weightCheck / waybillWeightIgnored. */
+  weightCheck: ParcelWeightCheck | null;
+  waybillWeightIgnored: { manualGrams: number; goodsGrams: number } | null;
   materialsConsumed: boolean;
   /** Замовлення в черзі пакування (накладна створена, не передано) — можна відкрити екран пакування. */
   inQueue: boolean;
@@ -468,12 +481,14 @@ export async function loadPackingSummary(db: DbOrTx, orderId: string): Promise<P
       dimsMm: dimsOf(packing?.parcelLengthMm, packing?.parcelWidthMm, packing?.parcelHeightMm) ?? dimsOf(order.parcelLengthMm, order.parcelWidthMm, order.parcelHeightMm),
     },
     mismatch: await parcelMismatchFor(db, order, packing, shipment),
+    weightCheck: isShipped(order.status) || order.status === "cancelled" ? null : await loadParcelWeightCheck(db, order, items),
+    waybillWeightIgnored: shipment?.status === "created" ? manualWeightIgnoredOf(shipment.requestSnapshot) : null,
     materialsConsumed: packing ? await materialsConsumedFor(db, packing.id) : false,
     inQueue: packable && ["waybill_created", "awaiting_picking", "packed"].includes(order.status),
     packedWithoutWaybill: order.status === "packed" && !packable && !isDeletedAtCarrier(shipment),
     deletedAtCarrier: isDeletedAtCarrier(shipment),
     shopifyLinesPending: shopifyLinesPending(order),
-    fulfilledInShopify: isFulfilledInShopify(order.fulfillmentStatus) && order.status !== "cancelled",
+    fulfilledInShopify: isOrderFulfilledInShopify(order) && order.status !== "cancelled",
     cancelledAfterPacking: order.status === "cancelled" && (await openCancelledAfterPacking(db, id)) !== null,
     parcelBeforeWaybill: !packing && !shipment && (PRE_WAYBILL_PARCEL_STATUSES as readonly OrderStatus[]).includes(order.status),
   };

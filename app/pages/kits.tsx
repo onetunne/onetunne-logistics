@@ -16,6 +16,7 @@ import { hasKey, useLocale, useT, type TFunction } from "~/i18n";
 import { DomainError } from "~/lib/errors";
 import { formatDateTime, formatNumber, formatWeight } from "~/lib/format";
 import { writeAudit } from "~/modules/audit/audit.server";
+import { kitProductMatchesQuery } from "~/modules/packaging/kit-options";
 import { normalizeVariantValue } from "~/modules/packaging/kit-resolution";
 import {
   collectionModels,
@@ -886,7 +887,8 @@ function KitForm({
     return new Set(
       products
         .filter((p) => (!model || p.models.includes(model)) && (!color || p.colors.includes(color)))
-        .filter((p) => !q || [p.title, ...p.skus, ...p.models, ...p.colors].some((v) => lower(v).includes(q)))
+        // Ті самі поля, що й серверний пошук у каталозі (штрихкод, handle, назва варіанта — теж).
+        .filter((p) => !q || kitProductMatchesQuery(p, q))
         .map((p) => p.id),
     );
   }, [products, search, model, color]);

@@ -3,7 +3,7 @@
  * Webhook лише ставить завдання в чергу; завдання завжди перечитує свіжі дані через GraphQL Admin API,
  * тож порядок і повтори подій не призводять до неузгодженості.
  */
-import { and, desc, eq, inArray, like, notLike, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, like, lt, notLike, or, sql } from "drizzle-orm";
 import type { Db, DbOrTx, Tx } from "~/db/client.server";
 import { issues, jobs, orderChanges, orderLineItems, orders, productVariants, products, shipments, shopInstallations } from "~/db/schema";
 import { isFulfilledInShopify, isShipped } from "~/domain/order-status";
@@ -62,18 +62,32 @@ const PAGE_SIZE = 10;
  * fetchedAt — момент ПЕРЕД запитом до Shopify, яким отримано дані товару (час знімка залишку inventory_synced_at).
  * Знімок, позначений часом до читання, а не після, зсуває похибку в бік заниження (замовлення між запитом і записом
  * не рахуються двічі — див. opening.server.ts).
+ *
+ * Етап 5 — варіанти, видалені в Shopify: рядки варіантів не видаляються (на них посилаються позиції замовлень і
+ * облік складу), але товар і варіанти з відповіді отримують ОДИН час синхронізації (updated_at). Варіант, якого немає
+ * в ПОВНОМУ переліку варіантів (opts.variantsComplete), лишається зі старішим updated_at, ніж у товару, — тобто
+ * видалений у Shopify (сканування в пакуванні не вважає його «спільним штрихкодом»: catalogVariantLive у
+ * modules/packing/packing.server.ts). Неповний перелік (є наступна сторінка варіантів) — про відсутні нічого не
+ * відомо: їм ставиться той самий час (вважаються наявними).
  */
-export async function upsertProduct(db: DbOrTx, p: MappedProduct, currency: string, fetchedAt: Date = new Date()): Promise<"saved" | "stale"> {
+export async function upsertProduct(
+  db: DbOrTx,
+  p: MappedProduct,
+  currency: string,
+  fetchedAt: Date = new Date(),
+  opts: { variantsComplete?: boolean } = {},
+): Promise<"saved" | "stale"> {
   return db.transaction(async (tx) => {
     const [existing] = await tx.select().from(products).where(eq(products.shopifyProductId, p.shopifyProductId)).for("update");
     if (existing?.shopifyUpdatedAt && existing.shopifyUpdatedAt > p.shopifyUpdatedAt) return "stale";
+    const syncedAt = new Date();
     const values = {
       title: p.title,
       handle: p.handle,
       imageUrl: p.imageUrl,
       status: p.status,
       shopifyUpdatedAt: p.shopifyUpdatedAt,
-      updatedAt: new Date(),
+      updatedAt: syncedAt,
     };
     let productId: string;
     if (existing) {
@@ -85,12 +99,17 @@ export async function upsertProduct(db: DbOrTx, p: MappedProduct, currency: stri
     }
     for (const v of p.variants) {
       // inventorySyncedAt — час знімка залишку Shopify (opening.server.ts порівнює з ним дату замовлень).
-      const now = new Date();
-      const data = { ...v, productId, currency, inventorySyncedAt: v.inventoryAvailable === null ? null : fetchedAt, updatedAt: now };
+      const data = { ...v, productId, currency, inventorySyncedAt: v.inventoryAvailable === null ? null : fetchedAt, updatedAt: syncedAt };
       await tx
         .insert(productVariants)
         .values(data)
         .onConflictDoUpdate({ target: productVariants.shopifyVariantId, set: data });
+    }
+    if (!opts.variantsComplete) {
+      await tx
+        .update(productVariants)
+        .set({ updatedAt: syncedAt })
+        .where(and(eq(productVariants.productId, productId), lt(productVariants.updatedAt, syncedAt)));
     }
     return "saved";
   });
@@ -103,7 +122,7 @@ export async function syncProduct(db: Db, admin: AdminGraphql, productGid: strin
     await markProductDeleted(db, productGid);
     return "deleted" as const;
   }
-  return upsertProduct(db, mapProduct(data.product), currency, fetchedAt);
+  return upsertProduct(db, mapProduct(data.product), currency, fetchedAt, { variantsComplete: !data.product.variants.pageInfo?.hasNextPage });
 }
 
 export async function markProductDeleted(db: DbOrTx, productGid: string) {
@@ -120,7 +139,7 @@ export async function syncProductsPage(db: Db, admin: AdminGraphql, shop: string
   for (const p of data.products.nodes) {
     // Товар із великою кількістю варіантів перечитується окремо (повний список варіантів).
     if (p.variants.pageInfo?.hasNextPage) await syncProduct(db, admin, p.id, currency);
-    else await upsertProduct(db, mapProduct(p), currency, fetchedAt);
+    else await upsertProduct(db, mapProduct(p), currency, fetchedAt, { variantsComplete: true });
   }
   if (data.products.pageInfo.hasNextPage && data.products.pageInfo.endCursor) {
     await enqueueJob(db, JOB.productsPage, { shop, after: data.products.pageInfo.endCursor }, { dedupeKey: `products:${data.products.pageInfo.endCursor}` });
@@ -381,6 +400,14 @@ async function settleShopifyChangedIssue(tx: DbOrTx, orderId: string, appliedFie
     .where(eq(issues.id, open.id));
 }
 
+async function settleFulfilledOutsideIssue(tx: DbOrTx, orderId: string) {
+  const now = new Date();
+  await tx
+    .update(issues)
+    .set({ status: "resolved", resolvedAt: now, resolvedBy: SYSTEM_ACTOR.id, resolution: "shopify_applied", updatedAt: now })
+    .where(and(eq(issues.orderId, orderId), eq(issues.status, "open"), eq(issues.code, "SHOPIFY_FULFILLED_OUTSIDE_APP")));
+}
+
 async function openSyncIssue(
   tx: DbOrTx,
   orderId: string,
@@ -449,6 +476,7 @@ async function applyOrderInTx(tx: Tx, ctx: ServiceContext, m: MappedOrder, mode:
   const common = {
     financialStatus: m.financialStatus,
     fulfillmentStatus: m.fulfillmentStatus,
+    shopifyShippableFulfilled: m.shippableFulfilled,
     currency: m.currency,
     subtotal: m.subtotal,
     shippingPaid: m.shippingPaid,
@@ -492,7 +520,7 @@ async function applyOrderInTx(tx: Tx, ctx: ServiceContext, m: MappedOrder, mode:
       type: "order",
       id: row!.id,
     }, { status, test: m.test });
-    const fulfilledOutside = status !== "cancelled" && !isShipped(status) && fulfilledInShopify(m.fulfillmentStatus);
+    const fulfilledOutside = status !== "cancelled" && !isShipped(status) && fulfilledInShopify(m.fulfillmentStatus, m.shippableFulfilled);
     if (fulfilledOutside) {
       await openSyncIssue(tx, row!.id, "SHOPIFY_FULFILLED_OUTSIDE_APP", { status: m.fulfillmentStatus ?? "" });
     }
@@ -514,8 +542,22 @@ async function applyOrderInTx(tx: Tx, ctx: ServiceContext, m: MappedOrder, mode:
   );
   const lineDiff = await diffLineItems(tx, existing.id, m);
   const open = existing.status !== "cancelled" && !isShipped(existing.status);
-  const fulfilledOutside = open && fulfilledInShopify(m.fulfillmentStatus) && existing.fulfillmentStatus !== m.fulfillmentStatus;
+  // Нове виконання фізичних товарів у Shopify: змінився статус виконання або (за того самого часткового) Shopify уперше
+  // виконав позиції з доставкою (раніше — лише цифрові, напр. подарункову картку).
+  const fulfilledOutside =
+    open &&
+    fulfilledInShopify(m.fulfillmentStatus, m.shippableFulfilled) &&
+    (existing.fulfillmentStatus !== m.fulfillmentStatus || !fulfilledInShopify(existing.fulfillmentStatus, existing.shopifyShippableFulfilled));
   const pendingBefore = existing.shopifyLinesPendingAt !== null;
+  // Shopify більше не показує виконання фізичних товарів (скасовано виконання; або уточнено, що виконано лише цифрові
+  // позиції, напр. подарункову картку) — попередження «виконано поза застосунком» уже не діє.
+  if (
+    open &&
+    !fulfilledInShopify(m.fulfillmentStatus, m.shippableFulfilled) &&
+    (existing.fulfillmentStatus !== m.fulfillmentStatus || existing.shopifyShippableFulfilled !== m.shippableFulfilled)
+  ) {
+    await settleFulfilledOutsideIssue(tx, existing.id);
+  }
   if (!lineDiff.changed) await backfillLineDetails(tx, lineDiff.stored, m);
   if (changes.length === 0 && !lineDiff.changed && !fulfilledOutside) {
     // Позиції Shopify знову збігаються зі збереженими — неперенесених змін позицій більше немає.
@@ -1126,10 +1168,11 @@ export async function recordInstallation(db: Db, shop: string, scopes: string | 
   if (existing) {
     await db
       .update(shopInstallations)
-      .set({ scopes, uninstalledAt: null, webhooksRegisteredAt: new Date(), updatedAt: new Date() })
+      .set({ scopes, uninstalledAt: null, updatedAt: new Date() })
       .where(eq(shopInstallations.shop, shop));
   } else {
-    await db.insert(shopInstallations).values({ shop, scopes, webhooksRegisteredAt: new Date() });
+    // Час реєстрації підписок записує recordWebhookRegistration (лише після підтвердження Shopify).
+    await db.insert(shopInstallations).values({ shop, scopes });
   }
   const firstSync = !existing?.productsSyncedAt;
   if (firstSync) await enqueueJob(db, JOB.productsPage, { shop, after: null }, { dedupeKey: "products:start" });
@@ -1137,7 +1180,11 @@ export async function recordInstallation(db: Db, shop: string, scopes: string | 
 }
 
 export async function recordUninstall(db: DbOrTx, shop: string) {
-  await db.update(shopInstallations).set({ uninstalledAt: new Date(), updatedAt: new Date() }).where(eq(shopInstallations.shop, shop));
+  // Підписки застосунку після видалення недійсні: повторне встановлення перереєструє їх (і завдання перевірки теж).
+  await db
+    .update(shopInstallations)
+    .set({ uninstalledAt: new Date(), webhooksConfigKey: null, updatedAt: new Date() })
+    .where(eq(shopInstallations.shop, shop));
 }
 
 export async function currentShop(db: DbOrTx): Promise<typeof shopInstallations.$inferSelect | null> {

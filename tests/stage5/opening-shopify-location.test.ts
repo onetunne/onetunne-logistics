@@ -17,11 +17,15 @@ import {
 import type { DatabaseHandle, Db } from "~/db/client.server";
 import { MIGRATIONS_FOLDER } from "~/db/migrate.server";
 import { DEMO_SETTINGS, seedReferenceData } from "~/db/seed/seed.server";
+import { isOrderFulfilledInShopify } from "~/domain/order-status";
 import { ForbiddenError } from "~/domain/permissions";
 import type { AdminGraphql } from "~/integrations/shopify/admin-client.server";
 import type { GqlOrder, GqlProduct } from "~/integrations/shopify/graphql";
 import { QueueingShopifyGateway } from "~/integrations/shopify/queueing-gateway.server";
 import { ensureStockItemForVariant } from "~/modules/inventory/ledger.server";
+import { openInventory, variantsOnUnsettledOrders } from "~/modules/inventory/opening.server";
+import { validateOrderById } from "~/modules/orders/workflow.server";
+import { cancelWaybillDetailed, createWaybill } from "~/modules/shipments/waybill.server";
 import { getDefaultWarehouse } from "~/modules/inventory/warehouse.server";
 import { createSyncHandlers } from "~/modules/shopify-sync/handlers.server";
 import { initializeInventoryFromShopify } from "~/modules/shopify-sync/inventory-opening.server";
@@ -234,6 +238,95 @@ describe("variants added after initialization are opened automatically (gap-14)"
   });
 });
 
+describe("auto-open waits for orders whose Shopify items are not applied yet (G1a-NEW-2)", () => {
+  it("a variant on an order with pending Shopify line changes stays unopened; after the re-read it opens with Shopify's available", async () => {
+    const handlers = createSyncHandlers({ db: h.db, serviceContext: () => ctx, admin: async () => admin });
+    const productWith104 = (updatedAt: string) =>
+      gqlProduct(1, {
+        updatedAt,
+        variants: {
+          nodes: [
+            { ...gqlProduct(1).variants.nodes[0]!, inventoryQuantity: 15 },
+            variant2("gid://shopify/InventoryItem/102", "SKU-1-RED", "gid://shopify/ProductVariant/102"),
+            variant2("gid://shopify/InventoryItem/103", "SKU-1-BLU", "gid://shopify/ProductVariant/103"),
+            variant2("gid://shopify/InventoryItem/104", "SKU-1-GRN", "gid://shopify/ProductVariant/104"),
+          ],
+        },
+      });
+    const syncProductJob = async (updatedAt: string) => {
+      store.products.set("gid://shopify/Product/1", productWith104(updatedAt));
+      const [job] = await h.db
+        .insert(jobs)
+        .values({ type: JOB.syncProduct, payload: { shop: SHOP, productGid: "gid://shopify/Product/1" } })
+        .returning();
+      await handlers[JOB.syncProduct]!.run(job!);
+    };
+    // 104 ще не зберігається в локації складу → лишається невідкритим.
+    inv.setLevel("gid://shopify/InventoryItem/104", { available: 0, onHand: 0, committed: 0, stocked: false });
+    await syncProductJob("2026-11-26T10:00:00Z");
+    const [v104] = await h.db.select().from(productVariants).where(eq(productVariants.shopifyVariantId, "gid://shopify/ProductVariant/104"));
+    const item = await ensureStockItemForVariant(h.db, v104!.id);
+    const openedAt = async () => (await h.db.select().from(inventoryBalances).where(eq(inventoryBalances.stockItemId, item)))[0]?.openedAt ?? null;
+    expect(await openedAt()).toBeNull();
+
+    // Замовлення (до знімка) на 2 шт. 104 отримує накладну; у Shopify 1 одиницю повернуто й поповнено → позначка.
+    const greenLine = (quantity: number, currentQuantity?: number) => ({
+      nodes: [
+        {
+          ...gqlOrder(7201).lineItems.nodes[0]!,
+          sku: "SKU-1-GRN",
+          quantity,
+          ...(currentQuantity === undefined ? {} : { currentQuantity }),
+          variant: { id: "gid://shopify/ProductVariant/104", product: { id: "gid://shopify/Product/1" } },
+        },
+      ],
+    });
+    await shopifyHas(gqlOrder(7201, { lineItems: greenLine(2) }));
+    const id = await orderId(7201);
+    await validateOrderById(ctx, id, "manual");
+    const created = await createWaybill(ctx, id);
+    expect(created.kind).toBe("created");
+    expect((await shopifyHas(gqlOrder(7201, { updatedAt: "2026-11-20T11:00:00Z", lineItems: greenLine(2, 1) }))).result).toBe("conflict_reported");
+    expect((await h.db.select().from(orders).where(eq(orders.id, id)))[0]!.shopifyLinesPendingAt).not.toBeNull();
+
+    // Локація починає зберігати 104: on_hand 6, закріплено 1, доступно 5. Синхронізація товару НЕ відкриває 104.
+    inv.setLevel("gid://shopify/InventoryItem/104", { available: 5, onHand: 6, committed: 1, stocked: true });
+    await syncProductJob("2026-11-26T11:00:00Z");
+    expect(await openedAt()).toBeNull();
+    const deferred = await openInventory({ db: h.db, actor: OWNER, now: () => new Date() }, {
+      snapshot: { kind: "location", locationId: LOC, levels: new Map([[v104!.id, { available: 5, snapshotAt: new Date() }]]), notStocked: 0 },
+      onlyIfInitialized: true,
+      deferUnsettledOrders: true,
+    });
+    expect(deferred).toMatchObject({ opened: 0, deferredUnsettledVariants: 1 });
+    expect(await openedAt()).toBeNull();
+
+    // Скасування накладної → повторне читання застосовує позиції (1 шт.) і знімає позначку.
+    expect((await cancelWaybillDetailed(ctx, created.kind === "created" ? created.shipment.id : "", { purpose: "correction" })).shopifyResync).toBe("queued");
+    const [sync] = await h.db.select().from(jobs).where(and(eq(jobs.type, JOB.syncOrder), eq(jobs.dedupeKey, `order:${gid(7201)}`), eq(jobs.status, "queued")));
+    await handlers[JOB.syncOrder]!.run(sync!);
+    await h.db.update(jobs).set({ status: "succeeded" }).where(eq(jobs.id, sync!.id));
+    expect((await h.db.select().from(orders).where(eq(orders.id, id)))[0]!.shopifyLinesPendingAt).toBeNull();
+
+    // Наступна синхронізація товару відкриває 104: on_hand = 5 + 1, резерв 1 → доступно = 5, як у Shopify.
+    await syncProductJob("2026-11-26T12:00:00Z");
+    expect(await openedAt()).not.toBeNull();
+    const b = await balance(h.db, item);
+    expect(b).toMatchObject({ onHand: 6, reserved: 1 });
+    expect(b.onHand - b.reserved).toBe(5);
+    expect(await reserved(7201)).toBe(1);
+  });
+
+  it("variants on orders with items saved before stage 5 (current_quantity NULL) are deferred too", async () => {
+    await shopifyHas(gqlOrder(7202, { lineItems: line(7202, 1) }));
+    const [v101] = await h.db.select().from(productVariants).where(eq(productVariants.shopifyVariantId, "gid://shopify/ProductVariant/101"));
+    expect(await variantsOnUnsettledOrders(h.db, [v101!.id])).toEqual(new Set());
+    await h.db.update(orderLineItems).set({ currentQuantity: null }).where(eq(orderLineItems.orderId, await orderId(7202)));
+    expect(await variantsOnUnsettledOrders(h.db, [v101!.id])).toEqual(new Set([v101!.id]));
+    await h.db.update(orderLineItems).set({ currentQuantity: 1 }).where(eq(orderLineItems.orderId, await orderId(7202)));
+  });
+});
+
 describe("migration 0006 on a database with stage-5 data", () => {
   it("adds the new columns without touching existing rows", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ot-mig6-"));
@@ -257,6 +350,35 @@ describe("migration 0006 on a database with stage-5 data", () => {
       const [l] = await raw.db.select().from(orderLineItems);
       expect(o).toMatchObject({ orderNumber: "#M-1", shopifyLinesPendingAt: null });
       expect(l).toMatchObject({ quantity: 2, currentQuantity: null, shopifyAddedAt: null });
+    } finally {
+      await raw.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("migration 0008 (orders.shopify_shippable_fulfilled) on a database with data", () => {
+  it("adds the nullable column; existing partially fulfilled orders stay conservatively blocked (null)", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ot-mig8-"));
+    fs.mkdirSync(path.join(dir, "meta"));
+    const journal = JSON.parse(fs.readFileSync(path.join(MIGRATIONS_FOLDER, "meta/_journal.json"), "utf8")) as {
+      entries: Array<{ idx: number; tag: string }>;
+    };
+    const target = journal.entries.find((e) => e.tag.includes("order_shippable_fulfilled"));
+    expect(target).toBeDefined();
+    const previous = { ...journal, entries: journal.entries.filter((e) => e.idx < target!.idx) };
+    fs.writeFileSync(path.join(dir, "meta/_journal.json"), JSON.stringify(previous));
+    for (const e of previous.entries) fs.copyFileSync(path.join(MIGRATIONS_FOLDER, `${e.tag}.sql`), path.join(dir, `${e.tag}.sql`));
+    const raw = await openRaw();
+    try {
+      await raw.migrate(dir);
+      await raw.db.execute(sql`insert into orders (source, order_number, currency, subtotal, total, fulfillment_status, shopify_lines_pending_at)
+        values ('shopify', '#M-8', 'EUR', '1.00', '1.00', 'partially_fulfilled', now())`);
+      await raw.migrate(MIGRATIONS_FOLDER);
+      const [o] = await raw.db.select().from(orders);
+      expect(o).toMatchObject({ orderNumber: "#M-8", fulfillmentStatus: "partially_fulfilled", shopifyShippableFulfilled: null });
+      expect(o!.shopifyLinesPendingAt).not.toBeNull();
+      expect(isOrderFulfilledInShopify(o!)).toBe(true);
     } finally {
       await raw.close();
       fs.rmSync(dir, { recursive: true, force: true });

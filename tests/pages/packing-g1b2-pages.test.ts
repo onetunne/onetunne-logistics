@@ -204,6 +204,11 @@ describe("packing screen (security-3, gap-5, production-5)", () => {
     } finally {
       for (const t of templates) await env.handle.db.update(kitTemplates).set({ active: t.active }).where(eq(kitTemplates.id, t.id));
     }
+    // Запит без відбитка (сторінка до появи поля, саморобний запит) не списує «наосліп» — теж повторне підтвердження.
+    expect(await post(packingOrder, `picking/${id}`, { intent: "confirm", version }, { orderId: id })).toMatchObject({
+      ok: false,
+      error: "packing.error.materialsChanged",
+    });
     const ok = await post(packingOrder, `picking/${id}`, { intent: "confirm", version, materialsKey: materialsKey! }, { orderId: id });
     expect(ok).toMatchObject({ ok: true, message: "packing.confirm.done" });
   });

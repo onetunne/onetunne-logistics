@@ -1,15 +1,21 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { and, count, eq } from "drizzle-orm";
+import { and, count, eq, inArray, isNotNull } from "drizzle-orm";
 import {
+  collections,
   inventoryMovements,
+  kitTemplateCollections,
   kitTemplateLines,
   kitTemplates,
   packagingMaterials,
+  productCollections,
+  productVariants,
   productionBatches,
   stockAlerts,
   stockItems,
   warehouses,
 } from "~/db/schema";
+import { DEMO_PRODUCTS } from "~/db/seed/demo-data";
+import { DEMO_COLLECTION_TEMPLATES } from "~/db/seed/demo-warehouse.server";
 import { resetDemoData, seedDemoData } from "~/db/seed/seed.server";
 import { makeActor, SYSTEM_ACTOR, type Actor } from "~/domain/permissions";
 import { getBalances } from "~/modules/inventory/ledger.server";
@@ -80,6 +86,52 @@ describe("demo warehouse data", () => {
     expect(defaults).toHaveLength(1);
     expect(defaults[0]!.name).toBe("Основний склад");
     expect(await countOf(warehouses)).toBe(1);
+  });
+
+  it("a demo database seeded before collections gets the collection templates and variant dimensions once (NEW-G4-4)", async () => {
+    const db = env.handle.db;
+    const names = DEMO_COLLECTION_TEMPLATES.map((t) => t.name);
+    const collectionTemplateNames = async () =>
+      (await db.select({ name: kitTemplates.name }).from(kitTemplates).where(eq(kitTemplates.appliesTo, "collections"))).map((r) => r.name).sort();
+    const withDims = async () =>
+      (await db.select({ sku: productVariants.sku }).from(productVariants).where(isNotNull(productVariants.lengthMm))).map((r) => r.sku).sort();
+    const expectedDims = DEMO_PRODUCTS.flatMap((p) => p.variants.filter((v) => v.dimsMm).map((v) => v.sku)).sort();
+    expect(await collectionTemplateNames()).toEqual([...names].sort());
+    expect(await withDims()).toEqual(expectedDims);
+    const fenderS = DEMO_PRODUCTS.flatMap((p) => p.variants).find((v) => v.sku === "OT-FK-S")!;
+
+    // Стара демо-база: склад і шаблони є, а колекцій, шаблонів «на колекцію» й габаритів варіантів — ні.
+    const old = await db.select({ id: kitTemplates.id }).from(kitTemplates).where(eq(kitTemplates.appliesTo, "collections"));
+    await db.delete(kitTemplates).where(inArray(kitTemplates.id, old.map((r) => r.id)));
+    await db.delete(kitTemplateCollections);
+    await db.delete(productCollections);
+    await db.delete(collections);
+    await db.update(productVariants).set({ lengthMm: null, widthMm: null, heightMm: null });
+    // Габарит, внесений власником вручну, не перезаписується.
+    await db.update(productVariants).set({ lengthMm: 999, widthMm: 99, heightMm: 9 }).where(eq(productVariants.sku, "OT-PH-WHT"));
+    const before = [await countOf(packagingMaterials), await countOf(productionBatches), await countOf(inventoryMovements)];
+
+    await seedDemoData(env.ctx(SYSTEM_ACTOR));
+    expect(await collectionTemplateNames()).toEqual([...names].sort());
+    expect((await db.select().from(collections)).length).toBeGreaterThan(0);
+    expect(await withDims()).toEqual(expectedDims);
+    const [s] = await db.select().from(productVariants).where(eq(productVariants.sku, "OT-FK-S"));
+    expect([s!.lengthMm, s!.widthMm, s!.heightMm]).toEqual(fenderS.dimsMm);
+    const [w] = await db.select().from(productVariants).where(eq(productVariants.sku, "OT-PH-WHT"));
+    expect([w!.lengthMm, w!.widthMm, w!.heightMm]).toEqual([999, 99, 9]);
+    // Склад не дублюється.
+    expect([await countOf(packagingMaterials), await countOf(productionBatches), await countOf(inventoryMovements)]).toEqual(before);
+    const tpl = await db
+      .select({ collectionId: kitTemplateCollections.collectionId })
+      .from(kitTemplateCollections)
+      .innerJoin(kitTemplates, eq(kitTemplates.id, kitTemplateCollections.templateId))
+      .where(eq(kitTemplates.name, names[0]!));
+    expect(tpl).toHaveLength(1);
+
+    // Шаблон, який власник видалив пізніше, після перезапуску (повторного seed) не повертається.
+    await db.delete(kitTemplates).where(eq(kitTemplates.name, names[0]!));
+    await seedDemoData(env.ctx(SYSTEM_ACTOR));
+    expect(await collectionTemplateNames()).toEqual(names.filter((n) => n !== names[0]).sort());
   });
 });
 

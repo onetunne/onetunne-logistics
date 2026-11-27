@@ -115,6 +115,11 @@ export interface MappedOrder {
   orderNumber: string;
   financialStatus: string;
   fulfillmentStatus: string | null;
+  /**
+   * Етап 5: Shopify виконав (або міг виконати) одиниці позицій, що потребують доставки; false — виконано лише позиції
+   * без доставки (цифрові подарункові картки тощо); null — у відповіді немає полів позицій (shippableFulfilled).
+   */
+  shippableFulfilled: boolean | null;
   currency: string;
   subtotal: string;
   shippingPaid: string;
@@ -164,6 +169,24 @@ function validDate(value: string | null | undefined): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+/**
+ * Чи виконав Shopify одиниці позицій, що потребують доставки (orders.shopify_shippable_fulfilled). Позиція «не
+ * торкнута виконанням», лише коли unfulfilledQuantity ≥ quantity (див. GqlOrder: тоді жодної одиниці не виконано, хоч
+ * як Shopify враховує повернення); інакше — виконано або неоднозначно (повернення) → true (накладна не створюється).
+ * Не враховуються позиції без доставки (requiresShipping: false) і без одиниць до відправлення (currentQuantity 0:
+ * накладна, пакування й митні позиції застосунку — за поточною кількістю). Немає полів хоча б в одній позиції → null.
+ */
+export function shippableFulfilled(nodes: GqlOrder["lineItems"]["nodes"]): boolean | null {
+  let fulfilled = false;
+  for (const li of nodes) {
+    if (typeof li.unfulfilledQuantity !== "number" || typeof li.requiresShipping !== "boolean") return null;
+    // Позиція без одиниць до відправлення (повністю повернена/видалена) застосунком не відправляється.
+    const current = typeof li.currentQuantity === "number" ? li.currentQuantity : li.quantity;
+    if (li.requiresShipping && current > 0 && li.unfulfilledQuantity < li.quantity) fulfilled = true;
+  }
+  return fulfilled;
+}
+
 export function mapOrder(o: GqlOrder): MappedOrder {
   const total = o.totalPriceSet.shopMoney;
   const shippingPaid = normalizeAmount(o.totalShippingPriceSet?.shopMoney.amount ?? "0");
@@ -173,6 +196,7 @@ export function mapOrder(o: GqlOrder): MappedOrder {
     orderNumber: o.name,
     financialStatus: (o.displayFinancialStatus ?? "UNKNOWN").toLowerCase(),
     fulfillmentStatus: o.displayFulfillmentStatus?.toLowerCase() ?? null,
+    shippableFulfilled: shippableFulfilled(o.lineItems.nodes),
     currency: total.currencyCode,
     subtotal: normalizeAmount(o.subtotalPriceSet?.shopMoney.amount ?? total.amount),
     shippingPaid,

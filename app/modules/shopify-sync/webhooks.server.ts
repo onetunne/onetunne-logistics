@@ -6,6 +6,7 @@ import type { Db } from "~/db/client.server";
 import { enqueueJob } from "~/modules/jobs/queue.server";
 import { inventoryItemGidFromLevelPayload } from "~/integrations/shopify/inventory-graphql";
 import { claimWebhook, completeWebhook } from "~/modules/webhooks/dedupe.server";
+import { scheduleCollectionSync } from "./collections.server";
 import { gidFromPayload } from "./mappers";
 import { JOB } from "./sync.server";
 
@@ -56,8 +57,12 @@ export async function handleShopifyWebhook(db: Db, event: IncomingWebhook): Prom
       const collectionGid = gidFromPayload(event.payload, "Collection");
       if (collectionGid) queued = await enqueueOrQueued(db, JOB.deleteCollection, { collectionGid }, `collection-delete:${collectionGid}`);
     } else if (topic === "COLLECTIONS_CREATE" || topic === "COLLECTIONS_UPDATE") {
+      // Читання зараз + перевірки через 2 і 15 хв: членство за умовами Shopify оновлює асинхронно (collections.server.ts).
       const collectionGid = gidFromPayload(event.payload, "Collection");
-      if (collectionGid) queued = await enqueueOrQueued(db, JOB.syncCollection, { shop, collectionGid }, `collection:${collectionGid}`);
+      if (collectionGid) {
+        await scheduleCollectionSync(db, shop, collectionGid);
+        queued = true;
+      }
     } else if (topic === "INVENTORY_LEVELS_UPDATE") {
       // Id з admin_graphql_api_id (рядок): числове inventory_item_id понад 2^53 після JSON.parse неточне.
       const gid = inventoryItemGidFromLevelPayload(event.payload);

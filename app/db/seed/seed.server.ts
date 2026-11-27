@@ -51,7 +51,7 @@ import type { ServiceContext } from "~/server/types";
 import { ensureDefaultWarehouse } from "~/modules/inventory/warehouse.server";
 import { syncOrderReservations } from "~/modules/inventory/reservations.server";
 import { DEMO_COLLECTIONS, DEMO_ORDERS, DEMO_PRODUCTS, DEMO_SHIPPER, SIMULATED_ORDER_TEMPLATES, type DemoOrderSeed } from "./demo-data";
-import { seedDemoWarehouse } from "./demo-warehouse.server";
+import { isDemoWarehouseSeeded, seedDemoWarehouse, upgradeDemoWarehouseForCollections } from "./demo-warehouse.server";
 
 /** Довідкові дані, потрібні в обох режимах (ідемпотентно; наявні записи не перезаписуються). */
 export async function seedReferenceData(db: Db, settingsOverrides: Partial<AllSettings> = {}): Promise<void> {
@@ -208,14 +208,20 @@ export async function seedDemoData(ctx: ServiceContext): Promise<void> {
   await seedReferenceData(db, DEMO_SETTINGS);
   if (!(await isDemoSeeded(db))) await seedDemoOrders(ctx);
   // Етап 5: колекції й склад (окремо ідемпотентно — і для демо-баз, заповнених до етапу 5).
-  await seedDemoCollections(db);
+  const collectionsCreated = await seedDemoCollections(db);
+  const warehouseSeededBefore = await isDemoWarehouseSeeded(ctx);
   await seedDemoWarehouse(ctx);
+  // Демо-база зі складом, заповнена до появи колекцій: шаблони «на колекцію» й габарити варіантів — один раз.
+  if (collectionsCreated && warehouseSeededBefore) await upgradeDemoWarehouseForCollections(ctx);
 }
 
-/** Вигадані колекції й членство товарів (за handle товару). Ідемпотентно: якщо колекції вже є — нічого не робить. */
-export async function seedDemoCollections(db: Db): Promise<void> {
+/**
+ * Вигадані колекції й членство товарів (за handle товару). Ідемпотентно: якщо колекції вже є — нічого не робить.
+ * Повертає true, якщо колекції створено зараз.
+ */
+export async function seedDemoCollections(db: Db): Promise<boolean> {
   const [row] = await db.select({ c: count() }).from(collections);
-  if (Number(row?.c ?? 0) > 0) return;
+  if (Number(row?.c ?? 0) > 0) return false;
   const catalog = await db.select({ id: products.id, handle: products.handle }).from(products);
   const byHandle = new Map(catalog.map((p) => [p.handle, p.id]));
   const handleOf = new Map(DEMO_PRODUCTS.map((p) => [p.key, p.handle]));
@@ -226,6 +232,7 @@ export async function seedDemoCollections(db: Db): Promise<void> {
       if (members.length) await tx.insert(productCollections).values(members.map((productId) => ({ productId, collectionId: inserted!.id })));
     }
   });
+  return true;
 }
 
 async function seedDemoOrders(ctx: ServiceContext): Promise<void> {

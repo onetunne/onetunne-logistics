@@ -228,7 +228,9 @@ describe("packing screen (/picking/:orderId)", () => {
     const [p2] = await env.handle.db.select().from(orderPacking).where(eq(orderPacking.orderId, id));
     // Застаріла версія (до ручної зміни) → конфлікт; актуальна → «Запаковано».
     expect(await post(packingOrder, path, { intent: "confirm", version: String(p1!.version) }, params)).toMatchObject({ ok: false, error: "error.conflict" });
-    expect(await post(packingOrder, path, { intent: "confirm", version: String(p2!.version) }, params)).toMatchObject({ ok: true, message: "packing.confirm.done" });
+    // Форма «Запаковано» надсилає відбиток переліку матеріалів, який бачив пакувальник.
+    const { materialsKey } = (await call(packingOrder, path, params)) as Awaited<ReturnType<typeof packingOrder.loader>>;
+    expect(await post(packingOrder, path, { intent: "confirm", version: String(p2!.version), materialsKey }, params)).toMatchObject({ ok: true, message: "packing.confirm.done" });
     expect(await post(packingOrder, path, { intent: "confirm", version: String(p2!.version) }, params)).toMatchObject({ ok: true, message: "packing.confirm.already" });
     html = await render(packingOrder, "picking/:orderId", path);
     expect(html).toContain(uk("packing.unpack.button"));

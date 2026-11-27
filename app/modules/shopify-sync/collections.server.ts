@@ -13,18 +13,21 @@
  *   відповідати умовам колекції через зміну самого товару («Not fired when attribute changes affect whether a product
  *   matches a collection's rules»), але products/update приходить.
  * - collections/create|update (ручне додавання/вилучення товарів, зміна умов): читається перелік товарів колекції,
- *   і для товарів, членство яких розходиться з базою, ставиться перечитування їхніх колекцій.
- * - Повна синхронізація (після повної синхронізації товарів або кнопкою власника): список колекцій (назви, виявлення
- *   видалених без webhook) → сторінки «товари з колекціями».
+ *   і для товарів, членство яких розходиться з базою, ставиться перечитування їхніх колекцій. Shopify оновлює членство
+ *   за умовами/джерелами колекції асинхронно («might be processed asynchronously», Job — Collection, collectionUpdate,
+ *   2026-10), а нового webhook після завершення не надсилає, тож колекція перечитується ще через 2 і 15 хв
+ *   (scheduleCollectionSync).
+ * - Повна синхронізація (після повної синхронізації товарів, щодня за розкладом або кнопкою власника): список колекцій
+ *   (назви, виявлення видалених без webhook) → сторінки «товари з колекціями».
  * - collections/delete: колекцію позначено видаленою (deleted_at), членство прибрано; шаблони, що на неї посилалися,
  *   лишаються й показують це (ціль не змінюється мовчки).
  *
  * Членство 2026-10 може бути на рівні варіантів (Product.variantsInCollection). Тут воно на рівні товару: товар
  * у колекції — усі його варіанти (для варіантів — фільтр моделі/кольору шаблону). Обмеження задокументоване.
  */
-import { and, eq, inArray, isNotNull, isNull, lt, notInArray, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, lt, notInArray, or, sql } from "drizzle-orm";
 import type { Db, DbOrTx } from "~/db/client.server";
-import { collections, productCollections, products, shopInstallations } from "~/db/schema";
+import { collections, jobs, productCollections, products, shopInstallations } from "~/db/schema";
 import type { AdminGraphql } from "~/integrations/shopify/admin-client.server";
 import {
   COLLECTION_PRODUCTS_QUERY,
@@ -50,6 +53,28 @@ const MAX_PRODUCT_COLLECTION_PAGES = 40;
 const MAX_COLLECTION_PRODUCT_PAGES = 200;
 
 export const productCollectionsDedupeKey = (productGid: string) => `product-collections:${productGid}`;
+export const collectionSyncDedupeKey = (collectionGid: string) => `collection:${collectionGid}`;
+export const collectionRecheckDedupeKey = (collectionGid: string, delayMs: number) =>
+  `collection:${collectionGid}:recheck:${Math.round(delayMs / 60_000)}m`;
+
+/**
+ * Повторні читання колекції після webhook collections/create|update. Shopify: коли членство змінюється через умови,
+ * джерела чи правила колекції, «the operation might be processed asynchronously» (Job; Collection і collectionUpdate,
+ * 2026-10). Читання одразу після webhook може повернути старий перелік (для нової автоматичної колекції — порожній),
+ * а наступного webhook не буде: collections/update не надсилається, коли товар починає/перестає відповідати умовам,
+ * і товари не змінювалися (products/update теж немає). Стан цього Job ззовні не видно (Collection.activeOperations —
+ * лише дублювання колекцій), тож колекцію перечитують ще двічі. Решту (дуже довга обробка в Shopify) ловить щоденна
+ * повна синхронізація (runScheduledCollectionsSync).
+ */
+export const COLLECTION_RECHECK_DELAYS_MS = [2 * 60_000, 15 * 60_000] as const;
+/** Повторний webhook відкладає вже заплановану перевірку, але не далі ніж на годину від її створення. */
+export const COLLECTION_RECHECK_MAX_DEFER_MS = 60 * 60_000;
+
+/** Щоденна повна синхронізація колекцій (страховка: асинхронна обробка умов у Shopify, загублені webhooks). */
+export const SCHEDULED_COLLECTIONS_SYNC_DEDUPE_KEY = "collections:scheduled";
+export const SCHEDULED_COLLECTIONS_SYNC_INTERVAL_MS = 24 * 60 * 60_000;
+/** Перша планова перевірка після старту сервера (якщо в черзі ще немає запланованої). */
+export const SCHEDULED_COLLECTIONS_SYNC_FIRST_DELAY_MS = 60 * 60_000;
 
 const iso = (d: Date) => d.toISOString();
 
@@ -168,6 +193,27 @@ export async function markCollectionDeleted(db: DbOrTx, collectionGid: string, a
 }
 
 /**
+ * Webhook collections/create|update: читання колекції зараз і дві відкладені перевірки (COLLECTION_RECHECK_DELAYS_MS;
+ * окремі dedupe-ключі — читання «зараз», що вже чекає в черзі, їх не поглинає). Повертає true, якщо поставлено
+ * нове читання «зараз».
+ */
+export async function scheduleCollectionSync(db: DbOrTx, shop: string, collectionGid: string, now: Date = new Date()): Promise<boolean> {
+  const queued = await enqueueJob(db, JOB.syncCollection, { shop, collectionGid }, { dedupeKey: collectionSyncDedupeKey(collectionGid) });
+  const payload = JSON.stringify({ shop, collectionGid, recheck: true });
+  for (const delayMs of COLLECTION_RECHECK_DELAYS_MS) {
+    const runAt = new Date(now.getTime() + delayMs).toISOString();
+    await db.execute(sql`
+      insert into ${jobs} (type, payload, dedupe_key, run_at, max_attempts)
+      values (${JOB.syncCollection}, ${payload}::jsonb, ${collectionRecheckDedupeKey(collectionGid, delayMs)}, ${runAt}::timestamptz, 6)
+      on conflict (dedupe_key) where status = 'queued'
+      do update set run_at = least(greatest(${jobs.runAt}, excluded.run_at),
+                                   ${jobs.createdAt} + ${`${COLLECTION_RECHECK_MAX_DEFER_MS} milliseconds`}::interval),
+                    updated_at = now()`);
+  }
+  return queued;
+}
+
+/**
  * Webhook collections/create|update: назва колекції і товари, членство яких у базі розходиться з Shopify (додані або
  * вилучені вручну, змінені умови) → перечитування колекцій цих товарів (через applyProductCollections). Невідомі базі
  * товари пропускаються (їхня синхронізація перечитає колекції сама).
@@ -225,9 +271,54 @@ export async function syncCollection(
 // Повна синхронізація
 // ---------------------------------------------------------------------------
 
-/** Запуск повної синхронізації колекцій (після повної синхронізації товарів або кнопкою власника). */
+/** Запуск повної синхронізації колекцій (після повної синхронізації товарів, за розкладом або кнопкою власника). */
 export function startCollectionsSync(db: DbOrTx, shop: string, now: Date = new Date()): Promise<boolean> {
   return enqueueJob(db, JOB.collectionsPage, { shop, after: null, startedAt: iso(now) }, { dedupeKey: "collections:start" });
+}
+
+/** Повна синхронізація колекцій уже в черзі або виконується (будь-яка її сторінка). */
+export async function collectionsSyncActive(db: DbOrTx): Promise<boolean> {
+  const [row] = await db
+    .select({ id: jobs.id })
+    .from(jobs)
+    .where(and(inArray(jobs.type, [JOB.collectionsPage, JOB.collectionMembershipsPage]), inArray(jobs.status, ["queued", "running"])))
+    .limit(1);
+  return Boolean(row);
+}
+
+/**
+ * Наступна планова перевірка (одне очікуване завдання; уже заплановане не переноситься — перезапуск сервера не
+ * відкладає і не множить синхронізації).
+ */
+export function scheduleCollectionsSyncCheck(db: DbOrTx, opts: { now?: Date; delayMs?: number } = {}): Promise<boolean> {
+  const now = opts.now ?? new Date();
+  return enqueueJob(db, JOB.scheduledCollectionsSync, {}, {
+    dedupeKey: SCHEDULED_COLLECTIONS_SYNC_DEDUPE_KEY,
+    maxAttempts: 3,
+    runAt: new Date(now.getTime() + (opts.delayMs ?? SCHEDULED_COLLECTIONS_SYNC_INTERVAL_MS)),
+  });
+}
+
+export type ScheduledCollectionsSyncOutcome = "queued" | "not_installed" | "not_ready" | "already_running";
+
+/**
+ * Обробник щоденної перевірки: спершу планує наступну (ланцюжок не обривається), потім ставить повну синхронізацію
+ * колекцій — коли застосунок установлено, перша повна синхронізація товарів завершилася (вона сама запускає
+ * колекції) і повна синхронізація колекцій ще не йде.
+ */
+export async function runScheduledCollectionsSync(db: DbOrTx, now: Date = new Date()): Promise<ScheduledCollectionsSyncOutcome> {
+  await scheduleCollectionsSyncCheck(db, { now });
+  const [shop] = await db
+    .select({ shop: shopInstallations.shop, productsSyncedAt: shopInstallations.productsSyncedAt })
+    .from(shopInstallations)
+    .where(isNull(shopInstallations.uninstalledAt))
+    .orderBy(desc(shopInstallations.installedAt))
+    .limit(1);
+  if (!shop) return "not_installed";
+  if (!shop.productsSyncedAt) return "not_ready";
+  if (await collectionsSyncActive(db)) return "already_running";
+  await startCollectionsSync(db, shop.shop, now);
+  return "queued";
 }
 
 /**

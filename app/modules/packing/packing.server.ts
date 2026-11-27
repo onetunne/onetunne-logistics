@@ -40,7 +40,7 @@ import {
   shipments,
   type OrderPriority,
 } from "~/db/schema";
-import { isFulfilledInShopify, isShipped, type OrderStatus } from "~/domain/order-status";
+import { isOrderFulfilledInShopify, isShipped, type OrderStatus } from "~/domain/order-status";
 import { requirePermission } from "~/domain/permissions";
 import { ConflictError, DomainError, NotFoundError } from "~/lib/errors";
 import { redact } from "~/lib/logger.server";
@@ -48,7 +48,13 @@ import { writeAudit } from "~/modules/audit/audit.server";
 import { loadLineItems, loadOrderRow, type LineItemWithVariant, type OrderRow, type ShipmentRow } from "~/modules/orders/repository.server";
 import { BOX_KINDS } from "~/modules/packaging/box-selection";
 import { consumeMaterialsForPacking, materialsPlanKey, planPackingMaterials, type ConsumeMaterialsResult } from "~/modules/packaging/consumption.server";
-import { selectBoxForOrder } from "~/modules/packaging/parcel.server";
+import { manualWeightUse, minPlausibleManualWeight, parcelGoodsWeightGrams, type ParcelWeightCheck } from "~/modules/packaging/parcel";
+import {
+  PARCEL_WEIGHT_VERIFIED_REASON,
+  isParcelWeightOwnerVerified,
+  loadParcelWeightCheck,
+  selectBoxForOrder,
+} from "~/modules/packaging/parcel.server";
 import { ACTIVE_SHIPMENT_STATUSES, findActiveShipment } from "~/modules/shipments/waybill.server";
 import { enqueueOrderResync, shopifyLinesPending, type ResyncQueueResult } from "~/modules/shopify-sync/pending-lines.server";
 import { addPackingEvent, ORDER_CANCELLED_AFTER_PACKING, toChecklistLines } from "./lifecycle.server";
@@ -120,7 +126,7 @@ export function isDeletedAtCarrier(s: Pick<ShipmentRow, "status" | "handedOverAt
  *   packing.error.shopifyLinesPending. Шлях — скасувати накладну (застосунок перечитає замовлення з Shopify).
  */
 function assertShopifyAllowsPacking(order: OrderRow, actor: ServiceContext["actor"], ownerDecision: boolean): void {
-  if (isFulfilledInShopify(order.fulfillmentStatus)) {
+  if (isOrderFulfilledInShopify(order)) {
     throw new DomainError("packing.error.fulfilledInShopify", 409, { fulfillment: order.fulfillmentStatus ?? "" });
   }
   if (shopifyLinesPending(order) && !(ownerDecision && actor.role === "owner")) {
@@ -199,7 +205,12 @@ export async function packedParcelOf(
   return { weightGrams, dimsMm };
 }
 
-/** Розбіжність запакованої посилки з накладною (null — немає або порівнювати нічого). */
+/**
+ * Розбіжність запакованої посилки з накладною (null — немає або порівнювати нічого).
+ * Розбіжність ваги, яку нова накладна теж не використає (зважена вага менша за 90 % ваги товарів за Shopify і не
+ * підтверджена власником — manualWeightUse = ignored), позначається weight.ignoredByWaybill: переоформлення її не
+ * усуне (mismatchNeedsReissue), екран пояснює причину замість поради «Переоформити».
+ */
 export async function parcelMismatchFor(
   db: DbOrTx,
   order: OrderRow,
@@ -208,7 +219,13 @@ export async function parcelMismatchFor(
 ): Promise<ParcelMismatch | null> {
   // Після фактичної передачі перевізнику переоформити вже не можна — порада «переоформіть до передачі» хибна.
   if (!shipment || shipment.status !== "created" || shipment.handedOverAt || isShipped(order.status)) return null;
-  return compareParcels(waybillParcel(shipment), await packedParcelOf(db, packing, order));
+  const mismatch = compareParcels(waybillParcel(shipment), await packedParcelOf(db, packing, order));
+  if (!mismatch?.weight) return mismatch;
+  const packedGrams = mismatch.weight.packedGrams;
+  const goodsGrams = parcelGoodsWeightGrams(await loadLineItems(db, order.id));
+  const verified = await isParcelWeightOwnerVerified(db, { id: order.id, parcelWeightGrams: packedGrams });
+  if (manualWeightUse(packedGrams, goodsGrams, verified) !== "ignored") return mismatch;
+  return { ...mismatch, weight: { ...mismatch.weight, ignoredByWaybill: { goodsGrams, minGrams: minPlausibleManualWeight(goodsGrams) } } };
 }
 
 /**
@@ -412,14 +429,27 @@ function skuEquals(key: string) {
   return sql`upper(replace(coalesce(${productVariants.sku}, ''), ' ', '')) = ${key}`;
 }
 
+/**
+ * Варіант каталогу «живий» — товар не видалено в Shopify (products.status ≠ DELETED, markProductDeleted) і варіант
+ * був у ОСТАННЬОМУ повному переліку варіантів товару (upsertProduct ставить товару й варіантам відповіді один час
+ * синхронізації updated_at; варіант, видалений у Shopify, лишається зі старішим часом). Видалені рядки зберігаються
+ * (на них посилаються замовлення й облік), але їхні штрихкоди/SKU не роблять сканування живого товару «неоднозначним»:
+ * після видалення й повторного створення товару (імпорт CSV) або заміни варіанта з тим самим штрихкодом кожне
+ * сканування інакше назавжди вимагало б ручного +1.
+ */
+const catalogVariantLive = sql`(${products.status} is distinct from 'DELETED' and ${productVariants.updatedAt} >= ${products.updatedAt})`;
+
 async function findCatalogVariant(db: DbOrTx, code: string): Promise<{ productTitle: string; variantTitle: string | null } | null> {
   const key = codeKey(code);
   if (!key) return null;
+  // «Не той товар»: перевага — живому варіанту каталогу; видалений у Shopify — лише якщо інших немає (назва все одно
+  // допомагає зрозуміти, що взято з полиці).
   const [row] = await db
     .select({ productTitle: products.title, variantTitle: productVariants.title })
     .from(productVariants)
     .innerJoin(products, eq(products.id, productVariants.productId))
     .where(sql`(${barcodeEquals(key)}) or (${skuEquals(key)})`)
+    .orderBy(sql`case when ${catalogVariantLive} then 0 else 1 end`, products.title, productVariants.title, productVariants.id)
     .limit(1);
   return row ?? null;
 }
@@ -430,6 +460,7 @@ const AMBIGUOUS_VARIANTS_SHOWN = 5;
 /**
  * Перевірка коду на рівні КАТАЛОГУ для збігу з позицією замовлення: штрихкод — чи немає іншого варіанта з тим самим
  * штрихкодом; SKU — чи немає іншого варіанта з тим самим SKU або з таким ШТРИХКОДОМ (код — штрихкод іншого товару).
+ * Враховуються лише живі варіанти (catalogVariantLive: не видалені в Shopify); варіант самої позиції — завжди.
  * Повертає варіанти (разом із варіантом позиції), якщо їх більше одного; інакше null.
  */
 async function catalogAmbiguity(
@@ -446,7 +477,7 @@ async function catalogAmbiguity(
     .select({ id: productVariants.id, productTitle: products.title, variantTitle: productVariants.title })
     .from(productVariants)
     .innerJoin(products, eq(products.id, productVariants.productId))
-    .where(lineVariantId ? sql`(${byCode}) or ${productVariants.id} = ${lineVariantId}` : byCode)
+    .where(lineVariantId ? sql`((${byCode}) and ${catalogVariantLive}) or ${productVariants.id} = ${lineVariantId}` : sql`(${byCode}) and ${catalogVariantLive}`)
     .orderBy(products.title, productVariants.title, productVariants.id)
     .limit(50);
   if (rows.length <= 1) return null;
@@ -598,6 +629,12 @@ export interface SaveParcelResult {
   changed: string[];
   version: number;
   mismatch: ParcelMismatch | null;
+  /**
+   * Збережена вага менша за 90 % ваги товарів за даними Shopify (loadParcelWeightCheck): use = ignored — накладна її
+   * НЕ використає (перевірити ваги товарів у Shopify або підтвердження власника, confirmParcelWeight); owner_verified —
+   * використає (підтверджено власником). null — ваги немає або вона правдоподібна.
+   */
+  weightCheck: ParcelWeightCheck | null;
 }
 
 const PARCEL_FIELDS = [
@@ -695,7 +732,7 @@ export async function savePackingParcel(ctx: ServiceContext, orderId: string, in
       .returning();
     const fresh = { ...order, ...patch };
     const mismatch = await parcelMismatchFor(tx, fresh, updated!, await findActiveShipment(tx, id));
-    return { changed: changes, version: updated!.version, mismatch };
+    return { changed: changes, version: updated!.version, mismatch, weightCheck: await loadParcelWeightCheck(tx, fresh) };
   });
 }
 
@@ -706,6 +743,8 @@ export interface SaveOrderParcelResult {
   changed: string[];
   /** Нова версія замовлення (orders.version) — для наступного збереження форми. */
   version: number;
+  /** Як у SaveParcelResult: зважена вага, яку нова накладна не використає без підтвердження власника. */
+  weightCheck: ParcelWeightCheck | null;
 }
 
 /**
@@ -728,7 +767,52 @@ export async function saveOrderParcel(ctx: ServiceContext, orderId: string, inpu
     if (await findActiveShipment(tx, id)) throw new DomainError("packing.error.parcelHasWaybill", 409);
     if (order.version !== v.expectedVersion) throw new ConflictError();
     const r = await applyOrderParcel(tx, ctx, order, v, { packingId: null, currentBoxId: order.parcelBoxMaterialId, stage: "before_waybill" });
-    return { changed: r.changes, version: r.version };
+    return { changed: r.changes, version: r.version, weightCheck: await loadParcelWeightCheck(tx, { ...order, ...r.patch }) };
+  });
+}
+
+export type ConfirmParcelWeightResult =
+  /** Підтверджено: накладна (нова/переоформлена) використає цю вагу. */
+  | { kind: "confirmed"; weightGrams: number; goodsGrams: number }
+  /** Цю вагу вже підтверджено — нічого не змінено. */
+  | { kind: "already_confirmed"; weightGrams: number }
+  /** Вага правдоподібна (не менша за 90 % ваги товарів) — підтвердження не потрібне, нічого не змінено. */
+  | { kind: "not_needed"; weightGrams: number };
+
+/**
+ * Рішення власника: зважена вага посилки правильна, хоча менша за 90 % ваги товарів за даними Shopify (ваги товарів
+ * у Shopify завищені, напр. 500 г для товару 400 г). Без цього накладна надсилає розрахункову вагу
+ * (buildShipmentRequest), а переоформлення розбіжності не усуває. Запис — order_changes (поле parcel.weightGrams,
+ * старе = нове значення, причина PARCEL_WEIGHT_VERIFIED_REASON) і журнал order.parcel_weight_confirmed; діє, доки
+ * вагу не змінено (isParcelWeightOwnerVerified). weightGrams — вага, яку бачив власник: інша поточна → ConflictError.
+ * Лише власник; наявну накладну не змінює (нова вага — для нової/переоформленої накладної).
+ */
+export async function confirmParcelWeight(ctx: ServiceContext, orderId: string, input: { weightGrams: number | string }): Promise<ConfirmParcelWeightResult> {
+  requirePermission(ctx.actor, "packing.perform");
+  if (ctx.actor.role !== "owner") throw new DomainError("packing.error.weightConfirmOwnerOnly", 403);
+  const id = normalizeId(orderId, "order");
+  const weightGrams = z.coerce.number().int().min(1).max(MAX_PARCEL_WEIGHT_GRAMS).safeParse(trimmed(input.weightGrams));
+  if (!weightGrams.success) throw new DomainError("error.validation", 400);
+  return ctx.db.transaction(async (tx): Promise<ConfirmParcelWeightResult> => {
+    const { order } = await lockForPacking(tx, id);
+    if (isShipped(order.status) || order.status === "cancelled") throw new DomainError("packing.error.status", 409, { status: order.status });
+    // Підтверджується саме та вага, яку бачив власник (її могли перезважити, поки сторінка була відкрита).
+    if (order.parcelWeightGrams !== weightGrams.data) throw new ConflictError();
+    const check = await loadParcelWeightCheck(tx, order);
+    if (!check) return { kind: "not_needed", weightGrams: weightGrams.data };
+    if (check.use === "owner_verified") return { kind: "already_confirmed", weightGrams: weightGrams.data };
+    const value = String(weightGrams.data);
+    await tx.insert(orderChanges).values({
+      orderId: id,
+      field: "parcel.weightGrams",
+      oldValue: value,
+      newValue: value,
+      source: "manual",
+      reason: PARCEL_WEIGHT_VERIFIED_REASON,
+      actorId: ctx.actor.id,
+    });
+    await writeAudit(tx, ctx.actor, "order.parcel_weight_confirmed", { type: "order", id }, { weightGrams: weightGrams.data, goodsGrams: check.goodsGrams });
+    return { kind: "confirmed", weightGrams: weightGrams.data, goodsGrams: check.goodsGrams };
   });
 }
 

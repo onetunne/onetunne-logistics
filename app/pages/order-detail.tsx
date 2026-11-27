@@ -18,7 +18,7 @@ import { OverriddenBadge, VariantCustomsForm } from "~/components/variant-custom
 import { OrderStatusBadge, SeverityBadge, ShipmentStatusBadge, TestBadge } from "~/components/status-badge";
 import { TrackingStatusBadge, isTrackingStatus, trackingTimelineTone } from "~/components/tracking-badge";
 import { shipmentTrackingEvents } from "~/db/schema";
-import { isFulfilledInShopify, isShipped, type OrderStatus } from "~/domain/order-status";
+import { isOrderFulfilledInShopify, isShipped, type OrderStatus } from "~/domain/order-status";
 import { requirePermission } from "~/domain/permissions";
 import { hasKey, makeT, useLocale, useT, type TFunction } from "~/i18n";
 import { localizeCode, localizeParams } from "~/i18n/localize";
@@ -43,8 +43,10 @@ import {
   updateVariantCustomsData,
   validateOrderById,
 } from "~/modules/orders/workflow.server";
-import { confirmShippedOutsideApp, shippedOutsideAvailable } from "~/modules/orders/shipped-outside.server";
+import { confirmShippedOutsideApp, shippedOutsideState } from "~/modules/orders/shipped-outside.server";
+import { manualWeightIgnoredOf } from "~/modules/packaging/parcel";
 import { MAX_OVERRIDE_REASON_LENGTH, PRIORITIES, PRIORITY_KEYS, parsePriority } from "~/modules/packing/constants";
+import { mismatchNeedsReissue } from "~/modules/packing/parcel-compare";
 import { setOrderPriority } from "~/modules/packing/packing.server";
 import { loadPackingSummary } from "~/modules/packing/view.server";
 import { MANUALLY_CLOSABLE_ISSUE_CODES } from "~/modules/problems/categories";
@@ -287,10 +289,19 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
       /** Етап 5: Shopify змінив позиції, а застосунок їх ще не застосував (активна накладна) — нова накладна/передача заблоковані. */
       shopifyLinesPending: shopifyLinesPending(order),
       /** Етап 5: Shopify показує (часткове) виконання, а застосунок замовлення не відправляв. */
-      fulfilledInShopify: isFulfilledInShopify(order.fulfillmentStatus) && !isShipped(order.status) && order.status !== "cancelled",
+      fulfilledInShopify: isOrderFulfilledInShopify(order) && !isShipped(order.status) && order.status !== "cancelled",
+      /**
+       * Етап 5: Shopify частково виконав лише позиції без доставки (напр. цифрову подарункову картку) — накладна
+       * застосунку дозволена; картка пояснює це менеджеру.
+       */
+      nonShippingFulfilledOnly:
+        order.fulfillmentStatus === "partially_fulfilled" && order.shopifyShippableFulfilled === false && !isShipped(order.status) && order.status !== "cancelled",
       fulfillmentStatus: order.fulfillmentStatus,
-      /** Можна підтвердити «Відправлено поза застосунком» (без активної накладної; дозвіл waybills.manage — сервер і UI). */
-      shippedOutsideAvailable: shippedOutsideAvailable(
+      /**
+       * «Відправлено поза застосунком»: available — можна підтвердити (без активної накладної; дозвіл waybills.manage —
+       * сервер і UI); shopify_lines_pending — спершу повторне читання позицій із Shopify (кнопку приховано).
+       */
+      shippedOutside: shippedOutsideState(
         order,
         agg.shipments.some((s) => (ACTIVE_SHIPMENT_STATUSES as readonly string[]).includes(s.status)),
       ),
@@ -347,6 +358,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         trackingNumber: s.trackingNumber,
         packageName: s.packageCode ? (packageNames.get(s.packageCode) ?? s.packageCode) : null,
         actualWeightGrams: s.actualWeightGrams,
+        /** Етап 5: зважену вручну вагу не надіслано (менша за 90 % ваги товарів за Shopify, не підтверджена власником). */
+        manualWeightIgnored: manualWeightIgnoredOf(s.requestSnapshot),
         volumetricWeightGrams: s.volumetricWeightGrams,
         chargeableWeightGrams: s.chargeableWeightGrams,
         declaredValue: s.declaredValue,
@@ -1180,8 +1193,13 @@ function IssueItem({ issue, data }: { issue: Issue; data: Data }) {
         </Form>
       ) : null}
 
-      {issue.code === "SHOPIFY_FULFILLED_OUTSIDE_APP" && data.order.shippedOutsideAvailable && can("waybills.manage") ? (
+      {issue.code === "SHOPIFY_FULFILLED_OUTSIDE_APP" && data.order.shippedOutside === "available" && can("waybills.manage") ? (
         <ShippedOutsideButton />
+      ) : null}
+      {issue.code === "SHOPIFY_FULFILLED_OUTSIDE_APP" && data.order.shippedOutside === "shopify_lines_pending" ? (
+        <Text variant="body-sm" tone="subdued">
+          {t("order.shippedOutside.linesPending")}
+        </Text>
       ) : null}
 
       {(issue.severity === "warning" || MANUALLY_CLOSABLE_ISSUE_CODES.includes(issue.code)) && canEdit ? (
@@ -1678,7 +1696,23 @@ function CreatedWaybill({
       : []),
     { key: "reference", label: t("order.waybill.reference"), value: <InlineCode>{s.carrierReference}</InlineCode> },
     ...(s.packageName ? [{ key: "package", label: t("order.waybill.package"), value: s.packageName }] : []),
-    { key: "actual", label: t("order.waybill.weightActual"), value: formatWeight(s.actualWeightGrams, locale) },
+    {
+      key: "actual",
+      label: t("order.waybill.weightActual"),
+      value: s.manualWeightIgnored ? (
+        <Stack as="span" gap={0}>
+          <span>{formatWeight(s.actualWeightGrams, locale)}</span>
+          <Text as="span" variant="caption" tone="subdued">
+            {t("packing.waybillWeight.ignored", {
+              manual: formatWeight(s.manualWeightIgnored.manualGrams, locale),
+              goods: formatWeight(s.manualWeightIgnored.goodsGrams, locale),
+            })}
+          </Text>
+        </Stack>
+      ) : (
+        formatWeight(s.actualWeightGrams, locale)
+      ),
+    },
     { key: "volumetric", label: t("order.waybill.weightVolumetric"), value: formatWeight(s.volumetricWeightGrams, locale) },
     { key: "chargeable", label: t("order.waybill.weightChargeable"), value: formatWeight(s.chargeableWeightGrams, locale) },
     { key: "declared", label: t("order.waybill.declaredValue"), value: formatMoney(s.declaredValue, s.currency, locale) },
@@ -2309,8 +2343,15 @@ function NoWaybill({ data }: { data: Data }) {
       <Stack gap={2}>
         <p>{t(order.fulfillmentStatus === "partially_fulfilled" ? "order.shippedOutside.bodyPartial" : "order.shippedOutside.body")}</p>
         {/* Кнопка — у проблемі SHOPIFY_FULFILLED_OUTSIDE_APP; для замовлень без неї (імпорт до етапу 5) — тут. */}
-        {!fulfilledIssue && order.shippedOutsideAvailable && can("waybills.manage") ? <ShippedOutsideButton /> : null}
+        {!fulfilledIssue && order.shippedOutside === "available" && can("waybills.manage") ? <ShippedOutsideButton /> : null}
+        {/* Позиції застаріли щодо Shopify: спершу повторне читання (банер «Позиції змінено в Shopify» вище). */}
+        {!fulfilledIssue && order.shippedOutside === "shopify_lines_pending" ? <p>{t("order.shippedOutside.linesPending")}</p> : null}
       </Stack>
+    </Banner>
+  ) : order.nonShippingFulfilledOnly ? (
+    // Shopify виконав лише позиції без доставки (цифрова подарункова картка) — фізичні товари відправляє застосунок.
+    <Banner tone="info" title={t("order.shopifyFulfillment.nonShippingOnly.title")}>
+      <p>{t("order.shopifyFulfillment.nonShippingOnly.body")}</p>
     </Banner>
   ) : null;
 
@@ -2425,7 +2466,11 @@ function PackingCard({ data }: { data: Data }) {
   const { packing: summary, order } = data;
   const p = summary.packing;
   const canPriority = can("orders.edit") && !isShipped(order.status) && order.status !== "cancelled";
-  if (!p && !summary.inQueue && !summary.packedWithoutWaybill && !summary.cancelledAfterPacking && !canPriority) return null;
+  // Етап 5: вагу/габарити посилки можна задати до накладної (екран пакування, saveOrderParcel) — шлях туди з картки.
+  const parcelBeforeWaybill = summary.parcelBeforeWaybill && can("packing.perform");
+  if (!p && !summary.inQueue && !summary.packedWithoutWaybill && !summary.cancelledAfterPacking && !canPriority && !parcelBeforeWaybill && !summary.weightCheck) {
+    return null;
+  }
   const dims = summary.parcel.dimsMm ? summary.parcel.dimsMm.join(" × ") : null;
   const items: KeyValueItem[] = [
     {
@@ -2469,11 +2514,42 @@ function PackingCard({ data }: { data: Data }) {
                 })}
               </p>
             ) : null}
+            {summary.mismatch.weight?.ignoredByWaybill ? (
+              <p>
+                {t("packing.mismatch.weightIgnored", {
+                  packed: formatWeight(summary.mismatch.weight.packedGrams, locale),
+                  goods: formatWeight(summary.mismatch.weight.ignoredByWaybill.goodsGrams, locale),
+                })}
+              </p>
+            ) : null}
             {summary.mismatch.dims ? (
               <p>{t("packing.mismatch.dims", { waybill: summary.mismatch.dims.waybillMm.join(" × "), packed: summary.mismatch.dims.packedMm.join(" × ") })}</p>
             ) : null}
-            <p>{t(order.status === "packed" ? "packing.mismatch.packedHint" : "packing.mismatch.hint")}</p>
+            {/* Лише вага, яку нова накладна теж проігнорує, — переоформлення не допоможе (порада хибна). */}
+            {mismatchNeedsReissue(summary.mismatch) ? <p>{t(order.status === "packed" ? "packing.mismatch.packedHint" : "packing.mismatch.hint")}</p> : null}
           </Banner>
+        ) : null}
+        {summary.weightCheck ? (
+          summary.weightCheck.use === "owner_verified" ? (
+            <Banner tone="info">
+              {t("packing.weightCheck.verified", {
+                manual: formatWeight(summary.weightCheck.manualGrams, locale),
+                goods: formatWeight(summary.weightCheck.goodsGrams, locale),
+              })}
+            </Banner>
+          ) : (
+            <Banner tone="warning" title={t("packing.weightCheck.title")}>
+              <p>
+                {t("packing.weightCheck.body", {
+                  manual: formatWeight(summary.weightCheck.manualGrams, locale),
+                  goods: formatWeight(summary.weightCheck.goodsGrams, locale),
+                  min: formatWeight(summary.weightCheck.minGrams, locale),
+                })}
+              </p>
+              <p>{t("packing.weightCheck.fix")}</p>
+              <p>{t("packing.weightCheck.orderHint")}</p>
+            </Banner>
+          )
         ) : null}
         {summary.packedWithoutWaybill ? (
           <Banner tone="warning" title={t("packing.screen.packedNoWaybill.title")}>
@@ -2492,6 +2568,15 @@ function PackingCard({ data }: { data: Data }) {
         ) : null}
         {(summary.inQueue || summary.packedWithoutWaybill || summary.cancelledAfterPacking) && can("packing.perform") ? (
           <Button to={href(`picking/${order.id}`)}>{t("packing.summary.open")}</Button>
+        ) : parcelBeforeWaybill ? (
+          <Stack gap={1}>
+            <Text variant="caption" tone="subdued">
+              {t("packing.summary.parcelBeforeWaybill")}
+            </Text>
+            <div>
+              <Button to={href(`picking/${order.id}`)}>{t("packing.summary.openParcel")}</Button>
+            </div>
+          </Stack>
         ) : null}
         {canPriority ? (
           <Form method="post">

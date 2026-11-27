@@ -31,6 +31,7 @@ import { requirePermission } from "~/domain/permissions";
 import { ConflictError, NotFoundError } from "~/lib/errors";
 import { writeAudit } from "~/modules/audit/audit.server";
 import type { ServiceContext } from "~/server/types";
+import type { KitProductSearchFields } from "./kit-options";
 import { computeKitMaterials, type KitMaterialRequirement, type KitTemplateForResolution } from "./kit-resolution";
 import { kitTemplateInputSchema, type KitTemplateInput, type ParsedKitTemplateInput } from "./schemas";
 import { matchesVersion, touchedAt, versionToken } from "./version";
@@ -176,7 +177,7 @@ export async function getKitTemplate(db: DbOrTx, id: string): Promise<KitTemplat
 // Варіанти вибору для форми
 // ---------------------------------------------------------------------------
 
-export interface KitProductOption {
+export interface KitProductOption extends KitProductSearchFields {
   id: string;
   title: string;
   imageUrl: string | null;
@@ -184,6 +185,10 @@ export interface KitProductOption {
   models: string[];
   colors: string[];
   skus: string[];
+  /** Для фільтра форми (kit-options.ts): ті самі поля, що й серверний пошук у каталозі. */
+  handle: string | null;
+  barcodes: string[];
+  variantTitles: string[];
 }
 
 export interface KitOptionsPage<T> {
@@ -243,16 +248,26 @@ export async function listKitProductOptions(
   const ids = rows.map((r) => r.id);
   const variants = ids.length
     ? await db
-        .select({ productId: productVariants.productId, model: productVariants.model, color: productVariants.color, sku: productVariants.sku })
+        .select({
+          productId: productVariants.productId,
+          model: productVariants.model,
+          color: productVariants.color,
+          sku: productVariants.sku,
+          barcode: productVariants.barcode,
+          title: productVariants.title,
+        })
         .from(productVariants)
         .where(inArray(productVariants.productId, ids))
     : [];
-  const by = new Map<string, { models: Set<string>; colors: Set<string>; skus: Set<string> }>();
+  type Acc = { models: Set<string>; colors: Set<string>; skus: Set<string>; barcodes: Set<string>; titles: Set<string> };
+  const by = new Map<string, Acc>();
   for (const v of variants) {
-    const e = by.get(v.productId) ?? { models: new Set(), colors: new Set(), skus: new Set() };
+    const e: Acc = by.get(v.productId) ?? { models: new Set(), colors: new Set(), skus: new Set(), barcodes: new Set(), titles: new Set() };
     if (v.model) e.models.add(v.model);
     if (v.color) e.colors.add(v.color);
     if (v.sku) e.skus.add(v.sku);
+    if (v.barcode) e.barcodes.add(v.barcode);
+    if (v.title) e.titles.add(v.title);
     by.set(v.productId, e);
   }
   const total = Number(totalRow?.c ?? 0);
@@ -265,6 +280,9 @@ export async function listKitProductOptions(
       models: sortedValues(by.get(product.id)?.models),
       colors: sortedValues(by.get(product.id)?.colors),
       skus: sortedValues(by.get(product.id)?.skus),
+      handle: product.handle,
+      barcodes: sortedValues(by.get(product.id)?.barcodes),
+      variantTitles: sortedValues(by.get(product.id)?.titles),
     })),
     total,
     truncated: total > limit,

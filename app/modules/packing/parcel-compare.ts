@@ -27,7 +27,16 @@ export interface ParcelMeasure {
 }
 
 export interface ParcelMismatch {
-  weight: { waybillGrams: number; packedGrams: number } | null;
+  weight: {
+    waybillGrams: number;
+    packedGrams: number;
+    /**
+     * Зважена вага менша за 90 % ваги товарів за даними Shopify і не підтверджена власником — нова накладна її теж
+     * не використає (buildShipmentRequest надішле розрахункову), тож переоформлення розбіжність не усуне: причина —
+     * ваги товарів у Shopify (або описка). Заповнює parcelMismatchFor (packing.server.ts).
+     */
+    ignoredByWaybill?: { goodsGrams: number; minGrams: number };
+  } | null;
   /** exceeds — посилка більша за задекларовані габарити типової упаковки (dimsUpperBound). */
   dims: { waybillMm: Dims; packedMm: Dims; exceeds?: true } | null;
 }
@@ -89,4 +98,13 @@ export function compareParcels(
     dims = { waybillMm: sortDims(waybill.dimsMm), packedMm: sortDims(packed.dimsMm), ...(waybill.dimsUpperBound ? { exceeds: true as const } : {}) };
   }
   return weight || dims ? { weight, dims } : null;
+}
+
+/**
+ * Чи усуне розбіжність переоформлення накладної: так — розбіжність габаритів або ваги, яку нова накладна використає;
+ * ні — лише вага, яку нова накладна теж проігнорує (ignoredByWaybill): порада «Переоформити» вела б до повторних
+ * скасувань і створень накладної без результату.
+ */
+export function mismatchNeedsReissue(m: ParcelMismatch | null | undefined): boolean {
+  return Boolean(m && (m.dims || (m.weight && !m.weight.ignoredByWaybill)));
 }

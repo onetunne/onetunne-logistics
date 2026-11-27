@@ -9,6 +9,7 @@ import { createInventorySyncHandlers } from "~/modules/inventory-sync/handlers.s
 import { logger } from "~/lib/logger.server";
 import {
   markCollectionDeleted,
+  runScheduledCollectionsSync,
   syncCollection,
   syncCollectionMembershipsPage,
   syncCollectionsPage,
@@ -16,6 +17,7 @@ import {
 } from "./collections.server";
 import { fulfillShipment, reportFulfillmentFailure } from "./fulfillment.server";
 import { openNewVariantsFromShopify } from "./inventory-opening.server";
+import { ensureWebhookSubscriptions, type WebhookRegistrar } from "./webhook-subscriptions.server";
 import {
   JOB,
   importOrdersPage,
@@ -33,6 +35,8 @@ export interface SyncDeps {
   /** Контекст сервісів (перевізники, шлюз Shopify) для обробки нових оплачених замовлень. */
   serviceContext: () => ServiceContext;
   admin: (shop: string) => Promise<AdminGraphql>;
+  /** Реєстрація підписок на webhooks з офлайн-сесією (робоче середовище); без неї завдання перевірки нічого не робить. */
+  webhooks?: WebhookRegistrar;
 }
 
 const currencyCache = new Map<string, string>();
@@ -115,6 +119,20 @@ export function createSyncHandlers(deps: SyncDeps): JobHandlers {
         const p = job.payload as Record<string, unknown>;
         const shop = String(p.shop);
         await syncCollectionMembershipsPage(deps.db, await deps.admin(shop), shop, str(p.after));
+      },
+    },
+    [JOB.ensureWebhooks]: {
+      run: async (job) => {
+        if (!deps.webhooks) return;
+        const force = (job.payload as Record<string, unknown>).force === true;
+        const outcome = await ensureWebhookSubscriptions(deps.db, deps.webhooks, { force });
+        logger.info("shopify.ensure_webhooks", { outcome, force });
+      },
+    },
+    [JOB.scheduledCollectionsSync]: {
+      run: async () => {
+        const outcome = await runScheduledCollectionsSync(deps.db);
+        logger.info("shopify.collections_scheduled", { outcome });
       },
     },
     [JOB.syncInventoryItem]: {

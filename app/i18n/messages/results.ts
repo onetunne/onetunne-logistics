@@ -19,7 +19,7 @@ const messages: MessageModule = {
     "result.waybill.blocked.shopify_lines_pending":
       "Shopify змінив позиції замовлення, а застосунок їх ще не застосував — накладна була б зі старими позиціями. Зачекайте повторного читання замовлення з Shopify (або поставте його на сторінці замовлення) і спробуйте знову.",
     "result.waybill.blocked.fulfilled_in_shopify":
-      "Замовлення вже виконане (повністю або частково) у Shopify поза застосунком — накладна була б повторним відправленням. Якщо товари відправлено, підтвердьте «Відправлено поза застосунком» на сторінці замовлення.",
+      "Замовлення вже виконане (повністю або частково) у Shopify поза застосунком — накладна була б повторним відправленням. Якщо товари відправлено, підтвердьте «Відправлено поза застосунком» на сторінці замовлення. (Виконання лише позицій без доставки, напр. цифрової подарункової картки, накладну не блокує.)",
     "result.waybill.linked": "Накладну {number} прив’язано вручну.",
     "result.waybill.cancelled": "Накладну скасовано.",
     "result.waybill.confirmedNotCreated": "Позначено, що накладну не створено. Можна створити повторно.",
@@ -80,7 +80,7 @@ const messages: MessageModule = {
     "result.waybill.blocked.shopify_lines_pending":
       "Shopify changed the order items and the app has not applied them yet — the waybill would use the old items. Wait for the fresh read of the order from Shopify (or queue it on the order page) and try again.",
     "result.waybill.blocked.fulfilled_in_shopify":
-      "The order is already fulfilled (fully or partially) in Shopify outside the app — a waybill would ship it twice. If the goods were shipped, confirm “Shipped outside the app” on the order page.",
+      "The order is already fulfilled (fully or partially) in Shopify outside the app — a waybill would ship it twice. If the goods were shipped, confirm “Shipped outside the app” on the order page. (Fulfilling only items without shipping, such as a digital gift card, does not block the waybill.)",
     "result.waybill.linked": "Waybill {number} linked manually.",
     "result.waybill.cancelled": "Waybill cancelled.",
     "result.waybill.confirmedNotCreated": "Marked as not created. You can create it again.",

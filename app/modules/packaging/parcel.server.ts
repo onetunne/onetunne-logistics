@@ -8,13 +8,13 @@
  * - Коробки: активні матеріали kind box|mailer; наявність (on_hand > 0 на складі за замовчуванням) — перевага, але не
  *   обов'язкова умова (облік матеріалів може ще не вестися).
  */
-import { and, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import type { DbOrTx } from "~/db/client.server";
-import { inventoryBalances, packagingMaterials, stockItems, type PackagingMaterialKind } from "~/db/schema";
+import { inventoryBalances, orderChanges, packagingMaterials, stockItems, type PackagingMaterialKind } from "~/db/schema";
 import { getDefaultWarehouse } from "~/modules/inventory/warehouse.server";
 import { loadLineItems, type OrderRow } from "~/modules/orders/repository.server";
 import { BOX_KINDS, boxInnerDims, selectBox, type Box, type BoxSelectionItem, type SelectBoxOptions, type SelectBoxResult } from "./box-selection";
-import { parcelGoods, type ParcelBoxChoice, type ParcelBoxPlan } from "./parcel";
+import { parcelGoods, parcelGoodsWeightGrams, parcelWeightCheck, type ParcelBoxChoice, type ParcelBoxPlan, type ParcelWeightCheck } from "./parcel";
 
 export type LineItems = Awaited<ReturnType<typeof loadLineItems>>;
 
@@ -115,4 +115,43 @@ export async function planParcelBox(
     return { box: toChoice("auto_box", selection.box), autoReason: selection.reason };
   }
   return { box: null, autoReason: selection.reason };
+}
+
+/**
+ * Причина запису історії (order_changes.reason, поле parcel.weightGrams, старе = нове значення): власник підтвердив,
+ * що зважена вага посилки правильна, хоч вона менша за 90 % ваги товарів за даними Shopify (ваги товарів завищені).
+ * Перекладається на сторінці замовлення (ключ packing.history.*).
+ */
+export const PARCEL_WEIGHT_VERIFIED_REASON = "packing.history.weightVerifiedByOwner";
+
+/**
+ * Чи підтвердив власник ПОТОЧНУ зважену вагу замовлення (orders.parcel_weight_grams): останній запис історії поля
+ * parcel.weightGrams — підтвердження власника (PARCEL_WEIGHT_VERIFIED_REASON) саме з цим значенням. Будь-яка пізніша
+ * зміна ваги (пакувальник перезважив, скидання застарілого коригування) підтвердження знімає.
+ */
+export async function isParcelWeightOwnerVerified(db: DbOrTx, order: Pick<OrderRow, "id" | "parcelWeightGrams">): Promise<boolean> {
+  if (!order.parcelWeightGrams) return false;
+  const [last] = await db
+    .select({ newValue: orderChanges.newValue, reason: orderChanges.reason })
+    .from(orderChanges)
+    .where(and(eq(orderChanges.orderId, order.id), eq(orderChanges.field, "parcel.weightGrams")))
+    .orderBy(desc(orderChanges.createdAt))
+    .limit(1);
+  return last?.reason === PARCEL_WEIGHT_VERIFIED_REASON && last.newValue === String(order.parcelWeightGrams);
+}
+
+/**
+ * Перевірка зваженої ваги замовлення щодо ваги товарів (parcelWeightCheck): null — ваги немає або вона правдоподібна;
+ * інакше — чи використає її накладна (owner_verified) чи ні (ignored). items — уже завантажені позиції (необов'язково).
+ */
+export async function loadParcelWeightCheck(
+  db: DbOrTx,
+  order: Pick<OrderRow, "id" | "parcelWeightGrams">,
+  items?: LineItems,
+): Promise<ParcelWeightCheck | null> {
+  if (!order.parcelWeightGrams) return null;
+  const goods = parcelGoodsWeightGrams(items ?? (await loadLineItems(db, order.id)));
+  const check = parcelWeightCheck(order.parcelWeightGrams, goods, false);
+  if (!check) return null;
+  return (await isParcelWeightOwnerVerified(db, order)) ? { ...check, use: "owner_verified" } : check;
 }

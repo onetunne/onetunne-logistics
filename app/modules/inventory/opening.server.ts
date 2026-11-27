@@ -43,7 +43,7 @@
  * Перед відкриттям у робочому режимі позиції відкритих замовлень без current_quantity (збережені до етапу 5)
  * перечитуються з Shopify (повернені/видалені одиниці не резервуються).
  */
-import { and, count, eq, inArray, isNotNull, isNull, notInArray, sql } from "drizzle-orm";
+import { and, count, eq, inArray, isNotNull, isNull, notInArray, or, sql } from "drizzle-orm";
 import type { Db, DbOrTx, Tx } from "~/db/client.server";
 import {
   inventoryBalances,
@@ -104,6 +104,11 @@ export interface InitializeInventoryResult {
   skippedNotStocked: number;
   /** Позиції замовлень до знімка, уже виконаних у Shopify поза застосунком: не враховані й не зарезервовані. */
   excludedFulfilledLines: number;
+  /**
+   * deferUnsettledOrders: варіанти з позицій відкритих замовлень, позиції яких ще не актуальні щодо Shopify
+   * (неперенесені зміни або позиції без current_quantity), — не відкриті цим викликом (наступна спроба — пізніше).
+   */
+  deferredUnsettledVariants: number;
 }
 
 /** «Доступно» одного варіанта в знімку локації і час знімка (момент перед запитом). */
@@ -126,6 +131,14 @@ export interface InitializeInventoryOptions {
    * modules/shopify-sync/inventory-opening.server.ts). Не ініціалізовано → null, нічого не змінено.
    */
   onlyIfInitialized?: boolean;
+  /**
+   * Не відкривати варіанти, що є в позиціях відкритих замовлень з неактуальними щодо Shopify позиціями
+   * (variantsOnUnsettledOrders): Σ формули взяв би застарілу кількість (повернені/видалені в Shopify одиниці), і після
+   * застосування змін «доступно» застосунку перевищило б Shopify. Перевірка — у транзакції відкриття (після блокування
+   * складу). Автоматичне відкриття нових варіантів (inventory-opening.server.ts); власник при ініціалізації взагалі
+   * не відкриває облік, доки такі замовлення є (orders_not_ready).
+   */
+  deferUnsettledOrders?: boolean;
 }
 
 /** Хто й коли відкриває (власник через initializeInventory або система — автоматичне відкриття нових варіантів). */
@@ -136,6 +149,35 @@ export interface OpeningEnv {
 }
 
 const CHUNK = 500;
+
+/**
+ * Варіанти (з variantIds), що є в позиціях відкритих замовлень, чиї позиції ще не узгоджені з Shopify:
+ * - замовлення має неперенесені зміни позицій (orders.shopify_lines_pending_at; поки була активна накладна) — Shopify
+ *   уже повернув/видалив/змінив одиниці, а позиції застосунку старі;
+ * - позиція замовлення Shopify без current_quantity (збережена до етапу 5) — повернення невідомі.
+ * Знімок «доступно» для таких варіантів не узгоджується з Σ формули відкриття.
+ */
+export async function variantsOnUnsettledOrders(db: DbOrTx, variantIds: readonly string[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  for (const part of chunks(variantIds)) {
+    const rows = await db
+      .selectDistinct({ variantId: orderLineItems.variantId })
+      .from(orderLineItems)
+      .innerJoin(orders, eq(orders.id, orderLineItems.orderId))
+      .where(
+        and(
+          inArray(orderLineItems.variantId, part),
+          notInArray(orders.status, [...NON_RESERVING_STATUSES]),
+          or(
+            isNotNull(orders.shopifyLinesPendingAt),
+            and(eq(orders.source, "shopify"), isNotNull(orders.shopifyOrderId), isNull(orderLineItems.currentQuantity)),
+          ),
+        ),
+      );
+    for (const r of rows) if (r.variantId) out.add(r.variantId);
+  }
+  return out;
+}
 /** Рухів на один виклик applyMovements (межа — MAX_MOVEMENTS_PER_CALL). */
 const MOVEMENT_CHUNK = 1500;
 const MAX_ATTEMPTS = 3;
@@ -218,11 +260,18 @@ async function initializeInTx(tx: Tx, env: OpeningEnv, opts: InitializeInventory
       .where(and(eq(inventoryBalances.warehouseId, warehouse.id), inArray(inventoryBalances.stockItemId, part), isNotNull(inventoryBalances.openedAt)));
     for (const r of rows) openedItems.add(r.id);
   }
-  const toOpen: OpeningItem[] = tracked
+  const unopened: OpeningItem[] = tracked
     .map((v) => ({ variantId: v.id, stockItemId: stockByVariant.get(v.id)!, available: v.available, snapshotAt: v.snapshotAt }))
     .filter((v) => !openedItems.has(v.stockItemId))
     .sort((a, b) => a.stockItemId.localeCompare(b.stockItemId));
-  const alreadyOpened = tracked.length - toOpen.length;
+  const alreadyOpened = tracked.length - unopened.length;
+  // Невідкриті варіанти замовлень з неактуальними щодо Shopify позиціями — не відкриваються (G1a-NEW-2). Зміну, якої
+  // застосунок ще не отримав (подія Shopify в дорозі), перевірка не бачить — як і будь-яку пізню подію після знімка;
+  // таку розбіжність покаже звірка з Shopify.
+  const unsettled =
+    opts.deferUnsettledOrders && unopened.length > 0 ? await variantsOnUnsettledOrders(tx, unopened.map((v) => v.variantId)) : new Set<string>();
+  const toOpen = unopened.filter((v) => !unsettled.has(v.variantId));
+  const deferredUnsettledVariants = unopened.length - toOpen.length;
 
   let clampedNegative = 0;
   let openedWithHistory = 0;
@@ -373,6 +422,7 @@ async function initializeInTx(tx: Tx, env: OpeningEnv, opts: InitializeInventory
     ordersSynced,
     skippedNotStocked,
     excludedFulfilledLines,
+    deferredUnsettledVariants,
   };
   // Автоматичне відкриття без нових позицій — без запису в журнал (кожна синхронізація товару).
   if (opts.onlyIfInitialized && toOpen.length === 0) return result;
@@ -388,6 +438,7 @@ async function initializeInTx(tx: Tx, env: OpeningEnv, opts: InitializeInventory
     openedWithHistory,
     ordersSynced,
     excludedFulfilledLines,
+    deferredUnsettledVariants,
     alreadyInitialized,
   });
   return result;

@@ -20,7 +20,7 @@
  */
 import { eq } from "drizzle-orm";
 import { shipmentEvents, shipments } from "~/db/schema";
-import { isFulfilledInShopify, type OrderStatus } from "~/domain/order-status";
+import { isOrderFulfilledInShopify, type OrderStatus } from "~/domain/order-status";
 import { requirePermission } from "~/domain/permissions";
 import { DomainError, NotFoundError } from "~/lib/errors";
 import { logger } from "~/lib/logger.server";
@@ -117,7 +117,7 @@ export async function reissueWaybill(ctx: ServiceContext, shipmentId: string, op
 
   // Етап 5: позиції застаріли щодо Shopify / замовлення вже виконане в Shopify — нову не створити, стару не скасовуємо.
   if (shopifyLinesPending(order)) return { kind: "not_started", reason: "shopify_lines_pending" };
-  if (isFulfilledInShopify(order.fulfillmentStatus)) {
+  if (isOrderFulfilledInShopify(order)) {
     return { kind: "not_started", reason: "fulfilled_in_shopify", params: { fulfillment: order.fulfillmentStatus ?? "" } };
   }
   // Попередня перевірка: без перевізника, що створює накладні, чи без даних відправника стару не скасовуємо.
