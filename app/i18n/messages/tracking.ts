@@ -78,7 +78,7 @@ const messages: MessageModule = {
     "tracking.documents.kind.customs_declaration": "Митна декларація",
     "tracking.documents.help": "PDF перевізника відкриється в новій вкладці.",
     "tracking.documents.none":
-      "Документи перевізника недоступні для цієї накладної (тестовий перевізник, ручна прив’язка або перевізник не видає документи через API).",
+      "Документи перевізника недоступні для цієї накладної (ручна прив’язка або перевізник не видає документи через API).",
     "tracking.documents.appInvoice": "Комерційний інвойс для друку",
     "tracking.documents.error.title": "Не вдалося отримати документ",
     "tracking.documents.error.notAvailable": "Цей документ недоступний для накладної.",
@@ -204,7 +204,7 @@ const messages: MessageModule = {
     "tracking.documents.kind.customs_declaration": "Customs declaration",
     "tracking.documents.help": "The carrier PDF opens in a new tab.",
     "tracking.documents.none":
-      "Carrier documents are not available for this waybill (test carrier, manual link, or the carrier does not provide documents via API).",
+      "Carrier documents are not available for this waybill (manual link, or the carrier does not provide documents via API).",
     "tracking.documents.appInvoice": "Printable commercial invoice",
     "tracking.documents.error.title": "Could not get the document",
     "tracking.documents.error.notAvailable": "This document is not available for the waybill.",

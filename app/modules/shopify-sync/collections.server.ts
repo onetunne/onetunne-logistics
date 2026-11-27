@@ -42,12 +42,15 @@ import { enqueueJob } from "~/modules/jobs/queue.server";
 import { logger } from "~/lib/logger.server";
 import { JOB } from "./jobs";
 
-/** Розміри сторінок (вартість запиту < 1000 балів; див. graphql.ts). */
+/**
+ * Розміри сторінок (консервативна запитувана вартість ≤ 950 із ліміту 1000 балів — tests/stage5/shopify-query-cost.test.ts;
+ * див. graphql.ts). Членство: товари × колекції множаться — 20 × 15 ≈ 680 балів (попередні 25 × 20 ≈ 1100 перевищували).
+ */
 export const PRODUCT_COLLECTIONS_PAGE_SIZE = 50;
 export const COLLECTIONS_PAGE_SIZE = 100;
 export const COLLECTION_PRODUCTS_PAGE_SIZE = 250;
-export const MEMBERSHIP_PRODUCTS_PAGE_SIZE = 25;
-export const MEMBERSHIP_COLLECTIONS_FIRST = 20;
+export const MEMBERSHIP_PRODUCTS_PAGE_SIZE = 20;
+export const MEMBERSHIP_COLLECTIONS_FIRST = 15;
 /** Запобіжник від нескінченної пагінації (некоректна відповідь): до 2 000 колекцій товару, 50 000 товарів колекції. */
 const MAX_PRODUCT_COLLECTION_PAGES = 40;
 const MAX_COLLECTION_PRODUCT_PAGES = 200;
@@ -355,7 +358,7 @@ export async function syncCollectionsPage(db: Db, admin: AdminGraphql, shop: str
   return { nodes: data.collections.nodes.length, removed };
 }
 
-/** Сторінка «товари з колекціями»: членство кожного товару (товар із понад 20 колекціями — окремим завданням). */
+/** Сторінка «товари з колекціями»: членство кожного товару (товар із понад MEMBERSHIP_COLLECTIONS_FIRST колекціями — окремим завданням). */
 export async function syncCollectionMembershipsPage(db: Db, admin: AdminGraphql, shop: string, after: string | null) {
   const fetchedAt = new Date();
   const data: { products: { pageInfo: PageInfo; nodes: Array<{ id: string; collections: GqlCollectionConnection }> } } = await admin(

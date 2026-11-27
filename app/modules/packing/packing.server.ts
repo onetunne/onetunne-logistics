@@ -431,13 +431,12 @@ function skuEquals(key: string) {
 
 /**
  * Варіант каталогу «живий» — товар не видалено в Shopify (products.status ≠ DELETED, markProductDeleted) і варіант
- * був у ОСТАННЬОМУ повному переліку варіантів товару (upsertProduct ставить товару й варіантам відповіді один час
- * синхронізації updated_at; варіант, видалений у Shopify, лишається зі старішим часом). Видалені рядки зберігаються
- * (на них посилаються замовлення й облік), але їхні штрихкоди/SKU не роблять сканування живого товару «неоднозначним»:
- * після видалення й повторного створення товару (імпорт CSV) або заміни варіанта з тим самим штрихкодом кожне
- * сканування інакше назавжди вимагало б ручного +1.
+ * не позначено видаленим (product_variants.removed_at: його не було в ОСТАННЬОМУ повному переліку варіантів товару —
+ * upsertProduct; знову з'явився — позначку знято). Видалені рядки зберігаються (на них посилаються замовлення й облік),
+ * але їхні штрихкоди/SKU не роблять сканування живого товару «неоднозначним»: після видалення й повторного створення
+ * товару (імпорт CSV) або заміни варіанта з тим самим штрихкодом кожне сканування інакше назавжди вимагало б ручного +1.
  */
-const catalogVariantLive = sql`(${products.status} is distinct from 'DELETED' and ${productVariants.updatedAt} >= ${products.updatedAt})`;
+const catalogVariantLive = sql`(${products.status} is distinct from 'DELETED' and ${productVariants.removedAt} is null)`;
 
 async function findCatalogVariant(db: DbOrTx, code: string): Promise<{ productTitle: string; variantTitle: string | null } | null> {
   const key = codeKey(code);

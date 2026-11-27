@@ -31,7 +31,7 @@ const messages: MessageModule = {
     "permission.warehouse.receive": "Склад: надходження й позначення браку",
     "permission.warehouse.adjust": "Склад: інвентаризація, списання, пороги, розбіжності з Shopify",
     "permission.production.manage": "Виробництво: створення й зміна партій",
-    "permission.packing.perform": "Пакування замовлень",
+    "permission.packing.perform": "Пакування замовлень (зокрема коробка, вага й габарити посилки)",
   },
   en: {
     "staff.permissions.title": "Staff member permissions",
@@ -59,7 +59,7 @@ const messages: MessageModule = {
     "permission.warehouse.receive": "Warehouse: receipts and marking defects",
     "permission.warehouse.adjust": "Warehouse: stocktake, write-offs, thresholds, Shopify discrepancies",
     "permission.production.manage": "Production: create and edit batches",
-    "permission.packing.perform": "Pack orders",
+    "permission.packing.perform": "Pack orders (including parcel box, weight and dimensions)",
   },
 };
 

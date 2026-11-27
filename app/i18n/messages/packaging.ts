@@ -158,7 +158,8 @@ const messages: MessageModule = {
     "packaging.kits.field.collections": "Колекції шаблону (вибрано: {count})",
     "packaging.kits.productPickerHelp":
       "Пошук, фільтри й «Вибрати показані» лише допомагають знайти товари: шаблон діє на всі варіанти вибраних товарів (якщо нижче не задано фільтр моделі/кольору).",
-    "packaging.kits.collectionPickerHelp": "Колекції й товари в них синхронізуються з Shopify (ручні й автоматичні колекції).",
+    "packaging.kits.collectionPickerHelp":
+      "Колекції й товари в них синхронізуються з Shopify (ручні й автоматичні колекції). Колекція містить товари, а не окремі варіанти: шаблон діє на всі варіанти товару з колекції — для окремих моделей чи кольорів задайте фільтр моделі/кольору нижче.",
     "packaging.kits.collectionSearchPlaceholder": "Назва колекції",
     "packaging.kits.collectionsNoneYet": "Колекцій ще немає — вони з’являться після синхронізації з Shopify.",
     "packaging.kits.noCollections": "Немає колекцій за цими умовами.",
@@ -407,7 +408,8 @@ const messages: MessageModule = {
     "packaging.kits.field.collections": "Template collections (selected: {count})",
     "packaging.kits.productPickerHelp":
       "Search, filters and “Select shown” only help you find products: the template applies to all variants of the selected products (unless a model/colour filter is set below).",
-    "packaging.kits.collectionPickerHelp": "Collections and their products are synced from Shopify (manual and automated collections).",
+    "packaging.kits.collectionPickerHelp":
+      "Collections and their products are synced from Shopify (manual and automated collections). A collection holds products, not single variants: the template applies to every variant of a product in the collection — to target certain models or colours, set the model/colour filter below.",
     "packaging.kits.collectionSearchPlaceholder": "Collection name",
     "packaging.kits.collectionsNoneYet": "No collections yet — they appear after the sync with Shopify.",
     "packaging.kits.noCollections": "No collections match these filters.",

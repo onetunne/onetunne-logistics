@@ -71,6 +71,13 @@
       "when": 1795777550299,
       "tag": "0009_shop_webhook_subscriptions",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1795780205630,
+      "tag": "0010_shopify_api_cost_customs_value",
+      "breakpoints": true
     }
   ]
 }

@@ -19,6 +19,7 @@ import { ensureInventoryPushSweep, scheduleFullReconcileCheck } from "~/modules/
 import { SCHEDULED_RECONCILE_FIRST_DELAY_MS } from "~/modules/inventory-sync/jobs";
 import { SCHEDULED_COLLECTIONS_SYNC_FIRST_DELAY_MS, scheduleCollectionsSyncCheck } from "~/modules/shopify-sync/collections.server";
 import { enqueueWebhookSubscriptionCheck, webhookConfigKey } from "~/modules/shopify-sync/webhook-subscriptions.server";
+import { FULFILLMENT_REFRESH_FIRST_DELAY_MS, scheduleFulfillmentRefreshCheck } from "~/modules/shopify-sync/fulfillment-refresh.server";
 
 /**
  * Робоче середовище: PostgreSQL (DATABASE_URL). Тестовий перевізник тут НЕ реєструється —
@@ -100,6 +101,8 @@ export async function ensureJobWorker(): Promise<void> {
     await scheduleFullReconcileCheck(runtime.handle.db, { delayMs: SCHEDULED_RECONCILE_FIRST_DELAY_MS });
     // Щоденна повна синхронізація колекцій (шаблони комплектації «на колекцію»; лише читання Shopify).
     await scheduleCollectionsSyncCheck(runtime.handle.db, { delayMs: SCHEDULED_COLLECTIONS_SYNC_FIRST_DELAY_MS });
+    // Застарілий статус виконання відправлених замовлень (загублений webhook) → повторне читання; лише читання Shopify.
+    await scheduleFulfillmentRefreshCheck(runtime.handle.db, { delayMs: FULFILLMENT_REFRESH_FIRST_DELAY_MS });
   } catch (e) {
     workerStarted = false;
     logger.error("job.worker_start_failed", { error: e });

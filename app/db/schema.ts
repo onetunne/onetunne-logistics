@@ -246,6 +246,14 @@ export const productVariants = pgTable(
     inventorySyncedAt: timestamp("inventory_synced_at", { withTimezone: true }),
     /** Shopify InventoryItem GID — для оновлення залишків за webhook inventory_levels/update. */
     inventoryItemId: text("inventory_item_id"),
+    /**
+     * Етап 5: коли варіант зник із ПОВНОГО переліку варіантів товару в Shopify (видалено в Shopify). Ставить і знімає
+     * лише upsertProduct (modules/shopify-sync/sync.server.ts): повний перелік без варіанта → час синхронізації; варіант
+     * знову в переліку → null. Неповний перелік нічого не змінює. Рядок не видаляється (на нього посилаються замовлення
+     * й облік складу); сканування в пакуванні не вважає його штрихкод «спільним» (catalogVariantLive). null — наявний
+     * (або невідомо: демо, дані з інших джерел).
+     */
+    removedAt: timestamp("removed_at", { withTimezone: true }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -370,6 +378,12 @@ export const orders = pgTable(
      * без цих полів) → як true (безпечніше). domain/order-status.ts isFulfilledInShopify.
      */
     shopifyShippableFulfilled: boolean("shopify_shippable_fulfilled"),
+    /**
+     * Етап 5: коли застосунок востаннє ставив у чергу повторне читання замовлення з Shopify через застарілий статус
+     * виконання (передано перевізнику, а в Shopify ще не «виконано» — webhook міг загубитися;
+     * modules/shopify-sync/fulfillment-refresh.server.ts). Обмежує повтори: не частіше ніж раз на інтервал. null — не ставив.
+     */
+    shopifyFulfillmentCheckedAt: timestamp("shopify_fulfillment_checked_at", { withTimezone: true }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -418,6 +432,13 @@ export const orderLineItems = pgTable(
      */
     shopifyAddedAt: timestamp("shopify_added_at", { withTimezone: true }),
     unitPrice: money("unit_price").notNull(),
+    /**
+     * Етап 5: ціна одиниці після ВСІХ знижок — Shopify LineItem.discountedUnitPriceAfterAllDiscountsSet (shopMoney, та сама
+     * валюта, що й unit_price): «The approximate unit price … includes discounts applied to refunded and removed
+     * quantities» (2026-10). Митна вартість одиниці (modules/customs/invoice.ts). null — позиції до етапу 5 / демо:
+     * вартість розподіляється з subtotal замовлення, як раніше.
+     */
+    discountedUnitPrice: money("discounted_unit_price"),
     currency: char("currency", { length: 3 }).notNull(),
     imageUrl: text("image_url"),
     position: integer("position").notNull().default(0),

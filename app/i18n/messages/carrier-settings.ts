@@ -332,6 +332,7 @@ const messages: MessageModule = {
     "shopify.jobs.type.collectionMembershipsPage": "Повна синхронізація товарів у колекціях",
     "shopify.jobs.type.scheduledCollectionsSync": "Щоденна синхронізація колекцій (за розкладом)",
     "shopify.jobs.type.ensureWebhooks": "Перевірка підписок на webhooks",
+    "shopify.jobs.type.fulfillmentRefresh": "Перевірка статусу виконання відправлених замовлень (за розкладом)",
   },
   en: {
     "settings.customs.registrationConfirm": "I confirm: the shipping address matches the recipient's registered address, and this is allowed by Nova Post rules",
@@ -646,6 +647,7 @@ const messages: MessageModule = {
     "shopify.jobs.type.collectionMembershipsPage": "Full sync of products in collections",
     "shopify.jobs.type.scheduledCollectionsSync": "Daily collection sync (scheduled)",
     "shopify.jobs.type.ensureWebhooks": "Webhook subscription check",
+    "shopify.jobs.type.fulfillmentRefresh": "Fulfillment status check for shipped orders (scheduled)",
   },
 };
 

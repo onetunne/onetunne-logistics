@@ -9,6 +9,7 @@ import type { ServiceContext } from "~/server/types";
 import {
   PROBLEM_CATEGORIES,
   TRACKING_CODES,
+  WAREHOUSE_CODES,
   categoryCodeFilter,
   problemCategory,
   problemSource,
@@ -101,17 +102,25 @@ function categoryCondition(category: ProblemCategory): SQL {
   return f.exclude.length > 0 ? notInArray(issues.code, f.exclude) : sql`true`;
 }
 
+/** Те саме розбиття, що й problemSource (categories.ts): коди без префікса (відстеження, склад) — переліком. */
 function sourceCondition(source: ProblemSource): SQL {
   const tracking = [...TRACKING_CODES];
+  const warehouse = [...WAREHOUSE_CODES];
   switch (source) {
     case "tracking":
       return inArray(issues.code, tracking);
+    case "warehouse":
+      return warehouse.length > 0 ? inArray(issues.code, warehouse) : sql`false`;
     case "carrier":
       return and(like(issues.code, "CARRIER\\_%"), notInArray(issues.code, tracking))!;
     case "shopify":
       return like(issues.code, "SHOPIFY\\_%");
     case "validation":
-      return and(notLike(issues.code, "CARRIER\\_%"), notLike(issues.code, "SHOPIFY\\_%"), notInArray(issues.code, tracking))!;
+      return and(
+        notLike(issues.code, "CARRIER\\_%"),
+        notLike(issues.code, "SHOPIFY\\_%"),
+        notInArray(issues.code, [...tracking, ...warehouse]),
+      )!;
   }
 }
 

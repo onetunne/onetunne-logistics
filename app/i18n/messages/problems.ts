@@ -3,7 +3,8 @@ import type { MessageModule } from "../types";
 /**
  * Розділ «Проблеми»: вкладки, швидкі фільтри (категорія, серйозність), компактні фільтри, підсумок, картки замовлень,
  * пропозиції, масові дії, способи вирішення. Категорії — problems.category.<c>, джерела — problems.source.<s>.
- * Назви й пояснення самих проблем — issue.<CODE>.title/help (validation.ts), назви полів — field.* (validation.ts).
+ * Назви й пояснення самих проблем — issue.<CODE>.title/help (validation.ts; попередження пакування — packing.ts),
+ * назви полів — field.* (validation.ts).
  */
 const messages: MessageModule = {
   uk: {
@@ -87,11 +88,13 @@ const messages: MessageModule = {
     "problems.category.carrier": "Перевізник",
     "problems.category.shopify": "Shopify",
     "problems.category.delivery": "Доставка",
+    "problems.category.warehouse": "Склад",
     "problems.category.other": "Інше",
     "problems.source.validation": "Перевірка даних",
     "problems.source.carrier": "Перевізник (накладні)",
     "problems.source.shopify": "Синхронізація Shopify",
     "problems.source.tracking": "Відстеження",
+    "problems.source.warehouse": "Склад (пакування)",
     "problems.filters.titleActive": "Фільтри · активних: {count}",
     "problems.filters.order": "Номер замовлення",
     "problems.filters.orderPlaceholder": "Напр. 1001",
@@ -206,11 +209,13 @@ const messages: MessageModule = {
     "problems.category.carrier": "Carrier",
     "problems.category.shopify": "Shopify",
     "problems.category.delivery": "Delivery",
+    "problems.category.warehouse": "Warehouse",
     "problems.category.other": "Other",
     "problems.source.validation": "Data check",
     "problems.source.carrier": "Carrier (waybills)",
     "problems.source.shopify": "Shopify sync",
     "problems.source.tracking": "Tracking",
+    "problems.source.warehouse": "Warehouse (packing)",
     "problems.filters.titleActive": "Filters · active: {count}",
     "problems.filters.order": "Order number",
     "problems.filters.orderPlaceholder": "E.g. 1001",

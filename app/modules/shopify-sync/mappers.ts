@@ -158,9 +158,28 @@ export interface MappedOrder {
     /** Коли позицію створено в Shopify (LineItem.createdAt); null — немає в даних (старі відповіді/тести). */
     shopifyCreatedAt: Date | null;
     unitPrice: string;
+    /**
+     * Ціна одиниці після всіх знижок (LineItem.discountedUnitPriceAfterAllDiscountsSet.shopMoney) — митна вартість
+     * одиниці (customs/invoice.ts). null — немає в даних, інша валюта, ніж у ціни позиції, або некоректне значення.
+     */
+    discountedUnitPrice: string | null;
     currency: string;
     imageUrl: string | null;
   }>;
+}
+
+/**
+ * Ціна одиниці після всіх знижок. Shopify (LineItem, 2026-10): «The approximate unit price of the line item in shop and
+ * presentment currencies. This value includes discounts applied to refunded and removed quantities.» Береться shopMoney —
+ * та сама валюта, що й originalUnitPriceSet.shopMoney (ціни позицій) і суми замовлення (orders.currency); якщо валюти
+ * різні або сума некоректна — null (інвойс тоді розподіляє знижку з subtotal, як раніше). Нічого не вигадуємо:
+ * normalizeAmount перетворив би некоректне значення на 0.00 і занизив митну вартість.
+ */
+export function discountedUnitPriceOf(li: GqlOrder["lineItems"]["nodes"][number]): string | null {
+  const money = li.discountedUnitPriceAfterAllDiscountsSet?.shopMoney;
+  if (!money || money.currencyCode !== li.originalUnitPriceSet.shopMoney.currencyCode) return null;
+  if (typeof money.amount !== "string" || !/^\d+(?:\.\d+)?$/.test(money.amount.trim())) return null;
+  return normalizeAmount(money.amount);
 }
 
 function validDate(value: string | null | undefined): Date | null {
@@ -234,6 +253,7 @@ export function mapOrder(o: GqlOrder): MappedOrder {
       currentQuantity: typeof li.currentQuantity === "number" ? Math.max(0, li.currentQuantity) : li.quantity,
       shopifyCreatedAt: validDate(li.createdAt),
       unitPrice: normalizeAmount(li.originalUnitPriceSet.shopMoney.amount),
+      discountedUnitPrice: discountedUnitPriceOf(li),
       currency: li.originalUnitPriceSet.shopMoney.currencyCode,
       imageUrl: li.image?.url ?? null,
     })),

@@ -28,6 +28,8 @@ export const JOB = {
   scheduledCollectionsSync: "shopify.collections_scheduled",
   /** Етап 5: перевірка/оновлення підписок на webhooks (webhook-subscriptions.server.ts). */
   ensureWebhooks: "shopify.ensure_webhooks",
+  /** Етап 5: планове перечитування застарілого статусу виконання відправлених замовлень (fulfillment-refresh.server.ts). */
+  fulfillmentRefresh: "shopify.fulfillment_refresh",
 } as const;
 
 /** dedupeKey завдання синхронізації замовлення (webhooks, імпорт, повторне читання після скасування накладної). */

@@ -16,6 +16,7 @@ import {
   syncProductCollections,
 } from "./collections.server";
 import { fulfillShipment, reportFulfillmentFailure } from "./fulfillment.server";
+import { runFulfillmentRefresh } from "./fulfillment-refresh.server";
 import { openNewVariantsFromShopify } from "./inventory-opening.server";
 import { ensureWebhookSubscriptions, type WebhookRegistrar } from "./webhook-subscriptions.server";
 import {
@@ -133,6 +134,13 @@ export function createSyncHandlers(deps: SyncDeps): JobHandlers {
       run: async () => {
         const outcome = await runScheduledCollectionsSync(deps.db);
         logger.info("shopify.collections_scheduled", { outcome });
+      },
+    },
+    // Етап 5: застарілий статус виконання відправлених замовлень → повторне читання (лише читання Shopify).
+    [JOB.fulfillmentRefresh]: {
+      run: async () => {
+        const outcome = await runFulfillmentRefresh(deps.db);
+        logger.info("shopify.fulfillment_refresh", { ...outcome });
       },
     },
     [JOB.syncInventoryItem]: {

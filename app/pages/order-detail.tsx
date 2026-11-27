@@ -2523,7 +2523,13 @@ function PackingCard({ data }: { data: Data }) {
               </p>
             ) : null}
             {summary.mismatch.dims ? (
-              <p>{t("packing.mismatch.dims", { waybill: summary.mismatch.dims.waybillMm.join(" × "), packed: summary.mismatch.dims.packedMm.join(" × ") })}</p>
+              <p>
+                {/* Накладна з типовою упаковкою (габарити — верхня межа): розбіжність — лише більша посилка (як на екрані пакування). */}
+                {t(summary.mismatch.dims.exceeds ? "packing.mismatch.dimsExceeds" : "packing.mismatch.dims", {
+                  waybill: summary.mismatch.dims.waybillMm.join(" × "),
+                  packed: summary.mismatch.dims.packedMm.join(" × "),
+                })}
+              </p>
             ) : null}
             {/* Лише вага, яку нова накладна теж проігнорує, — переоформлення не допоможе (порада хибна). */}
             {mismatchNeedsReissue(summary.mismatch) ? <p>{t(order.status === "packed" ? "packing.mismatch.packedHint" : "packing.mismatch.hint")}</p> : null}

@@ -3,7 +3,7 @@
  * Webhook лише ставить завдання в чергу; завдання завжди перечитує свіжі дані через GraphQL Admin API,
  * тож порядок і повтори подій не призводять до неузгодженості.
  */
-import { and, desc, eq, inArray, like, lt, notLike, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, like, notInArray, notLike, or, sql } from "drizzle-orm";
 import type { Db, DbOrTx, Tx } from "~/db/client.server";
 import { issues, jobs, orderChanges, orderLineItems, orders, productVariants, products, shipments, shopInstallations } from "~/db/schema";
 import { isFulfilledInShopify, isShipped } from "~/domain/order-status";
@@ -16,19 +16,29 @@ import { VALIDATABLE_STATUSES, validateOrderInTx } from "~/modules/orders/workfl
 import { cancelOrder, processPaidOrder } from "~/modules/shipments/waybill.server";
 import { syncOrderReservations } from "~/modules/inventory/reservations.server";
 import { scheduleReconcileForInventoryWebhook } from "~/modules/inventory-sync/schedule.server";
-import type { AdminGraphql } from "~/integrations/shopify/admin-client.server";
+import { ShopifyApiError, type AdminGraphql } from "~/integrations/shopify/admin-client.server";
 import type { ShopifyGateway, ShopifySyncResult } from "~/integrations/shopify/types";
 import {
   INVENTORY_ITEM_PRODUCT_QUERY,
+  ORDER_LINE_ITEMS_MAX_PAGES,
+  ORDER_LINE_ITEMS_PAGE_QUERY,
+  ORDER_LINE_ITEMS_PAGE_SIZE,
   ORDER_QUERY,
   ORDER_UPDATE_MUTATION,
+  ORDERS_PAGE_SIZE,
   SHOP_SHIPPING_COUNTRIES_QUERY,
   ORDER_ADDRESS_STATE_QUERY,
   ORDERS_PAGE_QUERY,
   PRODUCT_QUERY,
+  PRODUCT_VARIANTS_MAX_PAGES,
+  PRODUCT_VARIANTS_PAGE_QUERY,
+  PRODUCT_VARIANTS_PAGE_SIZE,
   PRODUCTS_PAGE_QUERY,
+  PRODUCTS_PAGE_SIZE,
   type GqlOrder,
+  type GqlOrderLineItemsPage,
   type GqlProduct,
+  type GqlProductVariantsPage,
   type PageInfo,
 } from "~/integrations/shopify/graphql";
 import type { ServiceContext } from "~/server/types";
@@ -51,9 +61,6 @@ export { JOB } from "./jobs";
 /** Версія GraphQL Admin API (та сама, що в shopify.server.ts). */
 const SHOPIFY_API_VERSION = "2026-10";
 
-/** Сторінка списку: невелика, щоб запитувана вартість GraphQL не перевищувала ліміт. */
-const PAGE_SIZE = 10;
-
 // ---------------------------------------------------------------------------
 // Товари
 // ---------------------------------------------------------------------------
@@ -64,11 +71,13 @@ const PAGE_SIZE = 10;
  * не рахуються двічі — див. opening.server.ts).
  *
  * Етап 5 — варіанти, видалені в Shopify: рядки варіантів не видаляються (на них посилаються позиції замовлень і
- * облік складу), але товар і варіанти з відповіді отримують ОДИН час синхронізації (updated_at). Варіант, якого немає
- * в ПОВНОМУ переліку варіантів (opts.variantsComplete), лишається зі старішим updated_at, ніж у товару, — тобто
- * видалений у Shopify (сканування в пакуванні не вважає його «спільним штрихкодом»: catalogVariantLive у
- * modules/packing/packing.server.ts). Неповний перелік (є наступна сторінка варіантів) — про відсутні нічого не
- * відомо: їм ставиться той самий час (вважаються наявними).
+ * облік складу), а позначаються явно — product_variants.removed_at: варіант, якого немає в ПОВНОМУ переліку варіантів
+ * (opts.variantsComplete — прочитано всі сторінки, readAllVariants), отримує час синхронізації; варіант із відповіді —
+ * null (знову з'явився в Shopify). Неповний перелік (читання сторінок не завершилося — readAllVariants) — про відсутні
+ * нічого не відомо: вони вважаються наявними (позначку знято) — у пакуванні їхній спільний штрихкод лишається
+ * «неоднозначним» (безпечніше, ніж мовчки зарахувати сканування не того товару).
+ * Сканування в пакуванні не вважає штрихкод видаленого варіанта «спільним» (catalogVariantLive у
+ * modules/packing/packing.server.ts). Інші зміни варіанта (митні дані, габарити в застосунку) позначку не зачіпають.
  */
 export async function upsertProduct(
   db: DbOrTx,
@@ -99,20 +108,72 @@ export async function upsertProduct(
     }
     for (const v of p.variants) {
       // inventorySyncedAt — час знімка залишку Shopify (opening.server.ts порівнює з ним дату замовлень).
-      const data = { ...v, productId, currency, inventorySyncedAt: v.inventoryAvailable === null ? null : fetchedAt, updatedAt: syncedAt };
+      const data = {
+        ...v,
+        productId,
+        currency,
+        inventorySyncedAt: v.inventoryAvailable === null ? null : fetchedAt,
+        removedAt: null,
+        updatedAt: syncedAt,
+      };
       await tx
         .insert(productVariants)
         .values(data)
         .onConflictDoUpdate({ target: productVariants.shopifyVariantId, set: data });
     }
-    if (!opts.variantsComplete) {
+    if (opts.variantsComplete) {
+      const present = p.variants.map((v) => v.shopifyVariantId);
       await tx
         .update(productVariants)
-        .set({ updatedAt: syncedAt })
-        .where(and(eq(productVariants.productId, productId), lt(productVariants.updatedAt, syncedAt)));
+        .set({ removedAt: syncedAt, updatedAt: syncedAt })
+        .where(
+          and(
+            eq(productVariants.productId, productId),
+            isNull(productVariants.removedAt),
+            or(isNull(productVariants.shopifyVariantId), notInArray(productVariants.shopifyVariantId, present)),
+          ),
+        );
+    } else {
+      await tx
+        .update(productVariants)
+        .set({ removedAt: null, updatedAt: syncedAt })
+        .where(and(eq(productVariants.productId, productId), isNotNull(productVariants.removedAt)));
     }
     return "saved";
   });
+}
+
+/**
+ * Усі варіанти товару: перша сторінка вже прочитана (PRODUCT_QUERY), наступні — PRODUCT_VARIANTS_PAGE_QUERY (after).
+ * Shopify: «If querying a single product at the root, you can fetch up to 2048 variants» (Product.variants, 2026-10).
+ * complete = true лише коли прочитано ВСІ сторінки одного стану товару. Відповідь без курсора, понад
+ * PRODUCT_VARIANTS_MAX_PAGES сторінок, товар зник або змінився між сторінками (updatedAt) → перелік неповний: прочитані
+ * варіанти зберігаються, а про відсутні нічого не відомо (upsertProduct вважає їх наявними, а не видаленими); зміна
+ * товару в Shopify надішле products/update — тоді товар перечитується знову.
+ */
+export async function readAllVariants(admin: AdminGraphql, first: GqlProduct): Promise<{ product: GqlProduct; complete: boolean }> {
+  const nodes = [...first.variants.nodes];
+  let info = first.variants.pageInfo;
+  let complete = true;
+  for (let page = 1; info?.hasNextPage; page++) {
+    if (!info.endCursor || page >= PRODUCT_VARIANTS_MAX_PAGES) {
+      complete = false;
+      break;
+    }
+    const data: GqlProductVariantsPage = await admin<GqlProductVariantsPage>(PRODUCT_VARIANTS_PAGE_QUERY, {
+      id: first.id,
+      first: PRODUCT_VARIANTS_PAGE_SIZE,
+      after: info.endCursor,
+    });
+    if (!data.product || data.product.updatedAt !== first.updatedAt) {
+      complete = false;
+      break;
+    }
+    nodes.push(...data.product.variants.nodes);
+    info = data.product.variants.pageInfo;
+  }
+  if (!complete) logger.warn("shopify.product_variants_incomplete", { product: first.id, read: nodes.length });
+  return { product: { ...first, variants: { pageInfo: { hasNextPage: !complete, endCursor: null }, nodes } }, complete };
 }
 
 export async function syncProduct(db: Db, admin: AdminGraphql, productGid: string, currency: string) {
@@ -122,7 +183,8 @@ export async function syncProduct(db: Db, admin: AdminGraphql, productGid: strin
     await markProductDeleted(db, productGid);
     return "deleted" as const;
   }
-  return upsertProduct(db, mapProduct(data.product), currency, fetchedAt, { variantsComplete: !data.product.variants.pageInfo?.hasNextPage });
+  const { product, complete } = await readAllVariants(admin, data.product);
+  return upsertProduct(db, mapProduct(product), currency, fetchedAt, { variantsComplete: complete });
 }
 
 export async function markProductDeleted(db: DbOrTx, productGid: string) {
@@ -133,11 +195,11 @@ export async function markProductDeleted(db: DbOrTx, productGid: string) {
 export async function syncProductsPage(db: Db, admin: AdminGraphql, shop: string, after: string | null, currency: string) {
   const fetchedAt = new Date();
   const data = await admin<{ products: { pageInfo: PageInfo; nodes: GqlProduct[] } }>(PRODUCTS_PAGE_QUERY, {
-    first: PAGE_SIZE,
+    first: PRODUCTS_PAGE_SIZE,
     after,
   });
   for (const p of data.products.nodes) {
-    // Товар із великою кількістю варіантів перечитується окремо (повний список варіантів).
+    // Товар, варіанти якого не вмістилися на сторінку списку, перечитується окремо (усі сторінки варіантів).
     if (p.variants.pageInfo?.hasNextPage) await syncProduct(db, admin, p.id, currency);
     else await upsertProduct(db, mapProduct(p), currency, fetchedAt, { variantsComplete: true });
   }
@@ -214,6 +276,7 @@ type StoredLine = {
   quantity: number;
   currentQuantity: number | null;
   shopifyAddedAt: Date | null;
+  discountedUnitPrice: string | null;
   position: number;
 };
 
@@ -228,6 +291,7 @@ async function loadStoredLines(tx: DbOrTx, orderId: string): Promise<StoredLine[
       quantity: orderLineItems.quantity,
       currentQuantity: orderLineItems.currentQuantity,
       shopifyAddedAt: orderLineItems.shopifyAddedAt,
+      discountedUnitPrice: orderLineItems.discountedUnitPrice,
       position: orderLineItems.position,
     })
     .from(orderLineItems)
@@ -271,6 +335,7 @@ async function replaceLineItems(tx: DbOrTx, orderId: string, m: MappedOrder, opt
       quantity: l.quantity,
       currentQuantity: l.currentQuantity,
       unitPrice: l.unitPrice,
+      discountedUnitPrice: l.discountedUnitPrice,
       currency: l.currency,
       imageUrl: l.imageUrl,
       position,
@@ -303,15 +368,18 @@ async function replaceLineItems(tx: DbOrTx, orderId: string, m: MappedOrder, opt
  * Позиції не змінилися, але збережені до етапу 5 (current_quantity / shopify_added_at = null): тихо заповнює ці
  * поля значеннями Shopify. Ефективна кількість складу не змінюється (current_quantity дорівнює збереженій quantity —
  * інакше diffLineItems повідомив би зміну), тож без історії, проблем і руху складу; безпечно й з активною накладною.
+ * Ціна одиниці після всіх знижок (митна вартість) оновлюється так само тихо, як і суми замовлення (subtotal/total):
+ * склад вона не змінює, а вже надісланий перевізнику інвойс береться зі знімка запиту (withSentCustomsData).
  */
 async function backfillLineDetails(tx: DbOrTx, stored: readonly StoredLine[], m: MappedOrder) {
   const byGid = new Map(m.lineItems.map((l) => [l.shopifyLineItemId, l]));
   for (const e of stored) {
     const l = e.gid ? byGid.get(e.gid) : undefined;
     if (!l) continue;
-    const patch: { currentQuantity?: number; shopifyAddedAt?: Date } = {};
+    const patch: { currentQuantity?: number; shopifyAddedAt?: Date; discountedUnitPrice?: string } = {};
     if (e.currentQuantity === null && l.currentQuantity === e.quantity) patch.currentQuantity = l.currentQuantity;
     if (e.shopifyAddedAt === null && l.shopifyCreatedAt) patch.shopifyAddedAt = l.shopifyCreatedAt;
+    if (l.discountedUnitPrice !== null && e.discountedUnitPrice !== l.discountedUnitPrice) patch.discountedUnitPrice = l.discountedUnitPrice;
     if (Object.keys(patch).length > 0) await tx.update(orderLineItems).set(patch).where(eq(orderLineItems.id, e.id));
   }
 }
@@ -647,20 +715,56 @@ async function finishUpsert(
   return { result: outcome.result, orderId: outcome.orderId };
 }
 
+/**
+ * Усі позиції замовлення: позиції НІКОЛИ не обрізаються. Після першої сторінки (ORDER_QUERY) наступні читаються
+ * ORDER_LINE_ITEMS_PAGE_QUERY (after). Неповне читання — помилка, часткові позиції не зберігаються (склад резервував
+ * би й списував неповні кількості, а зниклі позиції видалялися б):
+ * - замовлення змінилося між сторінками (updatedAt) або зникло → повторювана помилка: завдання повториться зі свіжими даними;
+ * - відповідь без курсора → неповторювана помилка відповіді;
+ * - понад ORDER_LINE_ITEMS_MAX_PAGES сторінок → shopify.tooManyLineItems (замовлення — вручну).
+ */
+export async function readAllLineItems(admin: AdminGraphql, order: GqlOrder): Promise<GqlOrder> {
+  let info = order.lineItems.pageInfo;
+  if (!info?.hasNextPage) return order;
+  const nodes = [...order.lineItems.nodes];
+  for (let page = 1; info?.hasNextPage; page++) {
+    if (page >= ORDER_LINE_ITEMS_MAX_PAGES) {
+      throw new DomainError("shopify.tooManyLineItems", 422, { order: order.name, max: ORDER_LINE_ITEMS_MAX_PAGES * ORDER_LINE_ITEMS_PAGE_SIZE });
+    }
+    if (!info.endCursor) throw new ShopifyApiError("Shopify returned an incomplete line item page (no cursor)", false, "INCOMPLETE_LINE_ITEMS");
+    const data: GqlOrderLineItemsPage = await admin<GqlOrderLineItemsPage>(ORDER_LINE_ITEMS_PAGE_QUERY, {
+      id: order.id,
+      first: ORDER_LINE_ITEMS_PAGE_SIZE,
+      after: info.endCursor,
+    });
+    if (!data.order || data.order.updatedAt !== order.updatedAt) {
+      throw new ShopifyApiError("Shopify order changed while its line items were being read", true, "ORDER_CHANGED_DURING_READ");
+    }
+    nodes.push(...data.order.lineItems.nodes);
+    info = data.order.lineItems.pageInfo;
+  }
+  return { ...order, lineItems: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } };
+}
+
 /** Перечитує замовлення з Shopify і застосовує. Невідомі варіанти спершу синхронізуються як товари. */
 export async function syncOrder(ctx: ServiceContext, admin: AdminGraphql, orderGid: string, mode: "live" | "import") {
   const data = await admin<{ order: GqlOrder | null }>(ORDER_QUERY, { id: orderGid });
   if (!data.order) return { result: "unchanged" as const, orderId: null };
-  return applyOrder(ctx, admin, data.order, mode);
+  return applyOrder(ctx, admin, await readAllLineItems(admin, data.order), mode);
 }
 
+/** Замовлення зі сторінки списку (імпорт): позиції, що не вмістилися, — повторне читання замовлення й сторінки позицій. */
+async function applyListedOrder(ctx: ServiceContext, admin: AdminGraphql, order: GqlOrder, mode: "live" | "import") {
+  if (!order.lineItems.pageInfo?.hasNextPage) return applyOrder(ctx, admin, order, mode);
+  // Свіжий знімок замовлення (updatedAt, з яким звіряються наступні сторінки позицій).
+  const full = await admin<{ order: GqlOrder | null }>(ORDER_QUERY, { id: order.id });
+  if (!full.order) return { result: "unchanged" as const, orderId: null };
+  return applyOrder(ctx, admin, await readAllLineItems(admin, full.order), mode);
+}
+
+/** order — з УСІМА позиціями (readAllLineItems). */
 async function applyOrder(ctx: ServiceContext, admin: AdminGraphql, order: GqlOrder, mode: "live" | "import") {
-  if (order.lineItems.pageInfo?.hasNextPage) {
-    // На сторінці списку не всі позиції — перечитуємо замовлення повністю.
-    const full = await admin<{ order: GqlOrder | null }>(ORDER_QUERY, { id: order.id });
-    if (full.order && !full.order.lineItems.pageInfo?.hasNextPage) order = full.order;
-    else throw new DomainError("shopify.tooManyLineItems", 422, { order: order.name });
-  }
+  if (order.lineItems.pageInfo?.hasNextPage) throw new ShopifyApiError("Order line items were not read completely", false, "INCOMPLETE_LINE_ITEMS");
   const m = mapOrder(order);
   const known = await resolveVariantIds(ctx.db, m);
   const missingProducts = new Set(
@@ -677,7 +781,7 @@ export async function importOrdersPage(
   payload: { shop: string; since: string; after?: string | null; imported?: number; skipped?: number; updated?: number; failed?: string[] },
 ) {
   const data = await admin<{ orders: { pageInfo: PageInfo; nodes: GqlOrder[] } }>(ORDERS_PAGE_QUERY, {
-    first: PAGE_SIZE,
+    first: ORDERS_PAGE_SIZE,
     after: payload.after ?? null,
     query: `created_at:>=${payload.since}`,
   });
@@ -688,7 +792,7 @@ export async function importOrdersPage(
   for (const order of data.orders.nodes) {
     // Помилка одного замовлення не зупиняє імпорт: воно повторюється окремим завданням.
     try {
-      const r = await applyOrder(ctx, admin, order, "import");
+      const r = await applyListedOrder(ctx, admin, order, "import");
       if (r.result === "created") imported++;
       else if (r.result === "skipped_unpaid") skipped++;
       else updated++;

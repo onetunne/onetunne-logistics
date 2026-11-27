@@ -21,7 +21,11 @@ export const PERMISSIONS = [
   "warehouse.receive", // надходження з виробництва/вручну, позначення браку
   "warehouse.adjust", // ручні коригування, початкові залишки, розв'язання розбіжностей із Shopify (типово — власник)
   "production.manage", // створення й зміна виробничих партій (типово — власник)
-  "packing.perform", // черга пакування, контроль комплектації, підтвердження «Запаковано»
+  // Черга пакування, контроль комплектації, підтвердження «Запаковано», а також фізичні параметри посилки (коробка,
+  // вага, габарити — orders.parcel_*), зокрема ще до створення накладної (modules/packing/packing.server.ts).
+  // Ім'я й місто отримувача на сторінках пакування — лише разом з orders.view (modules/packing/view.server.ts,
+  // queue.server.ts).
+  "packing.perform",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];

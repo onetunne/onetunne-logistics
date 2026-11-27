@@ -7,11 +7,14 @@ import { ISSUE_CODES, type IssueCode } from "~/modules/validation/types";
  * тут додано лише "other" для кодів, яких валідатор ще не знає. Решта коду (фільтри SQL, лічильники)
  * користується лише `problemCategory`.
  */
-export const PROBLEM_CATEGORIES = ["address", "phone", "contact", "customs", "carrier", "shopify", "delivery", "other"] as const;
+export const PROBLEM_CATEGORIES = ["address", "phone", "contact", "customs", "carrier", "shopify", "delivery", "warehouse", "other"] as const;
 export type ProblemCategory = (typeof PROBLEM_CATEGORIES)[number];
 
-/** Хто створив проблему: перевірка даних, сервіс накладних (перевізник), синхронізація Shopify, відстеження. */
-export const PROBLEM_SOURCES = ["validation", "carrier", "shopify", "tracking"] as const;
+/**
+ * Хто створив проблему: перевірка даних, сервіс накладних (перевізник), синхронізація Shopify, відстеження,
+ * склад (пакування — modules/packing/lifecycle.server.ts).
+ */
+export const PROBLEM_SOURCES = ["validation", "carrier", "shopify", "tracking", "warehouse"] as const;
 export type ProblemSource = (typeof PROBLEM_SOURCES)[number];
 
 export function isProblemCategory(value: unknown): value is ProblemCategory {
@@ -40,8 +43,15 @@ export const MANUALLY_CLOSABLE_ISSUE_CODES: readonly string[] = ["CARRIER_REJECT
 /** Коди, що створює сервіс відстеження (мають префікс CARRIER_/DELIVERY_, але джерело — відстеження). */
 export const TRACKING_CODES: readonly string[] = ["DELIVERY_PROBLEM", "CARRIER_SHIPMENT_DELETED"];
 
+/**
+ * Коди складу (категорія warehouse): попередження пакування без спільного префікса (ORDER_CANCELLED_AFTER_PACKING,
+ * PACKING_SKIPPED_AT_HANDOVER — PACKING_ISSUE_CODES модуля пакування). Джерело — склад, не перевірка даних.
+ */
+export const WAREHOUSE_CODES: readonly string[] = ISSUE_CODES.filter((c) => issueCategory(c) === "warehouse");
+
 export function problemSource(code: string): ProblemSource {
   if (TRACKING_CODES.includes(code)) return "tracking";
+  if (WAREHOUSE_CODES.includes(code)) return "warehouse";
   if (code.startsWith("CARRIER_")) return "carrier";
   if (code.startsWith("SHOPIFY_")) return "shopify";
   return "validation";

@@ -319,6 +319,12 @@ describe("packing screen: changing the box (regression)", () => {
     expect(screen.parcel).toMatchObject({ lengthMm: 400, widthMm: 300, heightMm: 200, weightGrams: goods + boxL.tareWeightGrams!, savedWeightGrams: null, savedDimsMm: null });
     // Коробка L більша за типову упаковку накладної (верхня межа) → справжня розбіжність «більша посилка».
     expect(screen.mismatch?.dims).toEqual({ waybillMm: [350, 250, 80], packedMm: [400, 300, 200], exceeds: true });
+    // Картка «Пакування» на сторінці замовлення — той самий текст «більша посилка», що й екран пакування (не «±10 мм»).
+    const fill = (key: string) => uk(key).replace("{waybill}", "350 × 250 × 80").replace("{packed}", "400 × 300 × 200");
+    for (const page of [await render(orderDetail, "orders/:orderId", `orders/${id}`), await render(packingOrder, "picking/:orderId", path)]) {
+      expect(page).toContain(fill("packing.mismatch.dimsExceeds"));
+      expect(page).not.toContain(fill("packing.mismatch.dims"));
+    }
     html = await render(packingOrder, "picking/:orderId", path);
     expect(hidden(html, "dimsPrefill")).toBe("400x300x200");
     expect(hidden(html, "weightPrefill")).toBe(String(goods + boxL.tareWeightGrams!));

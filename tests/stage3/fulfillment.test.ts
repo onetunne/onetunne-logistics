@@ -18,6 +18,7 @@ import { fulfillableGroups, fulfillShipment, reportFulfillmentFailure, trackingI
 import { updateSetting } from "~/modules/settings/settings.server";
 import type { CarrierAdapter } from "~/integrations/carriers/types";
 import { createTestEnv, OWNER, type TestEnv } from "../helpers";
+import { requestedQueryCost } from "../helpers/shopify-query-cost";
 
 let env: TestEnv;
 beforeAll(async () => {
@@ -235,72 +236,14 @@ describe("fulfillShipment", () => {
   });
 });
 
-/**
- * Запитувана вартість запиту за правилами документації shopify.dev (rate-limits): скаляр/enum — 0, об'єкт — 1,
- * список/з'єднання з first/last — 2 + first × вартість вузла (приклад документації products(first: 1){edges{node{title}}} = 3).
- * Обгортки edges/nodes прозорі (вузол — об'єкт). Мутація — 10. Консервативно: усе всередині з'єднання множиться.
- */
-function requestedQueryCost(document: string): number {
-  const src = document.replace(/#graphql/g, "").replace(/\$[A-Za-z]+\s*:\s*[A-Za-z!\[\]]+/g, "");
-  let i = 0;
-  const skipWs = () => {
-    while (i < src.length && /[\s,]/.test(src[i]!)) i++;
-  };
-  const readName = () => {
-    skipWs();
-    const m = /^[A-Za-z_][A-Za-z0-9_]*/.exec(src.slice(i));
-    if (!m) return null;
-    i += m[0].length;
-    return m[0];
-  };
-  const readArgs = (): Record<string, string> => {
-    skipWs();
-    if (src[i] !== "(") return {};
-    const end = src.indexOf(")", i);
-    const body = src.slice(i + 1, end);
-    i = end + 1;
-    return Object.fromEntries([...body.matchAll(/([A-Za-z]+)\s*:\s*([^,\s)]+)/g)].map((m) => [m[1]!, m[2]!]));
-  };
-  // Повертає вартість набору полів { ... } (без вартості самого об'єкта-власника).
-  const readSelection = (): number => {
-    skipWs();
-    if (src[i] !== "{") return 0;
-    i++;
-    let total = 0;
-    for (;;) {
-      skipWs();
-      if (src[i] === "}") {
-        i++;
-        return total;
-      }
-      const name = readName();
-      if (!name) throw new Error(`parse error at ${i}: ${src.slice(i, i + 20)}`);
-      const args = readArgs();
-      skipWs();
-      const hasSelection = src[i] === "{";
-      const children = hasSelection ? readSelection() : 0;
-      const size = Number(args.first ?? args.last ?? NaN);
-      if (!hasSelection) continue; // скаляр / enum
-      if (name === "edges" || name === "nodes" || name === "node") total += name === "edges" ? children : 1 + children;
-      else if (Number.isFinite(size)) total += 2 + size * Math.max(1, children);
-      else total += 1 + children;
-    }
-  };
-  skipWs();
-  const kind = readName();
-  readName(); // назва операції
-  readArgs();
-  const cost = readSelection();
-  return kind === "mutation" ? 10 + cost : cost;
-}
-
 describe("query cost (Shopify single-query limit 1000, checked before execution)", () => {
   it("matches the documented example", () => {
     expect(requestedQueryCost("query Q { products(first: 1) { edges { node { title } } } }")).toBe(3);
   });
 
   it("fulfillment state query and mutation stay well under 1000 points", () => {
-    const stateCost = requestedQueryCost(ORDER_FULFILLMENT_STATE_QUERY);
+    // Спільна оцінка (tests/helpers/shopify-query-cost.ts); усі запити застосунку — tests/stage5/shopify-query-cost.test.ts.
+    const stateCost = requestedQueryCost(ORDER_FULFILLMENT_STATE_QUERY, { id: "gid://shopify/Order/1", after: null });
     expect(stateCost).toBeGreaterThan(100);
     expect(stateCost).toBeLessThan(700);
     // Попередня форма запиту (fulfillmentOrders(first: 25) × lineItems(first: 100)) перевищувала ліміт.
@@ -309,7 +252,7 @@ describe("query cost (Shopify single-query limit 1000, checked before execution)
         "query Q($id: ID!) { order(id: $id) { id fulfillments(first: 25) { id trackingInfo(first: 10) { number } } fulfillmentOrders(first: 25) { nodes { id supportedActions { action } assignedLocation { location { id } } lineItems(first: 100) { nodes { id remainingQuantity } } } } } }",
       ),
     ).toBeGreaterThan(1000);
-    expect(requestedQueryCost(FULFILLMENT_CREATE_MUTATION)).toBeLessThan(100);
+    expect(requestedQueryCost(FULFILLMENT_CREATE_MUTATION, { fulfillment: {} })).toBeLessThan(100);
   });
 });
 

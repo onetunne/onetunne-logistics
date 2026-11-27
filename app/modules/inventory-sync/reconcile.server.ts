@@ -182,7 +182,13 @@ export { RETURN_PENDING_WINDOW_MS } from "./returns.server";
  *   кількість позиції (без повернених/відшкодованих одиниць); також позиції, уперше побачені вже переданими (історичні,
  *   без рядка резерву — reservations.server.ts), якщо Shopify їх ще не виконав;
  * - fulfilledOutside: виконано в Shopify, а в застосунку ще зарезервовано;
- * - uncertain: частково виконані замовлення.
+ * - uncertain: частково виконані замовлення (Shopify виконав або міг виконати фізичні позиції — розподіл одиниць
+ *   невідомий) і резерви відкритих замовлень із неперенесеними змінами позицій Shopify (orders.shopify_lines_pending_at).
+ * Часткове виконання ЛИШЕ позицій без доставки (orders.shopify_shippable_fulfilled = false: цифрова подарункова картка,
+ * цифрові товари) фізичних позицій не торкається — вони й далі «committed» у Shopify, тож рахуються як невиконані.
+ * Shopify: «committed — Committed when a placed order isn't fulfilled»; «After the order is fulfilled, Shopify decrements
+ * the committed inventory quantity» (docs/research/stage5/shopify-inventory-quantities.md); PARTIALLY_FULFILLED — «Some of
+ * the items in the order have been fulfilled» (OrderDisplayFulfillmentStatus, 2026-10).
  * Статус Shopify RESTOCKED у 2026-10 замінено на UNFULFILLED (лишається лише для старих даних) — повернення
  * визначаються за current_quantity, а не за статусом (returns.server.ts).
  */
@@ -197,7 +203,13 @@ export async function orderTiming(db: DbOrTx, warehouseId: string, stockItemIds:
   };
   const shipped = inArray(orders.status, [...SHIPPED_STATUSES]);
   const fs = sql`coalesce(${orders.fulfillmentStatus}, '')`;
-  const notFulfilled = sql`${fs} not in ('fulfilled', 'partially_fulfilled', 'restocked')`;
+  // Часткове виконання, яке могло зачепити фізичні позиції: shopify_shippable_fulfilled = false — виконано лише позиції
+  // без доставки; null (невідомо, дані до етапу 5) — як true (безпечніше, як isFulfilledInShopify).
+  const partialPhysical = sql`(${fs} = 'partially_fulfilled' and coalesce(${orders.shopifyShippableFulfilled}, true))`;
+  const notFulfilled = sql`not (${fs} in ('fulfilled', 'restocked') or ${partialPhysical})`;
+  // Shopify змінив позиції відкритого замовлення, а застосунок їх ще не застосував (shopify-sync/pending-lines.server.ts):
+  // резерв застосунку — за старими позиціями, committed Shopify — уже за новими (currentQuantity).
+  const linesPending = sql`(${orders.shopifyLinesPendingAt} is not null and ${orders.status} <> 'cancelled' and not ${shipped})`;
   // Поточна кількість позиції (Shopify currentQuantity); позиції вже немає — як списано (без висновку про повернення).
   const lineQty = sql`greatest(coalesce(${orderLineItems.currentQuantity}, ${orderLineItems.quantity}, ${stockReservations.consumedQty}), 0)`;
   const rows = await db
@@ -207,8 +219,10 @@ export async function orderTiming(db: DbOrTx, warehouseId: string, stockItemIds:
         then least(${stockReservations.consumedQty}, ${lineQty}) else 0 end), 0)`.mapWith(Number),
       fulfilledOutside: sql<number>`coalesce(sum(case when not ${shipped} and ${orders.status} <> 'cancelled' and ${fs} = 'fulfilled'
         then ${stockReservations.reservedQty} else 0 end), 0)`.mapWith(Number),
-      uncertain: sql<boolean>`coalesce(bool_or(${fs} in ('partially_fulfilled', 'restocked')
-        and (${stockReservations.reservedQty} > 0 or (${shipped} and ${stockReservations.consumedQty} > 0))), false)`,
+      uncertain: sql<boolean>`coalesce(bool_or(
+        ((${partialPhysical} or ${fs} = 'restocked')
+          and (${stockReservations.reservedQty} > 0 or (${shipped} and ${stockReservations.consumedQty} > 0)))
+        or (${linesPending} and ${stockReservations.reservedQty} > 0)), false)`,
     })
     .from(stockReservations)
     .innerJoin(orders, eq(orders.id, stockReservations.orderId))
@@ -224,7 +238,7 @@ export async function orderTiming(db: DbOrTx, warehouseId: string, stockItemIds:
       stockItemId: stockItems.id,
       inFlight: sql<number>`coalesce(sum(case when ${notFulfilled}
         then greatest(coalesce(${orderLineItems.currentQuantity}, ${orderLineItems.quantity}), 0) else 0 end), 0)`.mapWith(Number),
-      uncertain: sql<boolean>`coalesce(bool_or(${fs} = 'partially_fulfilled'), false)`,
+      uncertain: sql<boolean>`coalesce(bool_or(${partialPhysical}), false)`,
     })
     .from(orderLineItems)
     .innerJoin(orders, eq(orders.id, orderLineItems.orderId))

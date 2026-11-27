@@ -5,7 +5,7 @@ import type { IssueCode } from "./types";
  * Таблиця вичерпна: новий код у ISSUE_CODES без категорії не пройде перевірку типів.
  */
 
-export const ISSUE_CATEGORIES = ["address", "phone", "contact", "customs", "carrier", "shopify", "delivery"] as const;
+export const ISSUE_CATEGORIES = ["address", "phone", "contact", "customs", "carrier", "shopify", "delivery", "warehouse"] as const;
 export type IssueCategory = (typeof ISSUE_CATEGORIES)[number];
 
 const CATEGORY_BY_CODE = {
@@ -61,6 +61,9 @@ const CATEGORY_BY_CODE = {
   SHOPIFY_FULFILLED_OUTSIDE_APP: "shopify",
   // Доставка (після передачі перевізнику)
   DELIVERY_PROBLEM: "delivery",
+  // Склад: попередження пакування (розібрати скасовану посилку, перевірити посилку, передану без «Запаковано»)
+  ORDER_CANCELLED_AFTER_PACKING: "warehouse",
+  PACKING_SKIPPED_AT_HANDOVER: "warehouse",
 } as const satisfies Record<IssueCode, IssueCategory>;
 
 /** Категорія проблеми за кодом (чиста функція). */
