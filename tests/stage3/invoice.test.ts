@@ -30,7 +30,7 @@ const order = {
 
 const settings = {
   shipper: { ...DEFAULT_SETTINGS.shipper, companyName: "ONE TUNNE", contactName: "Owner", taxId: "12345678", eori: "UA123456", ioss: "IM1234567890" },
-  customs: { incoterm: "DAP" as const, exportReason: "sale" as const, invoiceType: "commercial" as const, recipientRegistrationAddress: "none" as const },
+  customs: { incoterm: "DAP" as const, exportReason: "sale" as const, invoiceType: "commercial" as const, recipientRegistrationAddress: "none" as const, recipientRegistrationAddressConfirmed: false },
 };
 
 describe("commercial invoice", () => {

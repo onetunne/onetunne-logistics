@@ -18,6 +18,8 @@ import { inArray } from "drizzle-orm";
 import { z } from "zod";
 import type { DbOrTx } from "~/db/client.server";
 import { productVariants } from "~/db/schema";
+import { readOverrides } from "~/modules/products/customs-overrides";
+import { checkoutReadiness } from "./nova-post-setup.server";
 import { requirePermission } from "~/domain/permissions";
 import {
   CarrierError,
@@ -504,6 +506,8 @@ function toShopifyRates(carrier: CarrierAdapter, priced: PricedQuote[], settings
 
 export type CheckoutRatesOutcome =
   | "ok"
+  | "tariff_not_fixed"
+  | "tariff_not_confirmed"
   | "disabled"
   | "no_destination"
   | "no_fx_rate"
@@ -558,6 +562,9 @@ export async function computeCheckoutRates(deps: CheckoutRatesDeps, request: Sho
   try {
     const settings = await getSettings(deps.db);
     if (!settings.checkoutRates.enabled) return finish("disabled", 200);
+    // Nova Post (варіант B): лише один тариф із налаштувань і лише після підтвердження валюти/договірних тарифів власником.
+    const readiness = checkoutReadiness(deps.carriers.getDefault()?.code, settings);
+    if (!readiness.ready) return finish(readiness.reason, 200);
 
     if (!validCountry) return finish("no_destination", 200);
     if (shippable.length === 0) return finish("no_shippable_items", 200);
@@ -569,11 +576,22 @@ export async function computeCheckoutRates(deps: CheckoutRatesDeps, request: Sho
     const gids = [...new Set(shippable.map((i) => variantGid(i.variant_id)).filter((g): g is string => g !== null))];
     const dbVariants = gids.length
       ? await deps.db
-          .select({ gid: productVariants.shopifyVariantId, weightGrams: productVariants.weightGrams, hsCode: productVariants.hsCode })
+          .select({
+            gid: productVariants.shopifyVariantId,
+            weightGrams: productVariants.weightGrams,
+            hsCode: productVariants.hsCode,
+            customsOverrides: productVariants.customsOverrides,
+          })
           .from(productVariants)
           .where(inArray(productVariants.shopifyVariantId, gids))
       : [];
-    const byGid = new Map(dbVariants.map((v) => [v.gid!, v]));
+    // Вага/HS-код, змінені в застосунку, мають пріоритет над даними Shopify.
+    const byGid = new Map(
+      dbVariants.map((v) => {
+        const o = readOverrides(v.customsOverrides);
+        return [v.gid!, { ...v, weightGrams: o.weightGrams ?? v.weightGrams, hsCode: o.hsCode ?? v.hsCode, weightOverridden: o.weightGrams !== undefined }];
+      }),
+    );
 
     let missingWeight = 0;
     let fromDb = 0;
@@ -583,7 +601,10 @@ export async function computeCheckoutRates(deps: CheckoutRatesDeps, request: Sho
       const stored = gid ? byGid.get(gid) : undefined;
       const grams = item.grams ?? 0;
       let unitGrams = 0;
-      if (grams > 0) {
+      if (stored?.weightOverridden && stored.weightGrams) {
+        unitGrams = stored.weightGrams;
+        fromDb += 1;
+      } else if (grams > 0) {
         unitGrams = SHOPIFY_ITEM_GRAMS_ARE_PER_UNIT ? grams : Math.ceil(grams / Math.max(1, item.quantity));
       } else if (stored?.weightGrams && stored.weightGrams > 0) {
         // Вага варіанта в нашій базі — завжди за одиницю.

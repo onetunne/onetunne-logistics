@@ -192,6 +192,11 @@ export const productVariants = pgTable(
     customsDescriptionLocal: text("customs_description_local"),
     /** Основний матеріал англійською (метаполе logistics.material). */
     material: text("material"),
+    /**
+     * Етап 3: митні дані/вага/габарити, змінені в застосунку (мають пріоритет над даними Shopify).
+     * Синхронізація Shopify цю колонку не змінює. Ключі — CustomsOverrides (modules/products/customs-overrides.ts).
+     */
+    customsOverrides: jsonb("customs_overrides"),
     imageUrl: text("image_url"),
     inventoryAvailable: integer("inventory_available"),
     /** Shopify InventoryItem GID — для оновлення залишків за webhook inventory_levels/update. */

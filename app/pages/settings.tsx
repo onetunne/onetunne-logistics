@@ -1,3 +1,11 @@
+import {
+  checkoutReadiness,
+  confirmNovaPostTariffs,
+  revokeNovaPostTariffs,
+  runNovaPostConnectionCheck,
+} from "~/modules/rates/nova-post-setup.server";
+import type { NovaPostConnectionCheck } from "~/integrations/carriers/nova-post/connection-check.server";
+import { isTariffConfirmed } from "~/modules/settings/schema";
 import { Suspense, useRef, useState, type ReactNode } from "react";
 import type { ZodType } from "zod";
 import {
@@ -86,6 +94,9 @@ const INTENTS = [
   "savePackaging",
   "saveNovaPost",
   "saveCheckoutRates",
+  "checkNovaPost",
+  "confirmTariffs",
+  "revokeTariffs",
   "previewRates",
   "enableCheckout",
   "disableCheckout",
@@ -199,6 +210,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
       version: versions.checkoutRates,
       /** Базова валюта таблиці курсів — валюта тарифів Nova Post (як у checkout-rates.server). */
       baseCurrency: values.novaPost.tariffCurrency,
+      /** Чи можна використовувати вартість перевізника (Nova Post: один тариф + підтвердження валюти/тарифів). */
+      readiness: checkoutReadiness(ctx.carriers.getDefault()?.code, values),
     },
     /** Значення одразу (демо, лише власник) або проміс — сторінка показує стан через <Await>, не чекаючи Shopify. */
     checkoutConnection: checkoutConnectionState(ctx, canManage),
@@ -315,7 +328,11 @@ function isIntent(value: string): value is Intent {
   return (INTENTS as readonly string[]).includes(value);
 }
 
-type IntentResult = ActionResult & { preview?: CheckoutPreviewView; fxRows?: SubmittedFxRow[] };
+type IntentResult = ActionResult & {
+  preview?: CheckoutPreviewView;
+  fxRows?: SubmittedFxRow[];
+  connectionCheck?: NovaPostConnectionCheck;
+};
 
 async function runIntent(ctx: RequestContext, intent: Intent, form: FormData): Promise<IntentResult> {
   switch (intent) {
@@ -340,7 +357,18 @@ async function runIntent(ctx: RequestContext, intent: Intent, form: FormData): P
       if (version === null) return { ok: false, error: "error.generic" };
       // Усі поля розділу — списки вибору: поле, якого немає у формі (сторінка, відкрита до оновлення), зберігає
       // поточне значення, а не скидається до значення за замовчуванням.
-      const input = presentFields(form, Object.keys(customsSchema.shape));
+      const input: Record<string, unknown> = presentFields(
+        form,
+        Object.keys(customsSchema.shape).filter((k) => k !== "recipientRegistrationAddressConfirmed"),
+      );
+      // Підтвердження (прапорець) надсилається лише формою з полем вибору адреси реєстрації.
+      if (form.has("recipientRegistrationAddress")) {
+        const confirmed = form.get("recipientRegistrationAddressConfirmed") === "on";
+        if (input.recipientRegistrationAddress === "shipping" && !confirmed) {
+          return invalid({ recipientRegistrationAddressConfirmed: "settings.customs.registrationConfirmRequired" });
+        }
+        input.recipientRegistrationAddressConfirmed = input.recipientRegistrationAddress === "shipping" && confirmed;
+      }
       return saved(await updateSetting(ctx.db, ctx.actor, "customs", await withStored(ctx, "customs", input), version));
     }
     case "savePackaging": {
@@ -392,8 +420,32 @@ async function runIntent(ctx: RequestContext, intent: Intent, form: FormData): P
         const errors = { ...remapFxErrors(schemaFieldErrors(checkoutRatesSchema, input), fx.index), ...fx.errors };
         return { ...invalid(errors), fxRows: fx.submitted };
       }
+      // Nova Post (варіант B): увімкнути Checkout можна лише з одним тарифом і підтвердженими валютою/договірними тарифами.
+      if (input.enabled) {
+        const readiness = checkoutReadiness(ctx.carriers.getDefault()?.code, values);
+        if (!readiness.ready) return { ...invalid({ enabled: `settings.checkoutRates.notReady.${readiness.reason}` }), fxRows: fx.submitted };
+      }
       const result = await updateSetting(ctx.db, ctx.actor, "checkoutRates", input, version);
       return result.ok ? saved(result) : { ...invalid(remapFxErrors(result.fieldErrors, fx.index)), fxRows: fx.submitted };
+    }
+    case "checkNovaPost": {
+      const outcome = await runNovaPostConnectionCheck(ctx);
+      if (!outcome.ok) return { ok: false, error: "settings.novaPost.check.notConfigured" };
+      return {
+        ok: outcome.check.authorized,
+        ...(outcome.check.authorized ? { message: "settings.novaPost.check.done" } : { error: "settings.novaPost.check.authFailed" }),
+        connectionCheck: outcome.check,
+      } as IntentResult;
+    }
+    case "confirmTariffs":
+    case "revokeTariffs": {
+      const version = expectedVersion(form);
+      if (version === null) return { ok: false, error: "error.generic" };
+      const fn = intent === "confirmTariffs" ? confirmNovaPostTariffs : revokeNovaPostTariffs;
+      const result = await fn(ctx, version);
+      return result.ok
+        ? { ok: true, message: intent === "confirmTariffs" ? "settings.novaPost.tariff.confirmedOk" : "settings.novaPost.tariff.revokedOk" }
+        : invalid(result.fieldErrors);
     }
     case "previewRates": {
       requirePermission(ctx.actor, "settings.manage");
@@ -630,6 +682,9 @@ const FIELD_ERROR_KEYS: Readonly<Record<string, string>> = {
   value: "settings.checkoutRates.error.value",
   intervalMinutes: "settings.tracking.error.interval",
   trackingUrlTemplate: "settings.tracking.error.template",
+  recipientRegistrationAddressConfirmed: "settings.customs.registrationConfirmRequired",
+  "enabled:settings.checkoutRates.notReady.tariff_not_fixed": "settings.checkoutRates.notReady.tariff_not_fixed",
+  "enabled:settings.checkoutRates.notReady.tariff_not_confirmed": "settings.checkoutRates.notReady.tariff_not_confirmed",
 };
 
 interface ShipperFieldConfig {
@@ -711,6 +766,14 @@ export default function SettingsPage() {
         <CustomsSection data={data} {...sectionProps("saveCustoms")} />
         <PackagingSection data={data} {...sectionProps("savePackaging")} />
         {data.novaPost ? <NovaPostSection data={data} {...sectionProps("saveNovaPost")} /> : null}
+        {data.novaPost ? (
+          <NovaPostCheckSection
+            data={data}
+            check={sectionProps("checkNovaPost")}
+            confirm={sectionProps("confirmTariffs")}
+            revoke={sectionProps("revokeTariffs")}
+          />
+        ) : null}
         <CheckoutRatesSection
           data={data}
           {...sectionProps("saveCheckoutRates")}
@@ -986,6 +1049,16 @@ function CustomsSection({ data, result, pending, fieldError }: SectionProps) {
                 disabled={!editable}
               />
             </div>
+            <div className="ot-form-layout__full">
+              <Checkbox
+                label={t("settings.customs.registrationConfirm")}
+                name="recipientRegistrationAddressConfirmed"
+                defaultChecked={value.recipientRegistrationAddressConfirmed}
+                helpText={t("settings.customs.registrationConfirmHelp")}
+                error={fieldError("recipientRegistrationAddressConfirmed")}
+                disabled={!editable}
+              />
+            </div>
           </FormLayout>
           <Banner tone="info" title={t("settings.customs.hsTitle")}>
             {t("settings.customs.hsNote")}
@@ -1184,6 +1257,156 @@ function NovaPostForm({ data, result, pending, fieldError, initialPayer }: Secti
   );
 }
 
+// ---------------------------------------------------------------- 5a. Перевірка підключення й підтвердження тарифів
+
+function NovaPostCheckSection({
+  data,
+  check,
+  confirm,
+  revoke,
+}: {
+  data: LoaderData;
+  check: Pick<SectionProps, "result" | "pending">;
+  confirm: Pick<SectionProps, "result" | "pending">;
+  revoke: Pick<SectionProps, "result" | "pending">;
+}) {
+  const t = useT();
+  if (!data.novaPost) return null;
+  const { value, version } = data.novaPost;
+  const editable = data.can.manage;
+  const confirmed = isTariffConfirmed(value);
+  const c = (check.result as { connectionCheck?: NovaPostConnectionCheck } | undefined)?.connectionCheck;
+  const money = (v: number | null) => (v === null ? "—" : String(v));
+  return (
+    <Card title={t("settings.novaPost.check.title")} description={t("settings.novaPost.check.description")}>
+      <Stack gap={4}>
+        <ActionBanner data={check.result} />
+        {editable ? (
+          <Form method="post">
+            <input type="hidden" name="intent" value="checkNovaPost" />
+            <Button type="submit" loading={check.pending}>
+              {t("settings.novaPost.check.run")}
+            </Button>
+          </Form>
+        ) : (
+          <Text tone="subdued">{t("settings.ownerOnly")}</Text>
+        )}
+        {c ? (
+          <Stack gap={3}>
+            <KeyValueList
+              items={[
+                { key: "host", label: t("settings.novaPost.check.host"), value: c.endpointHost },
+                {
+                  key: "auth",
+                  label: t("settings.novaPost.check.auth"),
+                  value: c.authorized ? t("settings.novaPost.check.ok") : `${t("settings.novaPost.check.failed")}: ${c.authError ?? "—"}`,
+                },
+                {
+                  key: "shipments",
+                  label: t("settings.novaPost.check.shipments"),
+                  value: c.shipments.ok
+                    ? t("settings.novaPost.check.shipmentsValue", {
+                        total: c.shipments.total ?? "—",
+                        currencies: c.shipments.currencyCodes.join(", ") || "—",
+                      })
+                    : `${t("settings.novaPost.check.failed")}: ${c.shipments.error ?? c.shipments.status ?? "—"}`,
+                },
+              ]}
+            />
+            {c.calculations.map((calc) => (
+              <Stack gap={2} key={calc.label}>
+                <Text as="h3" variant="heading-sm">
+                  {t(`settings.novaPost.check.calc.${calc.label}`)}
+                </Text>
+                {calc.ok ? (
+                  <>
+                    <DataTable<CheckServiceRowView>
+                      caption={t(`settings.novaPost.check.calc.${calc.label}`)}
+                      rows={calc.services.map((r, i) => ({ ...r, key: String(i) }))}
+                      rowKey={(r) => r.key}
+                      columns={[
+                        { key: "type", header: t("settings.novaPost.check.col.type"), primary: true, render: (r) => r.deliveryType ?? r.name ?? "—" },
+                        { key: "price", header: t("settings.novaPost.check.col.price"), render: (r) => money(r.price) },
+                        { key: "discount", header: t("settings.novaPost.check.col.discount"), render: (r) => money(r.discount) },
+                        { key: "cost", header: t("settings.novaPost.check.col.cost"), render: (r) => money(r.cost) },
+                      ]}
+                    />
+                    <Text variant="body-sm" tone="subdued">
+                      {Object.keys(calc.currencyFields).length > 0
+                        ? t("settings.novaPost.check.currencyFound", {
+                            fields: Object.entries(calc.currencyFields)
+                              .map(([k, v]) => `${k}=${v}`)
+                              .join(", "),
+                          })
+                        : t("settings.novaPost.check.currencyMissing")}
+                    </Text>
+                  </>
+                ) : (
+                  <Banner tone="critical">{`HTTP ${calc.status ?? "—"}: ${calc.error ?? "—"}`}</Banner>
+                )}
+              </Stack>
+            ))}
+            <Text variant="body-sm" tone="subdued">
+              {t("settings.novaPost.check.compareHelp")}
+            </Text>
+          </Stack>
+        ) : null}
+
+        <Stack gap={2}>
+          <Stack direction="horizontal" gap={2} align="center">
+            <Text as="h3" variant="heading-sm">
+              {t("settings.novaPost.tariff.title")}
+            </Text>
+            <Badge tone={confirmed ? "success" : "outline"}>
+              {confirmed ? t("settings.novaPost.tariff.confirmed") : t("settings.novaPost.tariff.notConfirmed")}
+            </Badge>
+          </Stack>
+          <ActionBanner data={confirm.result ?? revoke.result} />
+          <Text variant="body-sm" tone="subdued">
+            {confirmed && value.tariffConfirmation
+              ? t("settings.novaPost.tariff.confirmedDetails", {
+                  currency: value.tariffConfirmation.tariffCurrency,
+                  contract: value.tariffConfirmation.payerContractNumber || "—",
+                  tariff: value.tariffConfirmation.deliveryType || "—",
+                })
+              : t("settings.novaPost.tariff.help")}
+          </Text>
+          {!value.deliveryType ? <Banner tone="warning">{t("settings.novaPost.tariff.fixFirst")}</Banner> : null}
+          {editable ? (
+            <Form method="post">
+              <input type="hidden" name="intent" value={confirmed ? "revokeTariffs" : "confirmTariffs"} />
+              <input type="hidden" name="expectedVersion" value={version} />
+              {confirmed ? (
+                <Button type="submit" loading={revoke.pending}>
+                  {t("settings.novaPost.tariff.revoke")}
+                </Button>
+              ) : (
+                <ConfirmSubmitButton
+                  variant="primary"
+                  disabled={!value.deliveryType}
+                  loading={confirm.pending}
+                  title={t("settings.novaPost.tariff.confirmTitle")}
+                  message={t("settings.novaPost.tariff.confirmMessage", {
+                    currency: value.tariffCurrency,
+                    contract: value.payerContractNumber || "—",
+                    tariff: value.deliveryType || "—",
+                  })}
+                  confirmLabel={t("settings.novaPost.tariff.confirm")}
+                  cancelLabel={t("common.cancel")}
+                >
+                  {t("settings.novaPost.tariff.confirm")}
+                </ConfirmSubmitButton>
+              )}
+            </Form>
+          ) : null}
+        </Stack>
+      </Stack>
+    </Card>
+  );
+}
+
+type CheckServiceRowView = NovaPostConnectionCheck["calculations"][number]["services"][number] & { key: string };
+
 // ---------------------------------------------------------------- 6. Розрахунок доставки в Checkout
 
 interface CheckoutRatesSectionProps extends SectionProps {
@@ -1216,6 +1439,9 @@ function CheckoutRatesForm({ data, result, pending, fieldError }: SectionProps) 
       <Stack gap={4}>
         <ActionBanner data={result} />
         {value.enabled ? <Banner tone="info">{t("settings.checkoutRates.enabledBanner")}</Banner> : null}
+        {!data.checkoutRates.readiness.ready ? (
+          <Banner tone="warning">{t(`settings.checkoutRates.notReady.${data.checkoutRates.readiness.reason}`)}</Banner>
+        ) : null}
         <Checkbox
           id="checkoutRates-enabled"
           label={t("settings.checkoutRates.enabled")}

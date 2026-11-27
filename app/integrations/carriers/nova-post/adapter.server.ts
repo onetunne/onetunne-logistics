@@ -383,7 +383,10 @@ export class NovaPostAdapter implements CarrierAdapter {
       signal: opts?.signal,
     });
     if (res.status !== 200 || !res.body) throw readError("calculation", res);
-    return mapCalculationToQuotes(res.body, { tariffCurrency: np.tariffCurrency, incoterm, invoiceSent: Boolean(invoice) });
+    const quotes = mapCalculationToQuotes(res.body, { tariffCurrency: np.tariffCurrency, incoterm, invoiceSent: Boolean(invoice) });
+    // Варіант B (рішення власника): один тариф із налаштувань — і в Checkout, і в накладній. Інші тарифи не показуються,
+    // навіть якщо API їх повернув.
+    return isNovaPostDeliveryType(deliveryType) ? quotes.filter((q) => q.serviceCode === deliveryType) : quotes;
   }
 
   /**

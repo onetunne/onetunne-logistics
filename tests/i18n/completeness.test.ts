@@ -65,13 +65,13 @@ describe("i18n completeness", () => {
 });
 
 describe("texts describe implemented behaviour only", () => {
-  it("Nova Post tariff help does not promise that the checkout tariff is used for the waybill (not implemented)", () => {
+  it("Nova Post tariff help describes option B (one fixed tariff for checkout and waybills)", () => {
     const uk = DICTIONARIES.uk["settings.novaPost.deliveryTypeHelp"]!;
     const en = DICTIONARIES.en["settings.novaPost.deliveryTypeHelp"]!;
-    expect(uk).not.toMatch(/використовується він/);
-    expect(en).not.toMatch(/that one is used/);
-    expect(uk).toMatch(/не передається/);
-    expect(en).toMatch(/not passed to the waybill/);
+    expect(uk).toMatch(/Один тариф/);
+    expect(uk).toMatch(/Checkout увімкнути не можна/);
+    expect(en).toMatch(/One Nova Post tariff/);
+    expect(en).toMatch(/checkout cannot be enabled/);
   });
 
   it("an active CarrierService is not reported as «Shopify requests the rates» before a zone/market uses it", () => {

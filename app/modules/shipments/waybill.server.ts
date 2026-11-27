@@ -217,7 +217,7 @@ export function buildShipmentRequest(
       },
       // Лише з явного рішення власника (налаштування «Митні документи»); інакше адаптер відмовить для DE/SK/HU/FR.
       registrationAddress:
-        settings.customs.recipientRegistrationAddress === "shipping"
+        settings.customs.recipientRegistrationAddress === "shipping" && settings.customs.recipientRegistrationAddressConfirmed
           ? {
               countryCode: order.shipCountryCode ?? "",
               city: order.shipCity ?? "",

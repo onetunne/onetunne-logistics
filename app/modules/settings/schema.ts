@@ -95,6 +95,11 @@ export const customsSchema = z.object({
    * "shipping" — власник дозволив використовувати адресу доставки; "none" — накладні до цих країн не створюються.
    */
   recipientRegistrationAddress: z.enum(["none", "shipping"]).default("none"),
+  /**
+   * Власник підтвердив, що адреса доставки відповідає адресі реєстрації одержувача і що це допустимо за правилами
+   * перевізника. Без підтвердження адреса доставки як адреса реєстрації НЕ використовується.
+   */
+  recipientRegistrationAddressConfirmed: z.boolean().default(false),
 });
 
 /** Параметри Nova Post API v1.0 (договір, тариф). */
@@ -113,7 +118,30 @@ export const novaPostSchema = z.object({
    * Валюта сум, які повертає розрахунок Nova Post (у відповіді API валюта не вказана; за договором клієнта з України — UAH).
    */
   tariffCurrency: z.string().trim().toUpperCase().regex(/^[A-Z]{3}$/),
+  /**
+   * Підтвердження власника (після «Перевірки підключення»): валюта сум розрахунку й договірні тарифи відповідають
+   * договору. Дійсне лише для тих самих валюти, договору й тарифу — після їх зміни потрібне нове підтвердження.
+   * Без дійсного підтвердження вартість доставки не використовується в Checkout.
+   */
+  tariffConfirmation: z
+    .object({
+      confirmedAt: z.string(),
+      confirmedBy: z.string(),
+      tariffCurrency: z.string(),
+      payerContractNumber: z.string(),
+      deliveryType: z.string(),
+    })
+    .nullable()
+    .default(null),
 });
+
+/** Підтвердження валюти/договірних тарифів дійсне для поточних налаштувань Nova Post. */
+export function isTariffConfirmed(np: z.infer<typeof novaPostSchema>): boolean {
+  const c = np.tariffConfirmation;
+  return Boolean(
+    c && c.tariffCurrency === np.tariffCurrency && c.payerContractNumber === np.payerContractNumber && c.deliveryType === np.deliveryType,
+  );
+}
 
 /** Розрахунок доставки в Shopify Checkout (CarrierService). */
 export const ROUNDING_MODES = ["none", "up_whole", "up_99"] as const;
@@ -208,8 +236,8 @@ export const DEFAULT_SETTINGS: AllSettings = {
     ],
   },
   testCarrier: { simulation: "none" },
-  customs: { incoterm: "DAP", exportReason: "sale", invoiceType: "commercial", recipientRegistrationAddress: "none" },
-  novaPost: { payerType: "Sender", payerContractNumber: "", deliveryType: "", tariffCurrency: "UAH" },
+  customs: { incoterm: "DAP", exportReason: "sale", invoiceType: "commercial", recipientRegistrationAddress: "none", recipientRegistrationAddressConfirmed: false },
+  novaPost: { payerType: "Sender", payerContractNumber: "", deliveryType: "", tariffCurrency: "UAH", tariffConfirmation: null },
   checkoutRates: { enabled: false, markupPercent: 0, markupFixed: "0.00", rounding: "none", fxRates: [], serviceName: "" },
   tracking: { enabled: true, intervalMinutes: 60, pushToShopify: true, notifyCustomer: false, trackingUrlTemplate: "" },
 };

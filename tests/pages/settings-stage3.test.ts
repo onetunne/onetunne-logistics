@@ -307,13 +307,24 @@ describe("stage 3 settings: saving sections (owner)", () => {
     expect(bad).toMatchObject({ ok: false, error: "error.validation", intent: "saveCustoms" });
     expect(Object.keys(errorsOf(bad)).sort()).toEqual(["incoterm", "recipientRegistrationAddress"]);
 
-    const ok = await act({ ...base, incoterm: "DDP", exportReason: "return", invoiceType: "proforma", recipientRegistrationAddress: "shipping" });
+    // Адреса доставки як адреса реєстрації — лише з підтвердженням власника.
+    const unconfirmed = await act({ ...base, incoterm: "DDP", exportReason: "return", invoiceType: "proforma", recipientRegistrationAddress: "shipping" });
+    expect(errorsOf(unconfirmed)).toEqual({ recipientRegistrationAddressConfirmed: "settings.customs.registrationConfirmRequired" });
+    const ok = await act({
+      ...base,
+      incoterm: "DDP",
+      exportReason: "return",
+      invoiceType: "proforma",
+      recipientRegistrationAddress: "shipping",
+      recipientRegistrationAddressConfirmed: "on",
+    });
     expect(ok).toEqual({ ok: true, message: "result.settings.saved", intent: "saveCustoms" });
     expect(await getSetting(await db(), "customs")).toEqual({
       incoterm: "DDP",
       exportReason: "return",
       invoiceType: "proforma",
       recipientRegistrationAddress: "shipping",
+      recipientRegistrationAddressConfirmed: true,
     });
     expect((await load()).customs.version).toBe(version + 1);
 
@@ -322,7 +333,7 @@ describe("stage 3 settings: saving sections (owner)", () => {
   });
 
   it("customs: the owner's registration-address permission survives saves (also from a form without the field)", async () => {
-    await setSetting("customs", { recipientRegistrationAddress: "shipping" });
+    await setSetting("customs", { recipientRegistrationAddress: "shipping", recipientRegistrationAddressConfirmed: true });
     // Форма сторінки, відкритої до появи поля: поля немає — збережене значення не скидається до "none".
     let { version } = (await load()).customs;
     const old = await act({ intent: "saveCustoms", expectedVersion: String(version), incoterm: "DAP", exportReason: "sale", invoiceType: "commercial" });
@@ -332,13 +343,14 @@ describe("stage 3 settings: saving sections (owner)", () => {
       exportReason: "sale",
       invoiceType: "commercial",
       recipientRegistrationAddress: "shipping",
+      recipientRegistrationAddressConfirmed: true,
     });
 
     // Поточна форма надсилає поле — власник може скасувати дозвіл.
     ({ version } = (await load()).customs);
     const fields = { intent: "saveCustoms", expectedVersion: String(version), incoterm: "DAP", exportReason: "sale", invoiceType: "commercial" };
     expect(await act({ ...fields, recipientRegistrationAddress: "none" })).toMatchObject({ ok: true });
-    expect((await getSetting(await db(), "customs")).recipientRegistrationAddress).toBe("none");
+    expect(await getSetting(await db(), "customs")).toMatchObject({ recipientRegistrationAddress: "none", recipientRegistrationAddressConfirmed: false });
   });
 
   it("shipper: tax ID, EORI and IOSS are validated and normalized", async () => {
@@ -374,6 +386,7 @@ describe("stage 3 settings: saving sections (owner)", () => {
       payerContractNumber: "12345/2026",
       deliveryType: "economy",
       tariffCurrency: "UAH",
+      tariffConfirmation: null,
     });
   });
 
@@ -585,7 +598,8 @@ describe("stage 3 settings: page render", () => {
   it("renders the Nova Post section with the creation status and the ThirdPerson field error", async () => {
     const { adapter } = fakeCarrier("nova_post", async () => []);
     const html = await withCarrier(adapter, async () => {
-      const { value, version } = (await load()).novaPost!;
+      const { value: stored, version } = (await load()).novaPost!;
+      const { tariffConfirmation: _c, ...value } = stored;
       return visible(
         await render({ ...value, intent: "saveNovaPost", expectedVersion: String(version), payerType: "ThirdPerson", payerContractNumber: "" }),
       );
