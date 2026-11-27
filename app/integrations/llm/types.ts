@@ -98,7 +98,9 @@ export type AiToolRefusalReason =
   | "invalid_input"
   | "forbidden"
   | "global_pause"
-  | "order_paused";
+  | "order_paused"
+  /** Підтверджено іншу накладну, ніж активна зараз (змінилася після попереднього перегляду) — нічого не змінено. */
+  | "stale_confirmation";
 
 /** Чому потрібне підтвердження: режим manual, інструмент позначено як небезпечний, критична/фінансова дія. */
 export type AiConfirmationReason = "manual_mode" | "tool_requires_confirmation" | "critical_or_financial";

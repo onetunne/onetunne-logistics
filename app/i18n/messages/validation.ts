@@ -114,6 +114,12 @@ const messages: MessageModule = {
     "issue.CARRIER_RESULT_UNKNOWN.title": "Результат створення невідомий",
     "issue.CARRIER_RESULT_UNKNOWN.help":
       "Невідомо, чи створив перевізник накладну: зв'язок обірвався до отримання відповіді. Система перевірила відправлення за нашим референсом або не змогла цього перевірити, тому повторне створення заблоковано, щоб уникнути дубліката. Перевірте в кабінеті перевізника: якщо накладна існує — прив'яжіть її номер до замовлення, якщо ні — підтвердьте, що її не створено.",
+    "issue.CARRIER_CANCEL_UNKNOWN.title": "Невідомо, чи скасовано накладну",
+    "issue.CARRIER_CANCEL_UNKNOWN.help":
+      "{carrier} не відповів на запит скасування накладної {waybill} (тайм-аут або збій зв’язку), тому невідомо, чи її скасовано. У застосунку накладна лишається активною. Перевірте в кабінеті перевізника: якщо накладну НЕ скасовано — нею можна користуватися або повторити скасування; якщо скасовано — повторіть скасування в застосунку (або створіть нову накладну). Після перевірки закрийте цю проблему.",
+    "issue.CARRIER_CANCEL_CONFLICT.title": "Накладну скасовано, а посилку вже передано",
+    "issue.CARRIER_CANCEL_CONFLICT.help":
+      "{carrier} СКАСУВАВ накладну {waybill}, але під час скасування посилку позначено переданою перевізнику. Накладна в застосунку лишається активною, проте її номер у перевізника більше не діє. Терміново зв’яжіться з перевізником і з’ясуйте долю посилки; після вирішення закрийте цю проблему.",
     "issue.SHOPIFY_FULFILLMENT_FAILED.title": "Трек-номер не передано в Shopify",
     "issue.SHOPIFY_FULFILLMENT_FAILED.help":
       "Посилку передано перевізнику, але виконання з трек-номером у Shopify не створено після кількох спроб ({message}). Перевірте дозволи застосунку (write_merchant_managed_fulfillment_orders) і повторіть на сторінці «Синхронізація Shopify».",
@@ -278,6 +284,12 @@ const messages: MessageModule = {
     "issue.CARRIER_RESULT_UNKNOWN.title": "Creation result unknown",
     "issue.CARRIER_RESULT_UNKNOWN.help":
       "It is unknown whether the carrier created the waybill: the connection dropped before a response arrived. The system checked for the shipment by our reference or could not check, so re-creation is blocked to avoid a duplicate. Check the carrier's portal: if the waybill exists, link its number to the order; if not, confirm that it was not created.",
+    "issue.CARRIER_CANCEL_UNKNOWN.title": "Unknown whether the waybill was cancelled",
+    "issue.CARRIER_CANCEL_UNKNOWN.help":
+      "{carrier} did not answer the cancellation request for waybill {waybill} (timeout or connection failure), so it is unknown whether it was cancelled. The waybill stays active in the app. Check the carrier portal: if the waybill was NOT cancelled, it can still be used or the cancellation retried; if it was cancelled, retry the cancellation in the app (or create a new waybill). Close this problem after checking.",
+    "issue.CARRIER_CANCEL_CONFLICT.title": "Waybill cancelled, but the parcel is already handed over",
+    "issue.CARRIER_CANCEL_CONFLICT.help":
+      "{carrier} CANCELLED waybill {waybill}, but during the cancellation the parcel was marked as handed to the carrier. The waybill stays active in the app, but its number is no longer valid at the carrier. Contact the carrier urgently to clarify what happens to the parcel; close this problem once resolved.",
     "issue.SHOPIFY_FULFILLMENT_FAILED.title": "Tracking number not sent to Shopify",
     "issue.SHOPIFY_FULFILLMENT_FAILED.help":
       "The parcel was handed to the carrier, but a Shopify fulfillment with the tracking number was not created after several attempts ({message}). Check the app permissions (write_merchant_managed_fulfillment_orders) and retry on the “Shopify sync” page.",

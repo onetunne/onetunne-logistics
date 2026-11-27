@@ -8,6 +8,7 @@ import { requirePermission, type Actor } from "~/domain/permissions";
 import { ConflictError, DomainError, NotFoundError } from "~/lib/errors";
 import { writeAudit } from "~/modules/audit/audit.server";
 import { getSetting } from "~/modules/settings/settings.server";
+import { MANUALLY_CLOSABLE_ISSUE_CODES } from "~/modules/problems/categories";
 import { issueFingerprint, validateOrder, type ValidationOptions } from "~/modules/validation";
 import {
   SHIPPING_FIELDS,
@@ -455,7 +456,7 @@ export async function acceptSuggestion(ctx: ServiceContext, issueId: string, can
   return summary;
 }
 
-/** Попередження (warning) можна відхилити; помилки (error) потрібно виправити. */
+/** Попередження (warning) можна відхилити; помилки (error) потрібно виправити (крім MANUALLY_CLOSABLE_ISSUE_CODES). */
 export async function dismissIssue(ctx: ServiceContext, issueId: string): Promise<void> {
   requirePermission(ctx.actor, "orders.edit");
   await ctx.db.transaction(async (tx) => {
@@ -464,7 +465,9 @@ export async function dismissIssue(ctx: ServiceContext, issueId: string): Promis
     if (issue.status !== "open") return;
     // Помилки даних потрібно виправити. Виняток — відмова перевізника: менеджер може свідомо повторити без змін.
     const carrierRejection = issue.code === "CARRIER_REJECTED";
-    if (issue.severity !== "warning" && !carrierRejection) throw new DomainError("issue.cannotDismissError", 409);
+    if (issue.severity !== "warning" && !MANUALLY_CLOSABLE_ISSUE_CODES.includes(issue.code)) {
+      throw new DomainError("issue.cannotDismissError", 409);
+    }
     await tx
       .update(issues)
       .set({ status: "dismissed", resolvedAt: ctx.now(), resolvedBy: ctx.actor.id, resolution: "dismissed" })

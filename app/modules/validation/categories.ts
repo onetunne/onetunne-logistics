@@ -49,6 +49,8 @@ const CATEGORY_BY_CODE = {
   CARRIER_REJECTED: "carrier",
   CARRIER_RESULT_UNKNOWN: "carrier",
   CARRIER_UNAVAILABLE: "carrier",
+  CARRIER_CANCEL_UNKNOWN: "carrier",
+  CARRIER_CANCEL_CONFLICT: "carrier",
   CARRIER_SHIPMENT_DELETED: "carrier",
   // Синхронізація з Shopify
   SHOPIFY_ORDER_CHANGED: "shopify",

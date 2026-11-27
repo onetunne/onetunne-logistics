@@ -104,7 +104,7 @@ async function openCarrierIssue(
   tx: DbOrTx,
   orderId: string,
   shipmentId: string | null,
-  code: "CARRIER_REJECTED" | "CARRIER_RESULT_UNKNOWN" | "CARRIER_UNAVAILABLE",
+  code: "CARRIER_REJECTED" | "CARRIER_RESULT_UNKNOWN" | "CARRIER_UNAVAILABLE" | "CARRIER_CANCEL_UNKNOWN" | "CARRIER_CANCEL_CONFLICT",
   params: Record<string, string | number>,
 ) {
   const fingerprint = `${orderId}:${code}:`;
@@ -746,10 +746,17 @@ export async function cancelWaybillDetailed(
       // Явна відмова перевізника — «відмовив»; збій/тайм-аут — «не вдалося» (накладна так само лишається активною,
       // результат у перевізника перевіряє менеджер або відстеження).
       const refused = !failure || (failure instanceof CarrierError && failure.kind === "rejected");
+      if (!refused) {
+        // Відповіді немає: перевізник міг і скасувати накладну — менеджер перевіряє в кабінеті перевізника.
+        await openCarrierIssue(ctx.db, shipment.orderId, shipmentId, "CARRIER_CANCEL_UNKNOWN", {
+          carrier: adapter.displayName,
+          waybill: shipment.waybillNumber,
+        });
+      }
       throw refused ? new DomainError("waybill.cancelRefused", 409) : new DomainError("waybill.cancelFailed", 409);
     }
   }
-  return ctx.db.transaction(async (tx) => {
+  const outcome = await ctx.db.transaction(async (tx): Promise<CancelWaybillOutcome | { conflict: true }> => {
     const [row] = await tx
       .update(shipments)
       .set({ status: "cancelled", updatedAt: ctx.now() })
@@ -759,13 +766,24 @@ export async function cancelWaybillDetailed(
       const latest = await currentShipment(tx, shipmentId);
       if (latest.status === "created" && latest.handedOverAt) {
         // Передачу перевізнику зафіксовано під час запиту скасування — потрібна перевірка менеджером.
+        // Подію/журнал/проблему фіксуємо (транзакцію НЕ відкочуємо), помилку повертаємо після неї.
         await addEvent(tx, shipmentId, "cancel_conflict_handed_over", null, { purpose, carrierCancelled: !manual });
-        await writeAudit(tx, ctx.actor, "waybill.cancel_conflict", { type: "shipment", id: shipmentId }, { orderId: shipment.orderId });
-        throw new DomainError("waybill.alreadyHandedOver", 409);
+        await writeAudit(tx, ctx.actor, "waybill.cancel_conflict", { type: "shipment", id: shipmentId }, {
+          orderId: shipment.orderId,
+          carrierCancelled: !manual,
+        });
+        if (!manual) {
+          await openCarrierIssue(tx, shipment.orderId, shipmentId, "CARRIER_CANCEL_CONFLICT", {
+            carrier: adapter?.displayName ?? shipment.carrierCode,
+            waybill: shipment.waybillNumber ?? "",
+          });
+        }
+        return { conflict: true };
       }
       return { transitioned: false, shipment: latest, manual }; // уже скасовано паралельним запитом
     }
     await addEvent(tx, shipmentId, "cancelled", manual ? "manual_link_removed" : null, { purpose });
+    await resolveCarrierIssues(tx, shipment.orderId, ctx.actor.id, "cancelled", ["CARRIER_CANCEL_UNKNOWN"]);
     const fresh = await loadOrderRow(tx, shipment.orderId, { forUpdate: true });
     const stillActive = await findActiveShipment(tx, shipment.orderId);
     if (!stillActive && (fresh.status === "waybill_created" || fresh.status === "awaiting_picking")) {
@@ -778,6 +796,13 @@ export async function cancelWaybillDetailed(
     });
     return { transitioned: true, shipment: row, manual };
   });
+  if ("conflict" in outcome) {
+    // Ручна прив'язка: у перевізника нічого не скасовано — звичайна відмова «вже передано».
+    throw new DomainError(manual ? "waybill.alreadyHandedOver" : "waybill.cancelledButHandedOver", 409, {
+      number: shipment.waybillNumber,
+    });
+  }
+  return outcome;
 }
 
 /** Скасування накладної (див. cancelWaybillDetailed). */

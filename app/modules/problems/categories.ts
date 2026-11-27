@@ -31,6 +31,12 @@ export function problemCategory(code: string): ProblemCategory {
   return isProblemCategory(category) ? category : "other";
 }
 
+/**
+ * Помилки перевізника, які закриває менеджер після перевірки в кабінеті перевізника (застосунок сам не може
+ * дізнатися результат): відмова створення (свідомий повтор без змін) і невідомий/конфліктний результат скасування.
+ */
+export const MANUALLY_CLOSABLE_ISSUE_CODES: readonly string[] = ["CARRIER_REJECTED", "CARRIER_CANCEL_UNKNOWN", "CARRIER_CANCEL_CONFLICT"];
+
 /** Коди, що створює сервіс відстеження (мають префікс CARRIER_/DELIVERY_, але джерело — відстеження). */
 export const TRACKING_CODES: readonly string[] = ["DELIVERY_PROBLEM", "CARRIER_SHIPMENT_DELETED"];
 

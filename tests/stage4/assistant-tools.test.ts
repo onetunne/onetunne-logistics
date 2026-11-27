@@ -10,6 +10,7 @@ import { makeActor, type Actor } from "~/domain/permissions";
 import { loadOrderRow } from "~/modules/orders/repository.server";
 import { setOrderAutomationPaused, validateOrderById } from "~/modules/orders/workflow.server";
 import { updateSetting } from "~/modules/settings/settings.server";
+import { findActiveShipment } from "~/modules/shipments/waybill.server";
 import {
   ASSISTANT_TOOLS,
   confirmationReason,
@@ -381,17 +382,43 @@ describe("executor", () => {
     ).toMatchObject({ status: "error", code: "order.notEditable" });
 
     // Переоформлення: скасування + нове покоління (одне активне відправлення).
+    const first = created.status === "ok" ? (created.data as { waybillNumber: string }).waybillNumber : "";
+    // Номер накладної обов'язковий: підтвердження прив'язане до конкретної накладної.
     expect(await runAssistantTool(ctx, "reissue_waybill", { orderNumber: "#1001" })).toMatchObject({
+      status: "refused",
+      reason: "invalid_input",
+    });
+    expect(await runAssistantTool(ctx, "reissue_waybill", { orderNumber: "#1001", waybillNumber: first })).toMatchObject({
       status: "confirmation_required",
       reason: "critical_or_financial",
-      preview: { reissuable: true },
+      preview: { reissuable: true, waybillMatches: true, activeWaybill: { waybillNumber: first } },
     });
-    const reissued = await runAssistantTool(ctx, "reissue_waybill", { orderNumber: "#1001" }, { confirmed: true });
-    expect(reissued).toMatchObject({ status: "ok", data: { result: "reissued" } });
+    const reissued = await runAssistantTool(ctx, "reissue_waybill", { orderNumber: "#1001", waybillNumber: first }, { confirmed: true });
+    expect(reissued).toMatchObject({ status: "ok", data: { result: "reissued", cancelledWaybill: first } });
+    const second = reissued.status === "ok" ? (reissued.data as { newWaybill: string }).newWaybill : "";
+    expect(second).not.toBe(first);
 
-    const cancelled = await runAssistantTool(ctx, "cancel_waybill", { orderNumber: "#1001" }, { confirmed: true });
-    expect(cancelled).toMatchObject({ status: "ok", data: { cancelled: true } });
-    expect(await runAssistantTool(ctx, "cancel_waybill", { orderNumber: "#1001" }, { confirmed: true })).toMatchObject({
+    // Застаріле підтвердження (людина бачила стару накладну) — відмова, активну накладну не скасовано.
+    expect(await runAssistantTool(ctx, "cancel_waybill", { orderNumber: "#1001", waybillNumber: first })).toMatchObject({
+      status: "confirmation_required",
+      preview: { waybillMatches: false, activeWaybill: { waybillNumber: second } },
+    });
+    for (const tool of ["cancel_waybill", "reissue_waybill"]) {
+      expect(await runAssistantTool(ctx, tool, { orderNumber: "#1001", waybillNumber: first }, { confirmed: true }), tool).toMatchObject({
+        status: "refused",
+        reason: "stale_confirmation",
+      });
+    }
+    expect((await findActiveShipment(ctx.db, id))?.waybillNumber).toBe(second);
+    const stale = await env.handle.db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.action, "assistant.tool_refused"), eq(auditLog.entityId, id)));
+    expect(stale.filter((a) => a.details.reason === "stale_confirmation")).toHaveLength(2);
+
+    const cancelled = await runAssistantTool(ctx, "cancel_waybill", { orderNumber: "#1001", waybillNumber: second.toLowerCase() }, { confirmed: true });
+    expect(cancelled).toMatchObject({ status: "ok", data: { cancelled: true, waybillNumber: second } });
+    expect(await runAssistantTool(ctx, "cancel_waybill", { orderNumber: "#1001", waybillNumber: second }, { confirmed: true })).toMatchObject({
       status: "error",
       code: "waybill.notCancellable",
     });
@@ -400,7 +427,7 @@ describe("executor", () => {
       .from(auditLog)
       .where(and(eq(auditLog.action, "assistant.tool_executed"), eq(auditLog.entityId, id)));
     expect(rows.map((r) => r.details.outcome)).toEqual(expect.arrayContaining(["created", "already_exists", "reissued", "ok"]));
-    expect(await runAssistantTool(ctx, "reissue_waybill", { orderNumber: "#1001" }, { confirmed: true })).toMatchObject({
+    expect(await runAssistantTool(ctx, "reissue_waybill", { orderNumber: "#1001", waybillNumber: second }, { confirmed: true })).toMatchObject({
       status: "error",
       code: "waybill.reissueNotAllowed",
     });

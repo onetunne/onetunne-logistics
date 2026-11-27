@@ -50,6 +50,16 @@ const messages: MessageModule = {
     "order.reissue.result.concurrent":
       "Цю накладну вже переоформлює інший запит — повторно нічого не створено (захист від дублікатів). Оновіть сторінку.",
     "order.correct.result": "Накладну скасовано. Виправте дані замовлення, потім створіть нову накладну.",
+    "order.reissue.result.validationIssues": "Проблеми з даними: {issues}.",
+    "order.reissue.result.correctInstead":
+      "Поки накладна активна, дані замовлення не редагуються: скористайтеся «Скасувати й виправити дані», виправте дані, потім створіть нову накладну.",
+    "order.reissue.result.createError":
+      "Під час створення нової накладної сталася помилка (код {code}). Оновіть сторінку й перевірте картку «Накладна»: якщо нової накладної немає — створіть її ще раз (дубліката не буде).",
+    "order.issues.closeChecked": "Перевірено в кабінеті перевізника — закрити",
+    "order.issues.next.CARRIER_CANCEL_UNKNOWN":
+      "Що робити: перевірте накладну в кабінеті перевізника. Скасовано — повторіть скасування в застосунку; не скасовано — накладна чинна. Потім закрийте проблему.",
+    "order.issues.next.CARRIER_CANCEL_CONFLICT":
+      "Що робити: зв’яжіться з перевізником щодо посилки (накладну в нього скасовано). Після вирішення закрийте проблему.",
 
     // --- Підказка: дані змінено в Shopify після створення накладної ---
     "order.shopifyChanged.title": "Дані змінено в Shopify після створення накладної",
@@ -101,7 +111,9 @@ const messages: MessageModule = {
     // --- Помилки сервісів ---
     "waybill.reissueNotAllowed": "Переоформлення недоступне для замовлення зі статусом «{status}».",
     "waybill.cancelFailed":
-      "Не вдалося отримати відповідь перевізника на скасування — накладна залишається активною. Перевірте її в кабінеті перевізника й повторіть пізніше.",
+      "Не вдалося отримати відповідь перевізника на скасування — у застосунку накладна залишається активною, але перевізник міг її скасувати. Перевірте в кабінеті перевізника, чи скасовано накладну (див. розділ «Проблеми»), і за потреби повторіть.",
+    "waybill.cancelledButHandedOver":
+      "Перевізник СКАСУВАВ накладну {number}, але посилку тим часом позначено переданою перевізнику. Накладна в застосунку лишається активною, проте в перевізника вона вже не діє — терміново зв’яжіться з перевізником (див. розділ «Проблеми»).",
   },
   en: {
     "order.reissue.section": "Change the waybill",
@@ -142,6 +154,16 @@ const messages: MessageModule = {
     "order.reissue.result.concurrent":
       "Another request is already re-issuing this waybill — nothing was created again (duplicate protection). Refresh the page.",
     "order.correct.result": "Waybill cancelled. Correct the order data, then create a new waybill.",
+    "order.reissue.result.validationIssues": "Data problems: {issues}.",
+    "order.reissue.result.correctInstead":
+      "While the waybill is active, the order data cannot be edited: use “Cancel and correct data”, fix the data, then create a new waybill.",
+    "order.reissue.result.createError":
+      "Creating the new waybill failed with an error (code {code}). Reload the page and check the “Waybill” card: if there is no new waybill, create it again (no duplicate will be created).",
+    "order.issues.closeChecked": "Checked in the carrier portal — close",
+    "order.issues.next.CARRIER_CANCEL_UNKNOWN":
+      "Next step: check the waybill in the carrier portal. Cancelled — retry the cancellation in the app; not cancelled — the waybill is still valid. Then close the problem.",
+    "order.issues.next.CARRIER_CANCEL_CONFLICT":
+      "Next step: contact the carrier about the parcel (the waybill is cancelled there). Close the problem once resolved.",
 
     "order.shopifyChanged.title": "Data changed in Shopify after the waybill was created",
     "order.shopifyChanged.body":
@@ -188,7 +210,9 @@ const messages: MessageModule = {
 
     "waybill.reissueNotAllowed": "Re-issuing is not available for an order in “{status}”.",
     "waybill.cancelFailed":
-      "No response from the carrier to the cancellation — the waybill remains active. Check it in the carrier's portal and retry later.",
+      "No response from the carrier to the cancellation — the waybill remains active in the app, but the carrier may have cancelled it. Check in the carrier's portal whether it was cancelled (see “Problems”) and retry if needed.",
+    "waybill.cancelledButHandedOver":
+      "The carrier CANCELLED waybill {number}, but meanwhile the parcel was marked as handed to the carrier. The waybill stays active in the app, but it is no longer valid at the carrier — contact the carrier urgently (see “Problems”).",
   },
 };
 

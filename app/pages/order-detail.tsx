@@ -42,6 +42,7 @@ import {
   updateVariantCustomsData,
   validateOrderById,
 } from "~/modules/orders/workflow.server";
+import { MANUALLY_CLOSABLE_ISSUE_CODES } from "~/modules/problems/categories";
 import { OVERRIDE_FIELDS, type OverrideField } from "~/modules/products/customs-overrides";
 import { loadVariantCustomsParts } from "~/modules/products/repository.server";
 import { REQUIRED_SHIPPER_FIELDS } from "~/modules/settings/schema";
@@ -97,7 +98,7 @@ import {
  */
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const MAX_CANDIDATE_LENGTH = 64;
+const MAX_CANDIDATE_LENGTH = 200;
 const MAX_WAYBILL_INPUT = 60;
 
 /** Поля форми «Виправити дані»: ім'я input → максимальна довжина (як у orderDataPatchSchema). */
@@ -481,11 +482,25 @@ function reissueResult(r: ReissueResult, t: TFunction): ActionResult {
   if (r.kind === "concurrent") return { ok: true, message: "order.reissue.result.concurrent", tone: "info" };
   if (r.kind === "not_started") {
     const inner = waybillResult({ kind: "blocked", reason: r.reason, params: r.params }, t);
+    const params: Record<string, string | number> = { ...(inner.ok ? (inner.params ?? {}) : {}) };
+    const validation = r.reason === "validation";
+    if (validation) {
+      // Коди проблем пробної перевірки → назви (дані замовлення з накладною не редагуються — шлях через «Скасувати й виправити»).
+      params.issues = String(r.params?.issues ?? "")
+        .split(",")
+        .filter(Boolean)
+        .map((code) => (hasKey(`issue.${code}.title`) ? t(`issue.${code}.title`) : code))
+        .join(", ");
+    }
     return {
       ok: true,
       message: "order.reissue.result.notStarted",
-      params: inner.ok ? inner.params : undefined,
-      extra: inner.ok ? [inner.message] : [],
+      params,
+      extra: [
+        ...(inner.ok ? [inner.message] : []),
+        ...(validation && params.issues ? ["order.reissue.result.validationIssues"] : []),
+        ...(validation ? ["order.reissue.result.correctInstead"] : []),
+      ],
       tone: "warning",
     };
   }
@@ -497,6 +512,16 @@ function reissueResult(r: ReissueResult, t: TFunction): ActionResult {
       params: { old, number: r.created.waybillNumber ?? "" },
       extra: ["order.result.notShipped"],
       tone: "success",
+    };
+  }
+  if (r.next.kind === "error") {
+    // Створення нової накладної завершилося помилкою, але стару вже СКАСОВАНО — кажемо це прямо.
+    return {
+      ok: true,
+      message: "order.reissue.result.cancelledOnly",
+      params: { old, code: r.next.code },
+      extra: ["order.reissue.result.createError"],
+      tone: "critical",
     };
   }
   const inner = waybillResult(r.next, t);
@@ -1101,11 +1126,15 @@ function IssueItem({ issue, data }: { issue: Issue; data: Data }) {
         </Form>
       ) : null}
 
-      {(issue.severity === "warning" || issue.code === "CARRIER_REJECTED") && canEdit ? (
+      {(issue.severity === "warning" || MANUALLY_CLOSABLE_ISSUE_CODES.includes(issue.code)) && canEdit ? (
         <Form method="post">
           <Hidden intent="dismissIssue" fields={{ issueId: issue.id }} />
           <Button type="submit" variant="plain" size="sm" loading={busy("dismissIssue", ["issueId", issue.id])}>
-            {issue.code === "CARRIER_REJECTED" ? t("order.issues.retryAsIs") : t("order.issues.dismiss")}
+            {issue.code === "CARRIER_REJECTED"
+              ? t("order.issues.retryAsIs")
+              : issue.severity === "warning"
+                ? t("order.issues.dismiss")
+                : t("order.issues.closeChecked")}
           </Button>
         </Form>
       ) : null}

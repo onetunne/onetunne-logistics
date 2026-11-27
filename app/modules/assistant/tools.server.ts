@@ -122,6 +122,33 @@ const orderNumberSchema = z
 
 const orderRef = z.object({ orderNumber: orderNumberSchema }).strict();
 
+/**
+ * Номер накладної, яку бачила людина в попередньому перегляді: підтвердження прив'язане до КОНКРЕТНОЇ накладної.
+ * Якщо активна накладна змінилася (переоформлено/скасовано паралельно) — виконання відмовляє (stale_confirmation).
+ */
+const waybillNumberSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(40)
+  .regex(/^[A-Za-z0-9-]+$/, "invalid waybill number")
+  .transform((v) => v.toUpperCase())
+  .describe("Number of the order's active waybill as shown by get_order / the preview (activeWaybill.waybillNumber).");
+
+const waybillRef = z.object({ orderNumber: orderNumberSchema, waybillNumber: waybillNumberSchema }).strict();
+
+/** Активна накладна вже не та, яку підтверджувала людина → відмова stale_confirmation (нічого не змінено). */
+class StaleConfirmationError extends Error {
+  constructor() {
+    super("stale_confirmation");
+    this.name = "StaleConfirmationError";
+  }
+}
+
+function sameWaybill(active: { waybillNumber: string | null } | null, expected: string): boolean {
+  return Boolean(active?.waybillNumber) && active!.waybillNumber!.toUpperCase() === expected;
+}
+
 /** Поля контактів/адреси (ті самі обмеження й нормалізація, що й у ручній формі — orderDataPatchSchema). */
 const contactPatchShape = orderDataPatchSchema.omit({ expectedVersion: true }).shape;
 
@@ -505,24 +532,28 @@ const cancelWaybillTool = defineTool({
   name: "cancel_waybill",
   description:
     "Cancel the active (created, not yet handed over) waybill of an order. If the carrier refuses, the waybill stays " +
-    "active. Always requires a human confirmation.",
-  input: orderRef,
+    "active. Requires the active waybill number (bound to the confirmation: refused if the active waybill changed). " +
+    "Always requires a human confirmation.",
+  input: waybillRef,
   requiredPermission: "waybills.manage",
   risk: "critical",
   requiresConfirmation: true,
   orderNumberOf: (i) => i.orderNumber,
-  async preview(ctx, _input, order) {
+  async preview(ctx, input, order) {
     const o = requireOrder(order);
     const active = await findActiveShipment(ctx.db, o.id);
     return {
       orderNumber: o.orderNumber,
       status: o.status,
+      waybillNumber: input.waybillNumber,
+      waybillMatches: sameWaybill(active, input.waybillNumber),
       activeWaybill: active ? { status: active.status, waybillNumber: active.waybillNumber, carrierCode: active.carrierCode } : null,
     };
   },
-  async handler(ctx, _input, order) {
+  async handler(ctx, input, order) {
     const o = requireOrder(order);
     const active = await findActiveShipment(ctx.db, o.id);
+    if (active && !sameWaybill(active, input.waybillNumber)) throw new StaleConfirmationError();
     if (!active || active.status !== "created") throw new DomainError("waybill.notCancellable", 409);
     await cancelWaybill(ctx, active.id);
     return { cancelled: true, waybillNumber: active.waybillNumber };
@@ -534,27 +565,31 @@ const reissueWaybillTool = defineTool({
   description:
     "Re-issue the active waybill of an order that is not yet handed over: cancels it at the carrier and creates a new " +
     "one after a fresh data check. If the new waybill is blocked, the result says that the old one WAS cancelled and " +
-    "why the new one was not created. Always requires a human confirmation.",
-  input: orderRef,
+    "why the new one was not created. Requires the active waybill number (bound to the confirmation: refused if the " +
+    "active waybill changed). Always requires a human confirmation.",
+  input: waybillRef,
   requiredPermission: "waybills.manage",
   risk: "critical",
   requiresConfirmation: true,
   orderNumberOf: (i) => i.orderNumber,
-  async preview(ctx, _input, order) {
+  async preview(ctx, input, order) {
     const o = requireOrder(order);
     const active = await findActiveShipment(ctx.db, o.id);
     return {
       orderNumber: o.orderNumber,
       status: o.status,
+      waybillNumber: input.waybillNumber,
+      waybillMatches: sameWaybill(active, input.waybillNumber),
       reissuable: active ? isReissuable(active, o.status) : false,
       activeWaybill: active ? { status: active.status, waybillNumber: active.waybillNumber, carrierCode: active.carrierCode } : null,
     };
   },
-  async handler(ctx, _input, order) {
+  async handler(ctx, input, order) {
     const o = requireOrder(order);
     // Дозвіл на створення перевіряємо до скасування (як і сервіс): працівник без нього не лишить замовлення без накладної.
     requirePermission(ctx.actor, "waybills.create");
     const active = await findActiveShipment(ctx.db, o.id);
+    if (active && !sameWaybill(active, input.waybillNumber)) throw new StaleConfirmationError();
     if (!active || !isReissuable(active, o.status)) throw new DomainError("waybill.reissueNotAllowed", 409, { status: o.status });
     const r = await reissueWaybill(ctx, active.id);
     switch (r.kind) {
@@ -566,6 +601,7 @@ const reissueWaybillTool = defineTool({
           cancelledWaybill: r.cancelled.waybillNumber,
           next: r.next.kind,
           ...(r.next.kind === "blocked" ? { reason: r.next.reason } : {}),
+          ...(r.next.kind === "error" ? { code: r.next.code } : {}),
         };
       case "not_started":
         return { result: r.kind, reason: r.reason, params: r.params ?? {} };
@@ -766,6 +802,7 @@ export async function runAssistantTool(
     return { status: "ok", tool: tool.name, risk: tool.risk, data };
   } catch (e) {
     if (e instanceof ForbiddenError) return refuse("forbidden", order?.id ?? null, { permission: e.permission });
+    if (e instanceof StaleConfirmationError) return refuse("stale_confirmation", order?.id ?? null);
     if (e instanceof z.ZodError) {
       return refuse("invalid_input", order?.id ?? null, {
         issues: e.issues.slice(0, 20).map((i) => ({ path: i.path.join(".") || "_", message: i.message.slice(0, 200) })),

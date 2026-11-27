@@ -48,6 +48,10 @@ export const ISSUE_CODES = [
   "CARRIER_REJECTED",
   "CARRIER_RESULT_UNKNOWN",
   "CARRIER_UNAVAILABLE",
+  /** Скасування накладної: відповіді перевізника немає (тайм-аут/збій) — чи скасовано, невідомо. */
+  "CARRIER_CANCEL_UNKNOWN",
+  /** Перевізник СКАСУВАВ накладну, але передачу посилки зафіксовано під час скасування. */
+  "CARRIER_CANCEL_CONFLICT",
   // Синхронізація з Shopify (створюються сервісом синхронізації)
   "SHOPIFY_ORDER_CHANGED",
   "SHOPIFY_SYNC_FAILED",
