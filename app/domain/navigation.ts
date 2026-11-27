@@ -1,6 +1,6 @@
 import type { Permission } from "./permissions";
 
-/** 17 розділів інтерфейсу. implemented=false → сторінка «Заплановано» без складної логіки. */
+/** 18 розділів інтерфейсу. implemented=false → сторінка «Заплановано» без складної логіки. */
 export interface SectionDef {
   key: string;
   /** Шлях відносно basePath ("" — головна). */
@@ -15,6 +15,7 @@ export interface SectionDef {
 export const SECTIONS: readonly SectionDef[] = [
   { key: "dashboard", path: "", implemented: true, stage: 1 },
   { key: "orders", path: "orders", implemented: true, stage: 2, permission: "orders.view" },
+  { key: "products", path: "products", implemented: true, stage: 3, permission: "orders.view" },
   { key: "waybills", path: "waybills", implemented: true, stage: 3, permission: "orders.view" },
   { key: "shipping", path: "shipping", implemented: false, stage: 3 },
   { key: "picking", path: "picking", implemented: false, stage: 5 },

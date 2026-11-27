@@ -11,9 +11,12 @@ embedded = true
 #   write_orders    — читання замовлень і оновлення адреси/email/телефону (orderUpdate); включає read_orders
 #   read_products   — товари, варіанти, фото, метаполе митного опису
 #   read_inventory  — залишки, вага, HS-код, країна походження (InventoryItem)
+# Етап 3:
+#   write_merchant_managed_fulfillment_orders — виконання замовлення з трек-номером після передачі перевізнику
+#                                               (fulfillmentCreate; включає read_)
+#   write_shipping  — розрахунок доставки в Checkout (carrierServiceCreate/Update/Delete; включає read_shipping)
 # Необов'язково: read_all_orders — імпорт замовлень старших за 60 днів.
-# Етап 3+: дозволи fulfillment (трек-номер після передачі перевізнику), shipping (CarrierService).
-scopes = "write_orders,read_products,read_inventory"
+scopes = "write_orders,read_products,read_inventory,write_merchant_managed_fulfillment_orders,write_shipping"
 
 [auth]
 redirect_urls = ["https://example.com/auth/callback"]

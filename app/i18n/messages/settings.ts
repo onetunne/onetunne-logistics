@@ -54,7 +54,8 @@ const messages: MessageModule = {
     "settings.shipper.field.carrierBranch": "Відділення/пункт прийому перевізника",
     "settings.shipper.help.phone": "У міжнародному форматі, напр. +380 67 123 4567.",
     "settings.shipper.help.countryCode": "Дві латинські літери, напр. UA.",
-    "settings.shipper.help.carrierBranch": "Де посилки передаються перевізнику (якщо застосовно).",
+    "settings.shipper.help.carrierBranch":
+      "Номер відділення Нової пошти, де ви передаєте посилки, напр. 32521/1. Передається перевізнику як відділення відправника.",
     "settings.shipper.missing.title": "Дані відправника неповні",
     "settings.shipper.missing.body": "Накладні не створюватимуться, доки не заповнено: {fields}.",
     "settings.shipper.complete": "Усі поля, потрібні для створення накладних, заповнено.",
@@ -196,7 +197,8 @@ const messages: MessageModule = {
     "settings.shipper.field.carrierBranch": "Carrier branch / drop-off point",
     "settings.shipper.help.phone": "In international format, e.g. +380 67 123 4567.",
     "settings.shipper.help.countryCode": "Two Latin letters, e.g. UA.",
-    "settings.shipper.help.carrierBranch": "Where parcels are handed to the carrier (if applicable).",
+    "settings.shipper.help.carrierBranch":
+      "The Nova Post branch number where you hand over parcels, e.g. 32521/1. Sent to the carrier as the sender branch.",
     "settings.shipper.missing.title": "Sender details are incomplete",
     "settings.shipper.missing.body": "Waybills will not be created until these are filled in: {fields}.",
     "settings.shipper.complete": "All fields required for creating waybills are filled in.",

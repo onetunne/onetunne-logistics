@@ -30,6 +30,8 @@ export interface CarrierCapabilities {
    * НЕ існує (можна безпечно повторити створення). false — потрібен ручний розгляд.
    */
   referenceLookupAuthoritative: boolean;
+  /** Види документів, які можна отримати через getDocument (якщо documents = true). */
+  documentKinds?: readonly CarrierDocumentKind[];
 }
 
 export interface CarrierAddress {
@@ -39,6 +41,12 @@ export interface CarrierAddress {
   province: string | null;
   address1: string;
   address2: string | null;
+  /**
+   * Вулиця й номер будинку окремо — лише якщо однозначно виділяються з address1
+   * (modules/customs/address-parts.ts). null — не виділено (адаптер вирішує: відмова з поясненням або address1).
+   */
+  street?: string | null;
+  building?: string | null;
 }
 
 export interface CarrierParty {
@@ -49,6 +57,16 @@ export interface CarrierParty {
   address: CarrierAddress;
   /** Відділення/склад перевізника (для відправника), якщо застосовно. */
   branchCode?: string | null;
+  /** Податковий номер компанії (ЄДРПОУ/ІПН) — для митних документів, якщо відомий. */
+  taxId?: string | null;
+  /** EORI (ЄС), IOSS (ЄС, посилки до 150 EUR) — якщо відомі. */
+  eori?: string | null;
+  ioss?: string | null;
+  /**
+   * Адреса реєстрації (не доставки), якщо відома. Nova Post вимагає її для одержувачів у DE/SK/HU/FR
+   * (recipient.registrationAddressRecipient). null/відсутня — адаптер не підставляє адресу доставки сам.
+   */
+  registrationAddress?: CarrierAddress | null;
 }
 
 export interface Money {
@@ -69,12 +87,42 @@ export interface ParcelSpec {
 
 export interface CustomsItem {
   sku: string | null;
+  /** Опис товару англійською (митний опис). */
   description: string;
+  /** Опис товару мовою країни відправлення (укр.), якщо є. */
+  descriptionLocal?: string | null;
   hsCode: string;
   countryOfOrigin: string;
   quantity: number;
   unitValue: Money;
+  /** Вага ОДНІЄЇ одиниці, г. */
   weightGrams: number;
+  /** Основний матеріал англійською / мовою відправника, якщо відомий. */
+  material?: string | null;
+  materialLocal?: string | null;
+  /** Виробник і модель (для техніки), якщо відомі. */
+  producerAndModel?: string | null;
+}
+
+/** Умови поставки: DAP — мита сплачує одержувач, DDP — відправник. */
+export const INCOTERMS = ["DAP", "DDP"] as const;
+export type Incoterm = (typeof INCOTERMS)[number];
+
+/** Мета експорту (адаптер зіставляє з кодами перевізника). */
+export const EXPORT_REASONS = ["sale", "personal", "repair", "return", "other"] as const;
+export type ExportReason = (typeof EXPORT_REASONS)[number];
+
+/** Дані комерційного інвойсу для митного оформлення. */
+export interface CustomsDeclaration {
+  /** Номер інвойсу (наш), напр. номер замовлення. */
+  invoiceNumber: string;
+  /** Дата інвойсу, YYYY-MM-DD. */
+  invoiceDate: string;
+  invoiceType: "commercial" | "proforma";
+  incoterm: Incoterm;
+  exportReason: ExportReason;
+  /** Загальна вартість товарів (валюта інвойсу). */
+  totalValue: Money;
 }
 
 export interface CreateShipmentRequest {
@@ -87,6 +135,8 @@ export interface CreateShipmentRequest {
   customsItems: CustomsItem[];
   declaredValue: Money;
   serviceCode?: string | null;
+  /** Митні дані інвойсу (міжнародні відправлення). */
+  customs?: CustomsDeclaration | null;
 }
 
 export interface CreatedShipment {
@@ -156,19 +206,40 @@ export interface CarrierAdapter {
   findShipmentByReference(reference: string, opts?: CarrierCallOptions): Promise<LookupResult>;
   cancelShipment(waybillNumber: string, opts?: CarrierCallOptions): Promise<{ cancelled: boolean }>;
 
-  // --- Заплановані можливості (етап 3+). Викликати лише якщо capabilities.* = true. ---
+  // --- Додаткові можливості. Викликати лише якщо відповідне capabilities.* = true. ---
   quoteRates?(req: RateRequest, opts?: CarrierCallOptions): Promise<RateQuote[]>;
   checkAvailability?(countryCode: string, opts?: CarrierCallOptions): Promise<{ available: boolean }>;
-  getTracking?(waybillNumber: string, opts?: CarrierCallOptions): Promise<TrackingEvent[]>;
-  getDocuments?(waybillNumber: string, opts?: CarrierCallOptions): Promise<CarrierDocument[]>;
+  /** Пакетне відстеження: результат для кожного знайденого номера (невідомі номери пропускаються). */
+  getTracking?(waybillNumbers: string[], opts?: CarrierCallOptions): Promise<TrackingSnapshot[]>;
+  /** Документ перевізника (PDF тощо) для створеного відправлення. Види — capabilities.documentKinds. */
+  getDocument?(shipment: ShipmentRef, kind: CarrierDocumentKind, opts?: CarrierCallOptions): Promise<CarrierDocument>;
+  /** Дані для передачі трек-номера в Shopify (назва перевізника зі списку Shopify і публічне посилання). */
+  trackingInfo?(trackingNumber: string): ShopifyTrackingInfo;
 }
 
-// --- Типи для запланованих можливостей ---
+// --- Типи для додаткових можливостей ---
+
+export interface ShipmentRef {
+  carrierShipmentId: string | null;
+  waybillNumber: string;
+}
+
+export interface RateItem {
+  hsCode: string | null;
+  quantity: number;
+  unitValue: Money;
+  weightGrams: number;
+}
 
 export interface RateRequest {
+  /** Адреса відправника (з налаштувань). */
+  origin: CarrierAddress;
   destination: CarrierAddress;
   parcels: ParcelSpec[];
   declaredValue: Money;
+  /** Товари (для оцінки мит і податків, якщо перевізник це підтримує). */
+  items?: RateItem[];
+  incoterm?: Incoterm;
 }
 
 export interface RateQuote {
@@ -177,9 +248,21 @@ export interface RateQuote {
   price: Money;
   minDeliveryDays: number | null;
   maxDeliveryDays: number | null;
+  /** Орієнтовна дата доставки від перевізника (YYYY-MM-DD), якщо є. */
+  estimatedDeliveryDate?: string | null;
+  /** Оцінка мит/податків, якщо перевізник повертає. */
+  dutiesEstimate?: Money | null;
+}
+
+export interface ShopifyTrackingInfo {
+  /** Назва перевізника для Shopify (бажано зі списку підтримуваних Shopify). */
+  company: string;
+  number: string;
+  url: string | null;
 }
 
 export type TrackingStatus =
+  | "created"
   | "accepted"
   | "in_transit"
   | "customs"
@@ -188,20 +271,39 @@ export type TrackingStatus =
   | "failed_attempt"
   | "returned"
   | "lost"
+  | "exception"
+  | "cancelled"
   | "unknown";
 
 export interface TrackingEvent {
   status: TrackingStatus;
+  /** Код статусу перевізника (стабільний, на ньому будується логіка адаптера). */
+  code: string | null;
   occurredAt: Date;
   location: string | null;
   description: string | null;
 }
 
+export interface TrackingSnapshot {
+  waybillNumber: string;
+  status: TrackingStatus;
+  carrierStatusCode: string | null;
+  carrierStatusText: string | null;
+  /** Час останньої зміни статусу у перевізника. */
+  statusAt: Date | null;
+  /** Події в хронологічному порядку (найстаріша перша). */
+  events: TrackingEvent[];
+}
+
+export const CARRIER_DOCUMENT_KINDS = ["label", "invoice", "customs_declaration"] as const;
+export type CarrierDocumentKind = (typeof CARRIER_DOCUMENT_KINDS)[number];
+
 export interface CarrierDocument {
-  kind: "label" | "invoice" | "customs_declaration";
+  kind: CarrierDocumentKind;
   format: "pdf" | "zpl" | "png";
-  url: string | null;
-  content: Uint8Array | null;
+  contentType: string;
+  content: Uint8Array;
+  fileName: string;
 }
 
 export interface CarrierRegistry {

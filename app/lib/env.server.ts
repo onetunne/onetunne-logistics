@@ -23,6 +23,15 @@ const EnvSchema = z.object({
   SCOPES: z.string().optional(),
   SHOP_CUSTOM_DOMAIN: z.string().optional(),
   OWNER_SHOPIFY_USER_IDS: z.string().optional(),
+  /** Ключ Nova Post API v1.0 (бізнес-кабінет new.novaposhta.ua → Налаштування → Безпека). */
+  NOVA_POSHTA_API_KEY: z.string().optional(),
+  /** Базова адреса Nova Post API; для відправника з України — https://api.novaposhta.ua/v.1.0. */
+  NOVA_POSHTA_API_BASE: z.string().url().optional(),
+  /**
+   * Дозвіл власника на створення РЕАЛЬНИХ накладних Nova Post. За замовчуванням вимкнено:
+   * без "true" адаптер не надсилає POST /shipments (розрахунок, відстеження, друк і скасування працюють).
+   */
+  NOVA_POST_SHIPMENTS_ENABLED: bool,
 });
 
 export type AppEnv = z.infer<typeof EnvSchema> & {

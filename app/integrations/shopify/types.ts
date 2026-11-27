@@ -19,6 +19,11 @@ export interface ShopifyGateway {
     shopifyOrderId: string | null,
     contact: { email: string | null; phone: string | null },
   ): Promise<ShopifySyncResult>;
+  /**
+   * Передати трек-номер у Shopify (створити виконання замовлення) після ФАКТИЧНОЇ передачі посилки перевізнику.
+   * Робочий шлюз ставить завдання в чергу; демо нічого не надсилає.
+   */
+  requestFulfillment(input: { shopifyOrderId: string | null; shipmentId: string }): Promise<ShopifySyncResult>;
 }
 
 /** Демо-шлюз: фіксує, що синхронізацію пропущено (демо), реальних запитів немає. */
@@ -28,6 +33,9 @@ export class DemoShopifyGateway implements ShopifyGateway {
     return { status: "skipped", reason: "demo_mode" };
   }
   async updateOrderContact(): Promise<ShopifySyncResult> {
+    return { status: "skipped", reason: "demo_mode" };
+  }
+  async requestFulfillment(): Promise<ShopifySyncResult> {
     return { status: "skipped", reason: "demo_mode" };
   }
 }
@@ -43,5 +51,8 @@ export class PendingShopifyGateway implements ShopifyGateway {
   }
   async updateOrderContact(shopifyOrderId: string | null): Promise<ShopifySyncResult> {
     return shopifyOrderId ? { status: "skipped", reason: "not_implemented" } : { status: "skipped", reason: "not_linked" };
+  }
+  async requestFulfillment(input: { shopifyOrderId: string | null }): Promise<ShopifySyncResult> {
+    return input.shopifyOrderId ? { status: "skipped", reason: "not_implemented" } : { status: "skipped", reason: "not_linked" };
   }
 }

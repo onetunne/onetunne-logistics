@@ -52,6 +52,10 @@ export const JOB = {
   productsPage: "shopify.products_page",
   importOrdersPage: "shopify.import_orders_page",
   pushOrder: "shopify.push_order",
+  /** Етап 3: виконання замовлення з трек-номером після передачі перевізнику. */
+  fulfillShipment: "shopify.fulfill_shipment",
+  /** Етап 3: періодичне опитування відстеження перевізників. */
+  trackingPoll: "tracking.poll",
 } as const;
 
 /** Сторінка списку: невелика, щоб запитувана вартість GraphQL не перевищувала ліміт. */

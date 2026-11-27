@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from "react";
+import { desc, eq } from "drizzle-orm";
 import {
   Form,
   useActionData,
@@ -9,13 +10,19 @@ import {
   type Params,
 } from "react-router";
 import { ActionBanner, type ActionResult } from "~/components/action-banner";
+import { CarrierDocumentButtons } from "~/components/carrier-documents";
 import { useCan, useHref } from "~/components/shell";
+import { OverriddenBadge, VariantCustomsForm } from "~/components/variant-customs-form";
 import { OrderStatusBadge, SeverityBadge, ShipmentStatusBadge, TestBadge } from "~/components/status-badge";
-import { isShipped } from "~/domain/order-status";
+import { TrackingStatusBadge, isTrackingStatus, trackingTimelineTone } from "~/components/tracking-badge";
+import { shipmentTrackingEvents } from "~/db/schema";
+import { isShipped, type OrderStatus } from "~/domain/order-status";
 import { requirePermission } from "~/domain/permissions";
 import { hasKey, makeT, useLocale, useT, type TFunction } from "~/i18n";
 import { localizeCode, localizeParams } from "~/i18n/localize";
-import { NotFoundError } from "~/lib/errors";
+// Лише в loader (серверний код): у клієнтський бандл модуль зіставлення Nova Post не потрапляє.
+import { NOVA_POST_CODE } from "~/integrations/carriers/nova-post/mapping";
+import { DomainError, NotFoundError } from "~/lib/errors";
 import { countryName, formatDateTime, formatMoney, formatWeight } from "~/lib/format";
 import { isDecimalString, multiplyMoney } from "~/lib/money";
 import {
@@ -33,8 +40,11 @@ import {
   updateVariantCustomsData,
   validateOrderById,
 } from "~/modules/orders/workflow.server";
+import { OVERRIDE_FIELDS, type OverrideField } from "~/modules/products/customs-overrides";
+import { loadVariantCustomsParts } from "~/modules/products/repository.server";
 import { REQUIRED_SHIPPER_FIELDS } from "~/modules/settings/schema";
 import { getSettings } from "~/modules/settings/settings.server";
+import { availableDocumentKinds } from "~/modules/shipments/documents.server";
 import {
   ACTIVE_SHIPMENT_STATUSES,
   STALE_CREATING_MS,
@@ -47,6 +57,7 @@ import {
   reconcileShipment,
   type CreateWaybillResult,
 } from "~/modules/shipments/waybill.server";
+import { markHandedOver, refreshShipmentTracking } from "~/modules/tracking/tracking.server";
 import { SHIPPING_FIELDS, type ShippingField } from "~/modules/validation/types";
 import { getRequestContext } from "~/server/context.server";
 import { formString, toActionError } from "~/server/http.server";
@@ -77,6 +88,7 @@ import {
 /**
  * Сторінка замовлення — основний сценарій етапу 1:
  * перевірка даних → проблеми → виправлення (з історією) → (тестова) накладна.
+ * Етап 3: відстеження, фактична передача перевізнику, документи перевізника (PDF), інвойс для друку.
  * Уся бізнес-логіка — у сервісах (orders/workflow, shipments/waybill); тут лише виклики та відображення.
  */
 
@@ -98,7 +110,29 @@ const SHIPPING_MAX_LENGTH: Record<ShippingField, number> = {
   phone: 40,
 };
 
-const CUSTOMS_FIELDS = ["weightGrams", "hsCode", "countryOfOrigin", "customsDescription"] as const;
+/** Подій відстеження в картці (найновіші). */
+const TRACKING_EVENTS_LIMIT = 50;
+/** Статуси замовлення, з яких можна вручну підтвердити фактичну передачу перевізнику. */
+const HANDOVER_ORDER_STATUSES: readonly OrderStatus[] = ["waybill_created", "awaiting_picking", "packed"];
+
+/** Перевізник повідомив, що накладну видалено (відстеження «cancelled»), а посилку ще не передано. */
+function deletedAtCarrier(s: { status: string; handedOverAt: Date | null; trackingStatus: string | null }): boolean {
+  return s.status === "created" && !s.handedOverAt && s.trackingStatus === "cancelled";
+}
+
+/** Стан передачі трек-номера в Shopify для відправлення. */
+type ShopifyTrackingState = "sent" | "pending" | "after_handover" | "disabled" | "not_applicable";
+
+function shopifyTrackingState(
+  s: { handedOverAt: Date | null; shopifyFulfilledAt: Date | null },
+  source: string,
+  pushEnabled: boolean,
+): ShopifyTrackingState {
+  if (source !== "shopify") return "not_applicable";
+  if (s.shopifyFulfilledAt) return "sent";
+  if (!pushEnabled) return "disabled";
+  return s.handedOverAt ? "pending" : "after_handover";
+}
 
 function orderIdFrom(params: Params): string {
   const id = params.orderId ?? "";
@@ -136,10 +170,33 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     if (e instanceof NotFoundError) throw new Response("Not Found", { status: 404 });
     throw e;
   });
-  const [history, ruleRows, settings] = await Promise.all([
+  const variantIds = [...new Set(agg.items.flatMap((i) => (i.variant ? [i.variant.id] : [])))];
+  const [history, ruleRows, settings, trackingEvents, variantParts] = await Promise.all([
     loadOrderHistory(ctx.db, orderId),
     loadCountryRuleRows(ctx.db),
     getSettings(ctx.db),
+    // Події відстеження — лише для створених накладних; без персональних даних (статус, код, місце, опис).
+    Promise.all(
+      agg.shipments.map((s) =>
+        s.status === "created"
+          ? ctx.db
+              .select({
+                id: shipmentTrackingEvents.id,
+                status: shipmentTrackingEvents.status,
+                code: shipmentTrackingEvents.code,
+                occurredAt: shipmentTrackingEvents.occurredAt,
+                location: shipmentTrackingEvents.location,
+                description: shipmentTrackingEvents.description,
+              })
+              .from(shipmentTrackingEvents)
+              .where(eq(shipmentTrackingEvents.shipmentId, s.id))
+              .orderBy(desc(shipmentTrackingEvents.occurredAt), desc(shipmentTrackingEvents.createdAt))
+              .limit(TRACKING_EVENTS_LIMIT)
+          : Promise.resolve([]),
+      ),
+    ),
+    // Значення Shopify і збережені в застосунку — для форми митних даних товару.
+    loadVariantCustomsParts(ctx.db, variantIds),
   ]);
   const { order } = agg;
   const now = ctx.now().getTime();
@@ -219,12 +276,22 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
             countryOfOrigin: i.variant.countryOfOrigin?.trim().toUpperCase() || null,
             originName: i.variant.countryOfOrigin ? countryName(i.variant.countryOfOrigin.trim(), ctx.locale) : null,
             customsDescription: i.variant.customsDescription,
+            customsDescriptionLocal: i.variant.customsDescriptionLocal,
+            material: i.variant.material,
+            lengthMm: i.variant.lengthMm,
+            widthMm: i.variant.widthMm,
+            heightMm: i.variant.heightMm,
+            overriddenFields: i.variant.overriddenFields,
+            /** Збережені в застосунку значення (поля форми) і значення з Shopify (підказки). */
+            overrides: variantParts.get(i.variant.id)?.overrides ?? {},
+            shopify: variantParts.get(i.variant.id)?.shopify ?? null,
           }
         : null,
     })),
     openIssues,
-    shipments: agg.shipments.map((s) => {
+    shipments: agg.shipments.map((s, index) => {
       const adapter = ctx.carriers.get(s.carrierCode);
+      const events = trackingEvents[index] ?? [];
       return {
         id: s.id,
         status: s.status,
@@ -252,6 +319,34 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         linkedManually: isManualLink(s) || linkedManually.has(s.id),
         canCancel: Boolean(adapter?.capabilities.cancelShipment),
         canLookup: Boolean(adapter?.capabilities.findByReference),
+        // --- Відстеження (етап 3) ---
+        trackingStatus: s.trackingStatus === null ? null : isTrackingStatus(s.trackingStatus) ? s.trackingStatus : ("unknown" as const),
+        carrierStatusCode: s.carrierStatusCode,
+        carrierStatusText: s.carrierStatusText,
+        carrierStatusAt: s.carrierStatusAt,
+        lastTrackedAt: s.lastTrackedAt,
+        handedOverAt: s.handedOverAt,
+        deliveredAt: s.deliveredAt,
+        trackingSupported: Boolean(adapter?.capabilities.tracking && adapter.getTracking),
+        /** Перевізник повідомив, що накладну видалено: передавати посилку з нею не можна (скасувати й створити нову). */
+        deletedAtCarrier: deletedAtCarrier(s),
+        /** Стан дозволяє вручну підтвердити фактичну передачу (право waybills.manage перевіряє сервер і UI). */
+        handoverAvailable:
+          s.status === "created" && !s.handedOverAt && !deletedAtCarrier(s) && HANDOVER_ORDER_STATUSES.includes(order.status),
+        trackingEvents: events.map((e) => ({
+          id: e.id,
+          status: isTrackingStatus(e.status) ? e.status : ("unknown" as const),
+          code: e.code || null,
+          occurredAt: e.occurredAt,
+          location: e.location,
+          description: e.description,
+        })),
+        /** Документи перевізника (PDF), які можна отримати для цієї накладної. */
+        documents: availableDocumentKinds(ctx, s),
+        shopify: {
+          state: shopifyTrackingState(s, order.source, settings.tracking.pushToShopify),
+          sentAt: s.shopifyFulfilledAt,
+        },
       };
     }),
     history: {
@@ -265,13 +360,18 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         actor: actorKind(c.actorId, ctx),
         createdAt: c.createdAt,
       })),
-      events: history.events.map(({ event, waybillNumber }) => ({
-        id: event.id,
-        type: event.type,
-        message: event.message,
-        waybillNumber,
-        createdAt: event.createdAt,
-      })),
+      events: history.events.map(({ event, waybillNumber }) => {
+        const data = event.data && typeof event.data === "object" ? (event.data as Record<string, unknown>) : {};
+        return {
+          id: event.id,
+          type: event.type,
+          message: event.message,
+          waybillNumber,
+          /** Для подій tracking_status — новий статус відстеження (без інших даних події). */
+          trackingStatus: event.type === "tracking_status" && isTrackingStatus(data.status) ? data.status : null,
+          createdAt: event.createdAt,
+        };
+      }),
       resolvedIssues: history.resolvedIssues.map((i) => ({
         id: i.id,
         code: i.code,
@@ -283,11 +383,16 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     countries,
     carrier: carrier
       ? {
+          code: carrier.code,
           displayName: carrier.displayName,
           mode: carrier.mode,
           canCreate: carrier.capabilities.createShipment,
+          /** Nova Post: створення реальних накладних вмикає власник змінною середовища (окреме пояснення). */
+          isNovaPost: carrier.code === NOVA_POST_CODE,
         }
       : null,
+    /** Передача трек-номера в Shopify після фактичної передачі (налаштування «Відстеження»). */
+    shopifyPushEnabled: settings.tracking.pushToShopify,
     /** Лише назви незаповнених полів відправника — без значень. */
     missingShipperFields: REQUIRED_SHIPPER_FIELDS.filter((f) => !String(settings.shipper[f] ?? "").trim()),
   };
@@ -354,12 +459,13 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<A
     const intent = formString(form, "intent");
     // Перевірка, що ідентифікатор із форми належить саме цьому замовленню.
     const aggregate = () => loadOrderAggregate(ctx.db, orderId);
-    const ownShipmentId = async () => {
+    const ownShipment = async () => {
       const id = uuidField(form, "shipmentId");
       if (!id) return null;
       const { shipments } = await aggregate();
-      return shipments.some((s) => s.id === id) ? id : null;
+      return shipments.find((s) => s.id === id) ?? null;
     };
+    const ownShipmentId = async () => (await ownShipment())?.id ?? null;
     const ownOpenIssueId = async () => {
       const id = uuidField(form, "issueId");
       if (!id) return null;
@@ -444,14 +550,10 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<A
         const variantId = uuidField(form, "variantId");
         const { items } = await aggregate();
         if (!variantId || !items.some((i) => i.variant?.id === variantId)) return { ok: false, error: "error.notFound" };
-        const weightRaw = formString(form, "weightGrams").trim();
         try {
-          const r = await updateVariantCustomsData(ctx, variantId, {
-            weightGrams: weightRaw === "" ? null : Number(weightRaw),
-            hsCode: formString(form, "hsCode"),
-            countryOfOrigin: formString(form, "countryOfOrigin"),
-            customsDescription: formString(form, "customsDescription"),
-          });
+          // Усі поля форми — рядки; порожнє поле = значення з Shopify.
+          const input = Object.fromEntries(OVERRIDE_FIELDS.map((f) => [f, formString(form, f)])) as Record<OverrideField, string>;
+          const r = await updateVariantCustomsData(ctx, variantId, input);
           return { ok: true, message: "result.product.updated", params: { count: r.revalidated } };
         } catch (e) {
           // Помилки полів прив'язуємо до конкретного варіанта (на сторінці кілька форм товарів).
@@ -493,6 +595,40 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<A
         if (!shipmentId) return { ok: false, error: "error.notFound" };
         await cancelWaybill(ctx, shipmentId);
         return { ok: true, message: "result.waybill.cancelled" };
+      }
+
+      case "refreshTracking": {
+        const shipmentId = await ownShipmentId();
+        if (!shipmentId) return { ok: false, error: "error.notFound" };
+        const summary = await refreshShipmentTracking(ctx, shipmentId);
+        if (summary.updated === 0 && summary.handedOver === 0) {
+          return { ok: true, message: "tracking.result.unchanged", tone: "info" };
+        }
+        return {
+          ok: true,
+          message: "tracking.result.updated",
+          extra: summary.handedOver > 0 ? ["tracking.result.handedOverByCarrier"] : [],
+          tone: "success",
+        };
+      }
+
+      case "markHandedOver": {
+        const shipment = await ownShipment();
+        if (!shipment) return { ok: false, error: "error.notFound" };
+        requirePermission(ctx.actor, "waybills.manage");
+        // Накладну видалено у перевізника — трек-номер «мертвий», передачу (і трек-номер у Shopify) не фіксуємо.
+        // Ту саму перевірку в транзакції має робити markHandedOver (сервіс відстеження).
+        if (deletedAtCarrier(shipment)) throw new DomainError("shipment.deletedAtCarrier", 409);
+        // Допустимий стан перевіряє сервіс. «Буде передано в Shopify» — лише якщо завдання справді поставлено
+        // в чергу: markHandedOver має повертати результат requestShopifyFulfillment ("queued" | "disabled" | "skipped…").
+        // Поки сервіс нічого не повертає, повідомлення не показується (не обіцяємо того, чого не знаємо).
+        const shopifyOutcome: unknown = await markHandedOver(ctx, shipment.id);
+        return {
+          ok: true,
+          message: "tracking.result.handedOver",
+          extra: shopifyOutcome === "queued" ? ["tracking.result.shopifyQueued"] : [],
+          tone: "success",
+        };
       }
 
       default:
@@ -1102,10 +1238,12 @@ function ItemsCard({ data, fieldErrors }: { data: Data; fieldErrors: FieldErrors
   const t = useT();
   const locale = useLocale();
   const can = useCan();
+  const href = useHref();
   const { items, isDemo } = data;
   const units = items.reduce((sum, i) => sum + i.quantity, 0);
   // Дані товару змінюємо лише поки замовлення можна перевіряти (після накладної — спершу скасувати її).
-  const canEditCustoms = isDemo && can("orders.edit") && data.order.editable;
+  // Демо й робоча версія: зміни зберігаються в застосунку і мають пріоритет над Shopify.
+  const canEditCustoms = can("orders.edit") && data.order.editable;
   const seenVariants = new Set<string>();
 
   return (
@@ -1116,15 +1254,29 @@ function ItemsCard({ data, fieldErrors }: { data: Data; fieldErrors: FieldErrors
             const v = item.variant;
             const firstOfVariant = v ? !seenVariants.has(v.id) : false;
             if (v) seenVariants.add(v.id);
+            const mark = (field: OverrideField) => (v?.overriddenFields.includes(field) ? <OverriddenBadge /> : null);
+            const withMark = (field: OverrideField, value: ReactNode) =>
+              v?.overriddenFields.includes(field) ? (
+                <Stack as="span" direction="horizontal" gap={1} align="center">
+                  {value}
+                  {mark(field)}
+                </Stack>
+              ) : (
+                value
+              );
             const kv: KeyValueItem[] = v
               ? [
                   { key: "sku", label: t("order.items.sku"), value: item.sku ? <InlineCode>{item.sku}</InlineCode> : <Missing /> },
                   {
                     key: "weight",
                     label: t("order.items.weight"),
-                    value: v.weightGrams !== null ? formatWeight(v.weightGrams, locale) : <Missing critical />,
+                    value: v.weightGrams !== null ? withMark("weightGrams", formatWeight(v.weightGrams, locale)) : <Missing critical />,
                   },
-                  { key: "hs", label: t("field.variant.hsCode"), value: v.hsCode ? <InlineCode>{v.hsCode}</InlineCode> : <Missing critical /> },
+                  {
+                    key: "hs",
+                    label: t("field.variant.hsCode"),
+                    value: v.hsCode ? withMark("hsCode", <InlineCode>{v.hsCode}</InlineCode>) : <Missing critical />,
+                  },
                   {
                     key: "origin",
                     label: t("field.variant.countryOfOrigin"),
@@ -1132,6 +1284,7 @@ function ItemsCard({ data, fieldErrors }: { data: Data; fieldErrors: FieldErrors
                       <Stack as="span" direction="horizontal" gap={1} align="center">
                         <InlineCode>{v.countryOfOrigin}</InlineCode>
                         {v.originName ? <span>{v.originName}</span> : null}
+                        {mark("countryOfOrigin")}
                       </Stack>
                     ) : (
                       <Missing critical />
@@ -1140,7 +1293,7 @@ function ItemsCard({ data, fieldErrors }: { data: Data; fieldErrors: FieldErrors
                   {
                     key: "description",
                     label: t("field.variant.customsDescription"),
-                    value: v.customsDescription ? v.customsDescription : <Missing critical />,
+                    value: v.customsDescription ? withMark("customsDescription", v.customsDescription) : <Missing critical />,
                   },
                 ]
               : [];
@@ -1167,113 +1320,55 @@ function ItemsCard({ data, fieldErrors }: { data: Data; fieldErrors: FieldErrors
                 </Stack>
                 {v ? <KeyValueList items={kv} /> : <Banner tone="critical">{t("order.items.notLinked")}</Banner>}
                 {v && firstOfVariant && canEditCustoms ? (
-                  <CustomsEditor variant={v} openIssues={data.openIssues} fieldErrors={fieldErrors} />
+                  <CustomsEditor variant={v} isDemo={isDemo} openIssues={data.openIssues} fieldErrors={fieldErrors} />
                 ) : null}
               </Stack>
             );
           })}
         </Stack>
-        {!isDemo ? (
+        <Stack direction="horizontal" gap={2} align="center">
           <Text variant="body-sm" tone="subdued">
-            {t("order.items.editInShopify")}
+            {t("products.order.allProducts")}
           </Text>
-        ) : null}
+          <Button to={href("products")} variant="plain" size="sm">
+            {t("products.order.openProducts")}
+          </Button>
+        </Stack>
       </Stack>
     </Card>
   );
 }
 
+/** Форма митних даних товару (спільний компонент) з помилками дії та відкритими проблемами цього варіанта. */
 function CustomsEditor({
   variant,
+  isDemo,
   openIssues,
   fieldErrors,
 }: {
   variant: NonNullable<Item["variant"]>;
+  isDemo: boolean;
   openIssues: Issue[];
   fieldErrors: FieldErrors;
 }) {
   const t = useT();
-  const busy = useBusy();
   const prefix = `variant.${variant.id}.`;
-  const hasIssue = openIssues.some((i) => i.field?.startsWith(prefix));
-  const hasFieldError = Object.keys(fieldErrors ?? {}).some((k) => k.startsWith(prefix));
-  const errorFor = (field: (typeof CUSTOMS_FIELDS)[number]): string | null => {
-    if (fieldErrors?.[`${prefix}${field}`]) return t("order.address.fieldInvalid");
-    const titles = openIssues.filter((i) => i.field === `${prefix}${field}`).map((i) => t(`issue.${i.code}.title`));
-    return titles.length > 0 ? titles.join("; ") : null;
-  };
-  const id = (field: string) => `variant-${variant.id}-${field}`;
-  // Нова версія даних товару → поля створюються заново зі збереженими значеннями.
-  const formKey = [variant.weightGrams, variant.hsCode, variant.countryOfOrigin, variant.customsDescription].join("|");
-
+  // Назви відкритих проблем за полями варіанта (OVERRIDE_FIELDS не імпортуємо в клієнтський код — там zod і перевірки).
+  const issueErrors: Partial<Record<OverrideField, string>> = {};
+  for (const issue of openIssues) {
+    if (!issue.field?.startsWith(prefix)) continue;
+    const field = issue.field.slice(prefix.length) as OverrideField;
+    const title = t(`issue.${issue.code}.title`);
+    issueErrors[field] = issueErrors[field] ? `${issueErrors[field]}; ${title}` : title;
+  }
   return (
-    <details open={hasIssue || hasFieldError || undefined}>
-      <summary>
-        <Text as="span" variant="body-sm" weight="semibold">
-          {t("order.items.customs.edit")}
-        </Text>
-      </summary>
-      <Form method="post" key={formKey}>
-        <Hidden intent="updateVariant" fields={{ variantId: variant.id }} />
-        <Stack gap={3}>
-          <Text variant="body-sm" tone="subdued">
-            {t("order.items.customs.help")}
-          </Text>
-          <FormLayout columns={2}>
-            <TextField
-              id={id("weightGrams")}
-              name="weightGrams"
-              type="number"
-              min={1}
-              max={30000}
-              step={1}
-              inputMode="numeric"
-              label={t("field.variant.weightGrams")}
-              defaultValue={variant.weightGrams ?? ""}
-              error={errorFor("weightGrams")}
-            />
-            <TextField
-              id={id("hsCode")}
-              name="hsCode"
-              label={t("field.variant.hsCode")}
-              helpText={t("order.items.customs.hsHelp")}
-              defaultValue={variant.hsCode ?? ""}
-              error={errorFor("hsCode")}
-              maxLength={20}
-              spellCheck={false}
-              autoComplete="off"
-            />
-            <TextField
-              id={id("countryOfOrigin")}
-              name="countryOfOrigin"
-              label={t("field.variant.countryOfOrigin")}
-              helpText={t("order.items.customs.originHelp")}
-              defaultValue={variant.countryOfOrigin ?? ""}
-              error={errorFor("countryOfOrigin")}
-              maxLength={2}
-              autoCapitalize="characters"
-              spellCheck={false}
-              autoComplete="off"
-            />
-            <TextField
-              id={id("customsDescription")}
-              name="customsDescription"
-              label={t("field.variant.customsDescription")}
-              helpText={t("order.items.customs.descriptionHelp")}
-              defaultValue={variant.customsDescription ?? ""}
-              error={errorFor("customsDescription")}
-              maxLength={200}
-              autoComplete="off"
-            />
-          </FormLayout>
-          <Stack direction="horizontal" gap={2}>
-            <Button type="submit" loading={busy("updateVariant", ["variantId", variant.id])}>
-              {t("order.items.customs.save")}
-            </Button>
-          </Stack>
-        </Stack>
-      </Form>
-    </details>
+    <VariantCustomsForm
+      variant={{ id: variant.id, overrides: variant.overrides, shopify: variant.shopify }}
+      isDemo={isDemo}
+      fieldErrors={fieldErrors}
+      issueErrors={issueErrors}
+      open={openIssues.some((i) => i.field?.startsWith(prefix))}
+    />
   );
 }
 
@@ -1286,7 +1381,9 @@ function WaybillCard({ data }: { data: Data }) {
   const active = data.shipments.find((s) => s.active) ?? null;
   const previous = data.shipments.filter((s) => !s.active);
   let body: ReactNode;
-  if (active?.status === "created") body = <CreatedWaybill shipment={active} order={data.order} />;
+  if (active?.status === "created") {
+    body = <CreatedWaybill shipment={active} order={data.order} shopifyPushEnabled={data.shopifyPushEnabled} />;
+  }
   else if (active && (active.status === "unknown" || active.stale)) body = <UnknownWaybill shipment={active} />;
   else if (active) body = <CreatingWaybill order={data.order} />;
   else body = <NoWaybill data={data} />;
@@ -1301,7 +1398,15 @@ function WaybillCard({ data }: { data: Data }) {
   );
 }
 
-function CreatedWaybill({ shipment: s, order }: { shipment: Shipment; order: OrderData }) {
+function CreatedWaybill({
+  shipment: s,
+  order,
+  shopifyPushEnabled,
+}: {
+  shipment: Shipment;
+  order: OrderData;
+  shopifyPushEnabled: boolean;
+}) {
   const t = useT();
   const locale = useLocale();
   const can = useCan();
@@ -1322,12 +1427,20 @@ function CreatedWaybill({ shipment: s, order }: { shipment: Shipment; order: Ord
     { key: "attempts", label: t("order.waybill.attempts"), value: s.attempts },
   ];
   const canCancel = can("waybills.manage") && !shipped && order.status !== "cancelled";
+  const canHandOver = can("waybills.manage") && s.handoverAvailable;
+  const canRefresh = can("waybills.create") && s.trackingSupported;
+
+  let shopifyNote: string;
+  if (order.source !== "shopify") shopifyNote = t("tracking.handover.notShopify");
+  else if (shopifyPushEnabled) shopifyNote = t("tracking.handover.shopify");
+  else shopifyNote = t("tracking.handover.shopifyDisabled");
 
   return (
     <Stack gap={3}>
       <Stack direction="horizontal" gap={2} align="center">
         <ShipmentStatusBadge status={s.status} />
         {s.mode === "test" ? <TestBadge /> : null}
+        {s.trackingStatus ? <TrackingStatusBadge status={s.trackingStatus} /> : null}
       </Stack>
       <Stack gap={1}>
         <Text variant="caption" tone="subdued">
@@ -1349,31 +1462,205 @@ function CreatedWaybill({ shipment: s, order }: { shipment: Shipment; order: Ord
         </Text>
       ) : null}
       {!shipped ? <Banner tone="info">{t("order.waybill.notShipped")}</Banner> : null}
+      {s.deletedAtCarrier ? (
+        <Banner tone="critical" title={t("tracking.deleted.title")}>
+          {t("tracking.deleted.body")}
+        </Banner>
+      ) : null}
+      {canHandOver || canRefresh ? (
+        <Stack gap={2}>
+          <Stack direction="horizontal" gap={2}>
+            {canHandOver ? (
+              <Form method="post">
+                <Hidden intent="markHandedOver" fields={{ shipmentId: s.id }} />
+                <ConfirmSubmitButton
+                  variant="primary"
+                  loading={busy("markHandedOver")}
+                  title={t("tracking.handover.title")}
+                  confirmLabel={t("tracking.handover.confirm")}
+                  cancelLabel={t("common.cancel")}
+                  message={
+                    <Stack gap={2}>
+                      <Text>{t("tracking.handover.body")}</Text>
+                      <Text weight="semibold">{shopifyNote}</Text>
+                    </Stack>
+                  }
+                >
+                  {t("tracking.handover.button")}
+                </ConfirmSubmitButton>
+              </Form>
+            ) : null}
+            {canRefresh ? (
+              <Form method="post">
+                <Hidden intent="refreshTracking" fields={{ shipmentId: s.id }} />
+                <Button type="submit" loading={busy("refreshTracking")}>
+                  {t("tracking.refresh.button")}
+                </Button>
+              </Form>
+            ) : null}
+          </Stack>
+          {canHandOver ? (
+            <Text variant="body-sm" tone="subdued">
+              {t("tracking.handover.help")}
+            </Text>
+          ) : null}
+        </Stack>
+      ) : null}
+
+      <Divider />
+      <TrackingSection shipment={s} canHandOver={canHandOver} />
+      <Divider />
+      <DocumentsSection shipment={s} orderId={order.id} />
+
       {canCancel && (s.manual || s.canCancel) ? (
-        <Form method="post">
-          <Hidden intent="cancelWaybill" fields={{ shipmentId: s.id }} />
-          <ConfirmSubmitButton
-            variant="critical"
-            loading={busy("cancelWaybill")}
-            title={t("order.waybill.cancel.title", { number: s.waybillNumber ?? "" })}
-            confirmLabel={t("order.waybill.cancel.confirm")}
-            cancelLabel={t("order.dialog.keep")}
-            message={
-              <Stack gap={2}>
-                <Text>{t(s.manual ? "order.waybill.cancel.bodyManual" : "order.waybill.cancel.body")}</Text>
-                <Text weight="semibold">{t("order.waybill.cancel.regenerate")}</Text>
-              </Stack>
-            }
-          >
-            {t("order.waybill.cancel.button")}
-          </ConfirmSubmitButton>
-        </Form>
+        <>
+          <Divider />
+          <Form method="post">
+            <Hidden intent="cancelWaybill" fields={{ shipmentId: s.id }} />
+            <ConfirmSubmitButton
+              variant="critical"
+              loading={busy("cancelWaybill")}
+              title={t("order.waybill.cancel.title", { number: s.waybillNumber ?? "" })}
+              confirmLabel={t("order.waybill.cancel.confirm")}
+              cancelLabel={t("order.dialog.keep")}
+              message={
+                <Stack gap={2}>
+                  <Text>{t(s.manual ? "order.waybill.cancel.bodyManual" : "order.waybill.cancel.body")}</Text>
+                  <Text weight="semibold">{t("order.waybill.cancel.regenerate")}</Text>
+                </Stack>
+              }
+            >
+              {t("order.waybill.cancel.button")}
+            </ConfirmSubmitButton>
+          </Form>
+        </>
       ) : null}
       {canCancel && !s.manual && !s.canCancel ? (
         <Text variant="body-sm" tone="subdued">
           {t("order.waybill.cancel.unsupported")}
         </Text>
       ) : null}
+    </Stack>
+  );
+}
+
+/** Відстеження: статус перевізника, фактична передача, доставка, трек-номер у Shopify, події. */
+function TrackingSection({ shipment: s, canHandOver }: { shipment: Shipment; canHandOver: boolean }) {
+  const t = useT();
+  const locale = useLocale();
+
+  let carrierStatus: ReactNode = null;
+  if (s.carrierStatusText && s.carrierStatusCode) {
+    carrierStatus = t("tracking.field.carrierStatusValue", { text: s.carrierStatusText, code: s.carrierStatusCode });
+  } else if (s.carrierStatusText) {
+    carrierStatus = s.carrierStatusText;
+  } else if (s.carrierStatusCode) {
+    carrierStatus = <InlineCode>{s.carrierStatusCode}</InlineCode>;
+  }
+
+  let shopify: string;
+  switch (s.shopify.state) {
+    case "sent":
+      shopify = t("tracking.shopify.sent", { time: formatDateTime(s.shopify.sentAt, locale) });
+      break;
+    case "pending":
+      shopify = t("tracking.shopify.pending");
+      break;
+    case "after_handover":
+      shopify = t("tracking.shopify.afterHandover");
+      break;
+    case "disabled":
+      shopify = t("tracking.shopify.disabled");
+      break;
+    default:
+      shopify = t("tracking.shopify.notApplicable");
+  }
+
+  const kv: KeyValueItem[] = [
+    { key: "status", label: t("tracking.field.status"), value: <TrackingStatusBadge status={s.trackingStatus} /> },
+    ...(carrierStatus ? [{ key: "carrierStatus", label: t("tracking.field.carrierStatus"), value: carrierStatus }] : []),
+    ...(s.carrierStatusAt ? [{ key: "statusAt", label: t("tracking.field.statusAt"), value: <TimeText value={s.carrierStatusAt} /> }] : []),
+    ...(s.trackingSupported
+      ? [
+          {
+            key: "lastChecked",
+            label: t("tracking.field.lastChecked"),
+            value: s.lastTrackedAt ? <TimeText value={s.lastTrackedAt} /> : t("tracking.notChecked"),
+          },
+        ]
+      : []),
+    {
+      key: "handedOver",
+      label: t("tracking.field.handedOver"),
+      value: s.handedOverAt ? <TimeText value={s.handedOverAt} /> : t("tracking.notYet"),
+    },
+    ...(s.deliveredAt ? [{ key: "delivered", label: t("tracking.field.delivered"), value: <TimeText value={s.deliveredAt} /> }] : []),
+    { key: "shopify", label: t("tracking.shopify.label"), value: shopify },
+  ];
+
+  const events: TimelineItem[] = s.trackingEvents.map((e) => ({
+    id: e.id,
+    title: t(`tracking.status.${e.status}`),
+    description: [e.description, e.location, e.code ? t("tracking.event.code", { code: e.code }) : null].filter(Boolean).join(" · ") || undefined,
+    time: <TimeText value={e.occurredAt} />,
+    tone: trackingTimelineTone(e.status),
+  }));
+
+  return (
+    <Stack gap={3}>
+      <Text as="h3" variant="heading-sm">
+        {t("tracking.section.title")}
+      </Text>
+      <KeyValueList items={kv} />
+      <Text variant="body-sm" tone="subdued">
+        {s.trackingSupported ? t("tracking.refresh.help") : t("tracking.unsupported")}
+        {/* Підказка про ручну передачу — лише коли кнопка «Передано перевізнику» є на екрані. */}
+        {!s.trackingSupported && canHandOver ? ` ${t("tracking.unsupportedManual")}` : null}
+      </Text>
+      {s.trackingSupported || events.length > 0 ? (
+        <Stack gap={2}>
+          <Text as="h4" variant="body-sm" weight="semibold">
+            {t("tracking.events.title")}
+          </Text>
+          {events.length > 0 ? (
+            <Timeline items={events} />
+          ) : (
+            <Text variant="body-sm" tone="subdued">
+              {t("tracking.events.empty")}
+            </Text>
+          )}
+        </Stack>
+      ) : null}
+    </Stack>
+  );
+}
+
+/** Документи перевізника (PDF через fetch) і комерційний інвойс застосунку для друку. */
+function DocumentsSection({ shipment: s, orderId }: { shipment: Shipment; orderId: string }) {
+  const t = useT();
+  const href = useHref();
+  return (
+    <Stack gap={2}>
+      <Text as="h3" variant="heading-sm">
+        {t("tracking.documents.title")}
+      </Text>
+      {s.documents.length > 0 ? (
+        <>
+          <CarrierDocumentButtons orderId={orderId} shipmentId={s.id} kinds={s.documents} />
+          <Text variant="caption" tone="subdued">
+            {t("tracking.documents.help")}
+          </Text>
+        </>
+      ) : (
+        <Text variant="body-sm" tone="subdued">
+          {t("tracking.documents.none")}
+        </Text>
+      )}
+      <Stack direction="horizontal" gap={2}>
+        <Button size="sm" to={href(`orders/${orderId}/invoice`)}>
+          {t("tracking.documents.appInvoice")}
+        </Button>
+      </Stack>
     </Stack>
   );
 }
@@ -1515,9 +1802,17 @@ function NoWaybill({ data }: { data: Data }) {
     );
   } else if (!carrier.canCreate) {
     setup.push(
-      <Banner key="carrier" tone="info" title={t("order.waybill.blocked.notConfigured.title", { carrier: carrier.displayName })}>
-        {t("order.waybill.blocked.notConfigured.body")}
-      </Banner>,
+      carrier.isNovaPost ? (
+        // Nova Post: реальні накладні вимкнено, доки власник свідомо не ввімкне їх змінною середовища.
+        <Banner key="carrier" tone="info" title={t("tracking.waybill.novaPostDisabled.title", { carrier: carrier.displayName })}>
+          <p>{t("tracking.waybill.novaPostDisabled.body")}</p>
+          <p>{t("tracking.waybill.novaPostDisabled.owner")}</p>
+        </Banner>
+      ) : (
+        <Banner key="carrier" tone="info" title={t("order.waybill.blocked.notConfigured.title", { carrier: carrier.displayName })}>
+          {t("order.waybill.blocked.notConfigured.body")}
+        </Banner>
+      ),
     );
   }
 
@@ -1673,8 +1968,18 @@ const EVENT_TONE: Record<string, TimelineItem["tone"]> = {
   confirmed_not_created: "warning",
   confirmed_not_created_manually: "warning",
   cancelled: "warning",
+  handed_over: "success",
+  shopify_fulfilled: "success",
 };
-const EVENT_WITH_NUMBER = new Set(["created", "recovered", "manually_linked", "cancelled"]);
+const EVENT_WITH_NUMBER = new Set(["created", "recovered", "manually_linked", "cancelled", "handed_over"]);
+
+/** Повідомлення події: джерело передачі, результат передачі в Shopify або службовий код накладної. */
+function eventMessageText(type: string, message: string, t: TFunction): string {
+  const key =
+    type === "handed_over" ? `tracking.handover.source.${message}` : type === "shopify_fulfilled" ? `tracking.shopify.outcome.${message}` : null;
+  if (key) return hasKey(key) ? t(key) : message;
+  return codeText(message, t);
+}
 
 function HistoryCard({ data }: { data: Data }) {
   const t = useT();
@@ -1712,7 +2017,8 @@ function HistoryCard({ data }: { data: Data }) {
       const key = `order.event.${e.type}`;
       const parts = [
         e.waybillNumber && EVENT_WITH_NUMBER.has(e.type) ? t("order.history.waybill", { number: e.waybillNumber }) : null,
-        e.message ? codeText(e.message, t) : null,
+        e.trackingStatus ? t(`tracking.status.${e.trackingStatus}`) : null,
+        e.message ? eventMessageText(e.type, e.message, t) : null,
       ].filter(Boolean);
       return {
         at: e.createdAt.getTime(),

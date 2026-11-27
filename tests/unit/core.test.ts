@@ -59,7 +59,7 @@ describe("permissions", () => {
   });
   it("finance section requires finance.view", () => {
     expect(SECTIONS.find((s) => s.key === "finance")?.permission).toBe("finance.view");
-    expect(SECTIONS).toHaveLength(17);
+    expect(SECTIONS).toHaveLength(18);
   });
 });
 

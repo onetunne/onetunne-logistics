@@ -1,3 +1,4 @@
+import { customsOverridesInputSchema, type OverrideField } from "~/modules/products/customs-overrides";
 import { and, eq, inArray, like, notLike, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { DbOrTx, Tx } from "~/db/client.server";
@@ -489,50 +490,32 @@ export async function automationDecision(db: DbOrTx, order: Pick<OrderRow, "auto
   return { run: true, mode: automation.mode };
 }
 
-export const variantCustomsSchema = z.object({
-  weightGrams: z.coerce.number().int().min(1).max(30000).nullable(),
-  hsCode: z
-    .string()
-    .trim()
-    .max(20)
-    .transform((v) => (v === "" ? null : v))
-    .nullable(),
-  countryOfOrigin: z
-    .string()
-    .trim()
-    .toUpperCase()
-    .regex(/^([A-Z]{2})?$/)
-    .transform((v) => (v === "" ? null : v))
-    .nullable(),
-  customsDescription: z
-    .string()
-    .trim()
-    .max(200)
-    .transform((v) => (v === "" ? null : v))
-    .nullable(),
-});
-
 /**
- * Демо: редагування митних даних товару (імітує зміну в Shopify).
- * У робочій версії характеристики товарів редагуються в Shopify і синхронізуються (етап 2).
+ * Редагування митних даних, ваги й габаритів товару в застосунку (демо й робоча версія).
+ * Зміни зберігаються як перевизначення (product_variants.customs_overrides) і мають пріоритет над Shopify;
+ * синхронізація Shopify їх не перезаписує. Порожнє поле — повернутися до значення з Shopify.
+ * Після зміни перевіряються замовлення з цим товаром, які ще можна обробляти.
  */
 export async function updateVariantCustomsData(
   ctx: ServiceContext,
   variantId: string,
-  input: z.input<typeof variantCustomsSchema>,
+  input: Partial<Record<OverrideField, string | number | null | undefined>>,
 ): Promise<{ revalidated: number }> {
   requirePermission(ctx.actor, "orders.edit");
-  if (ctx.mode !== "demo") throw new DomainError("product.editInShopify", 409);
-  const data = variantCustomsSchema.parse(input);
+  const asText = Object.fromEntries(
+    Object.entries(input).map(([k, v]) => [k, v === null || v === undefined ? "" : String(v)]),
+  );
+  const overrides = customsOverridesInputSchema.parse(asText);
+  const clean = Object.fromEntries(Object.entries(overrides).filter(([, v]) => v !== undefined));
   const affected = await ctx.db.transaction(async (tx) => {
     const [variant] = await tx.select().from(productVariants).where(eq(productVariants.id, variantId)).for("update");
     if (!variant) throw new NotFoundError("variant");
     await tx
       .update(productVariants)
-      .set({ ...data, updatedAt: ctx.now() })
+      .set({ customsOverrides: Object.keys(clean).length > 0 ? clean : null, updatedAt: ctx.now() })
       .where(eq(productVariants.id, variantId));
     await writeAudit(tx, ctx.actor, "product.customs_updated", { type: "variant", id: variantId }, {
-      fields: Object.keys(data),
+      fields: Object.keys(clean),
     });
     const rows = await tx
       .selectDistinct({ id: orders.id })

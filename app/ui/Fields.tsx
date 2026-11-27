@@ -314,7 +314,9 @@ export function Checkbox({
           type="checkbox"
           id={fieldId}
           name={name}
-          value={value}
+          // Без value браузер надсилає "on". value={undefined} після гідратації React перетворювався на value=""
+          // і позначений прапорець надсилав порожнє значення (сервер вважав його вимкненим).
+          {...(value !== undefined && value !== "" ? { value } : {})}
           disabled={disabled}
           form={form}
           onChange={onChange}

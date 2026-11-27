@@ -9,6 +9,11 @@ const pages = (prefix: "demo" | "app") => [
   index("pages/dashboard.tsx", { id: `${prefix}-dashboard` }),
   route("orders", "pages/orders.tsx", { id: `${prefix}-orders` }),
   route("orders/:orderId", "pages/order-detail.tsx", { id: `${prefix}-order` }),
+  route("orders/:orderId/invoice", "pages/order-invoice.tsx", { id: `${prefix}-order-invoice` }),
+  route("orders/:orderId/shipments/:shipmentId/documents/:kind", "pages/order-document.tsx", {
+    id: `${prefix}-order-document`,
+  }),
+  route("products", "pages/products.tsx", { id: `${prefix}-products` }),
   route("problems", "pages/problems.tsx", { id: `${prefix}-problems` }),
   route("waybills", "pages/waybills.tsx", { id: `${prefix}-waybills` }),
   route("country-rules", "pages/country-rules.tsx", { id: `${prefix}-country-rules` }),
@@ -28,6 +33,7 @@ export default [
   route("webhooks/shopify", "routes/webhooks.shopify.tsx"),
   route("webhooks/app/uninstalled", "routes/webhooks.app.uninstalled.tsx"),
   route("webhooks/app/scopes_update", "routes/webhooks.app.scopes_update.tsx"),
+  route("carrier-service/:token", "routes/carrier-service.tsx"),
   route("preferences", "routes/preferences.tsx"),
   route("healthz", "routes/healthz.tsx"),
 ] satisfies RouteConfig;

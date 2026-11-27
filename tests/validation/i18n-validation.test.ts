@@ -42,7 +42,11 @@ describe("validation i18n messages", () => {
     for (const locale of ["uk", "en"] as const) {
       for (const [key, value] of Object.entries(messages[locale])) {
         // Проблеми синхронізації Shopify створює сервіс синхронізації з власними параметрами.
-        const extra = key.startsWith("issue.SHOPIFY_") ? ["fields", "message", "reason", "shipsTo"] : [];
+        const extra = key.startsWith("issue.SHOPIFY_")
+          ? ["fields", "message", "reason", "shipsTo"]
+          : key.startsWith("issue.DELIVERY_PROBLEM") || key.startsWith("issue.CARRIER_SHIPMENT_DELETED")
+            ? ["carrier", "code", "status", "waybill"] // створюються сервісом відстеження, не валідатором
+            : [];
         for (const p of placeholders(value)) expect(allowed.has(p ?? "") || extra.includes(p ?? ""), `${locale}:${key} {${p}}`).toBe(true);
       }
     }

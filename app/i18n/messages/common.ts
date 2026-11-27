@@ -10,9 +10,10 @@ const messages: MessageModule = {
     "auth.login.submit": "Увійти",
     "app.name": "ONE TUNNE Logistics",
 
-    // Навігація (17 розділів)
+    // Навігація (18 розділів)
     "nav.dashboard": "Головна",
     "nav.orders": "Замовлення",
+    "nav.products": "Товари",
     "nav.waybills": "Накладні",
     "nav.shipping": "Доставка",
     "nav.picking": "Комплектація",
@@ -126,6 +127,7 @@ const messages: MessageModule = {
 
     "nav.dashboard": "Home",
     "nav.orders": "Orders",
+    "nav.products": "Products",
     "nav.waybills": "Waybills",
     "nav.shipping": "Shipping",
     "nav.picking": "Picking",

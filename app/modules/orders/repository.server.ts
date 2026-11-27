@@ -1,3 +1,4 @@
+import { effectiveVariant, type OverrideField } from "~/modules/products/customs-overrides";
 import { and, asc, count, desc, eq, ilike, inArray, or, sql, type SQL } from "drizzle-orm";
 import type { DbOrTx } from "~/db/client.server";
 import {
@@ -25,7 +26,8 @@ export type ShipmentEventRow = typeof shipmentEvents.$inferSelect;
 export type OrderChangeRow = typeof orderChanges.$inferSelect;
 
 export interface LineItemWithVariant extends LineItemRow {
-  variant: (VariantRow & { productTitle: string; productImageUrl: string | null }) | null;
+  /** Ефективні значення варіанта: митні дані/вага/габарити, змінені в застосунку, мають пріоритет над Shopify. */
+  variant: (VariantRow & { productTitle: string; productImageUrl: string | null; overriddenFields: OverrideField[] }) | null;
 }
 
 export interface OrderAggregate {
@@ -76,7 +78,7 @@ export async function loadLineItems(db: DbOrTx, orderId: string): Promise<LineIt
   return rows.map(({ item, variant, product }) => ({
     ...item,
     variant: variant
-      ? { ...variant, productTitle: product?.title ?? item.title, productImageUrl: product?.imageUrl ?? null }
+      ? { ...effectiveVariant(variant), productTitle: product?.title ?? item.title, productImageUrl: product?.imageUrl ?? null }
       : null,
   }));
 }

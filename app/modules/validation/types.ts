@@ -42,6 +42,10 @@ export const ISSUE_CODES = [
   "SHOPIFY_SYNC_FAILED",
   "SHOPIFY_CANCELLED_AFTER_SHIPMENT",
   "SHOPIFY_COUNTRY_NOT_SHIPPED",
+  "SHOPIFY_FULFILLMENT_FAILED",
+  // Відстеження (створюються сервісом відстеження)
+  "DELIVERY_PROBLEM",
+  "CARRIER_SHIPMENT_DELETED",
 ] as const;
 
 export type IssueCode = (typeof ISSUE_CODES)[number];

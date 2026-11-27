@@ -2,6 +2,7 @@ import { Fragment } from "react";
 import { Link, useLoaderData, type LoaderFunctionArgs } from "react-router";
 import { useCan, useHref, useShell } from "~/components/shell";
 import { OrderStatusBadge, ShipmentStatusBadge, TestBadge } from "~/components/status-badge";
+import { TrackingStatusBadge, isTrackingStatus } from "~/components/tracking-badge";
 import { requirePermission } from "~/domain/permissions";
 import { hasKey, useLocale, useT } from "~/i18n";
 import { NOVA_GLOBAL_CODE } from "~/integrations/carriers/nova-global";
@@ -81,6 +82,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
       carrierCode: s.carrierCode,
       mode: s.mode,
       status: s.status,
+      /** Нормалізований статус відстеження (лише для створених накладних). */
+      trackingStatus:
+        s.status !== "created" || s.trackingStatus === null ? null : isTrackingStatus(s.trackingStatus) ? s.trackingStatus : ("unknown" as const),
       waybillNumber: s.waybillNumber,
       reference: s.carrierReference,
       attempts: s.attempts,
@@ -140,6 +144,12 @@ export default function WaybillsPage() {
       ),
     },
     { key: "status", header: t("waybills.col.status"), render: (r) => <ShipmentStatusBadge status={r.status} /> },
+    {
+      key: "tracking",
+      header: t("tracking.col.tracking"),
+      hideOnMobile: true,
+      render: (r) => (r.status === "created" ? <TrackingStatusBadge status={r.trackingStatus} size="sm" /> : DASH),
+    },
     {
       key: "order",
       header: t("waybills.col.order"),

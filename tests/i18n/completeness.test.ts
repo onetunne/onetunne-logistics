@@ -63,3 +63,19 @@ describe("i18n completeness", () => {
     expect(keys.filter((k) => !(k in DICTIONARIES.uk) || !(k in DICTIONARIES.en))).toEqual([]);
   });
 });
+
+describe("texts describe implemented behaviour only", () => {
+  it("Nova Post tariff help describes option B (one fixed tariff for checkout and waybills)", () => {
+    const uk = DICTIONARIES.uk["settings.novaPost.deliveryTypeHelp"]!;
+    const en = DICTIONARIES.en["settings.novaPost.deliveryTypeHelp"]!;
+    expect(uk).toMatch(/Один тариф/);
+    expect(uk).toMatch(/Checkout увімкнути не можна/);
+    expect(en).toMatch(/One Nova Post tariff/);
+    expect(en).toMatch(/checkout cannot be enabled/);
+  });
+
+  it("an active CarrierService is not reported as «Shopify requests the rates» before a zone/market uses it", () => {
+    expect(DICTIONARIES.uk["settings.checkoutConnection.state.active"]).not.toMatch(/^Підключено: Shopify запитує тарифи застосунку\.$/);
+    expect(DICTIONARIES.en["settings.checkoutConnection.state.active"]).not.toMatch(/^Connected: Shopify requests the app's rates\.$/);
+  });
+});

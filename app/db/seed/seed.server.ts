@@ -56,7 +56,7 @@ export async function seedReferenceData(db: Db, settingsOverrides: Partial<AllSe
 
 export const DEMO_SETTINGS: Partial<AllSettings> = {
   automation: { mode: "semi", globalPause: false },
-  shipper: DEMO_SHIPPER,
+  shipper: { ...DEMO_SHIPPER, taxId: "", eori: "", ioss: "" },
   packaging: DEFAULT_SETTINGS.packaging,
   testCarrier: { simulation: "none" },
 };
