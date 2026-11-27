@@ -3,7 +3,7 @@
  *
  * РЕАЛІЗОВАНО: типізований реєстр інструментів поверх наявних сервісів + виконавець з перевірками.
  * НЕ РЕАЛІЗОВАНО: мовна модель (виклики надходять лише з коду/тестів), чат-інтерфейс, бюджет/ліміти запитів,
- * фінансові інструменти.
+ * фінансові інструменти. Етап 5: інструменти складу warehouse_* — з команд складу (WAREHOUSE_TOOLS нижче).
  *
  * Принципи (див. app/integrations/llm/types.ts, docs/ai-whatsapp-readiness.md):
  * - Модель лише ПРОПОНУЄ виклик. Сервер перевіряє: схему (zod), дозвіл актора (requirePermission),
@@ -55,6 +55,7 @@ import {
 import { redactText } from "~/modules/privacy/redact";
 import { getSetting } from "~/modules/settings/settings.server";
 import { isReissuable, reissueWaybill } from "~/modules/shipments/reissue.server";
+import { WAREHOUSE_COMMANDS } from "~/modules/warehouse/commands.server";
 import { cancelWaybill, createWaybill, findActiveShipment } from "~/modules/shipments/waybill.server";
 import { validateOrder } from "~/modules/validation";
 import { SHIPPING_FIELDS } from "~/modules/validation/types";
@@ -615,6 +616,27 @@ const reissueWaybillTool = defineTool({
  * Інструменти поточного етапу. Фінансових інструментів немає (§10: працівник не отримує фінансів навіть через ШІ;
  * для власника — пізніше, з risk "financial" і дозволом finance.view).
  */
+/**
+ * Етап 5: команди складу (modules/warehouse/commands.server.ts) як інструменти асистента — `warehouse_<команда>`.
+ * Ті самі схеми, дозволи й обробники, що й для майбутнього Telegram-бота; правила виконавця нижче (дозволи,
+ * підтвердження за режимом, глобальна пауза, журнал) діють так само, як для інструментів замовлень. Зміни
+ * (receive_stock, mark_defective) позначено requiresConfirmation і мають попередній перегляд; ідемпотентність —
+ * operationId від викликача (manual:<operationId>). Собівартості й даних покупців у результатах немає.
+ */
+const WAREHOUSE_TOOLS: AnyAssistantTool[] = [...WAREHOUSE_COMMANDS.values()].map((command) =>
+  defineTool({
+    name: `warehouse_${command.name}`,
+    description: command.description,
+    input: command.input,
+    requiredPermission: command.permission,
+    risk: command.risk,
+    requiresConfirmation: command.requiresConfirmation,
+    ...(command.orderNumberOf ? { orderNumberOf: (input: unknown) => command.orderNumberOf!(input) } : {}),
+    ...(command.preview ? { preview: (ctx: ServiceContext, input: unknown) => command.preview!(ctx, input) } : {}),
+    handler: (ctx, input) => command.run(ctx, input),
+  }),
+);
+
 export const ASSISTANT_TOOLS: AssistantToolRegistry = createToolRegistry([
   findOrders,
   getOrder,
@@ -625,6 +647,7 @@ export const ASSISTANT_TOOLS: AssistantToolRegistry = createToolRegistry([
   createWaybillTool,
   cancelWaybillTool,
   reissueWaybillTool,
+  ...WAREHOUSE_TOOLS,
 ]);
 
 // ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ import { QueueingShopifyGateway } from "~/integrations/shopify/queueing-gateway.
 import type { ShopifyGateway } from "~/integrations/shopify/types";
 import { scheduleTrackingPoll } from "~/modules/tracking/tracking.server";
 import type { ServiceContext } from "./types";
+import { ensureInventoryPushSweep } from "~/modules/inventory-sync/schedule.server";
 
 /**
  * Робоче середовище: PostgreSQL (DATABASE_URL). Тестовий перевізник тут НЕ реєструється —
@@ -83,6 +84,8 @@ export async function ensureJobWorker(): Promise<void> {
     startJobWorker(runtime.handle.db, handlers);
     // Ланцюжок опитування відстеження: одне очікуване завдання (dedupe), перше — через хвилину після старту.
     await scheduleTrackingPoll(runtime.handle.db, new Date(Date.now() + 60_000));
+    // Страхова передача складських змін у Shopify (етап 5): ланцюжок зупиняється сам, якщо передачу вимкнено.
+    await ensureInventoryPushSweep(runtime.handle.db);
   } catch (e) {
     workerStarted = false;
     logger.error("job.worker_start_failed", { error: e });

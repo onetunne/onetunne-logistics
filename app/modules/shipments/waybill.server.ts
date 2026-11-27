@@ -36,6 +36,9 @@ import { validateOrder } from "~/modules/validation";
 import { buildCommercialInvoice, toCustomsDeclaration, toCustomsItems } from "~/modules/customs/invoice";
 import { splitStreetAndBuilding } from "~/modules/customs/address-parts";
 import { syncOrderReservations } from "~/modules/inventory/reservations.server";
+import type { SelectBoxReason } from "~/modules/packaging/box-selection";
+import { chooseParcelPackage, parcelWeightItems, type ParcelBoxPlan, type ParcelSource } from "~/modules/packaging/parcel";
+import { planParcelBox } from "~/modules/packaging/parcel.server";
 
 function streetParts(address1: string | null | undefined): { street: string | null; building: string | null } {
   const parts = splitStreetAndBuilding(address1);
@@ -162,28 +165,36 @@ function missingShipperFields(settings: AllSettings): string[] {
   return REQUIRED_SHIPPER_FIELDS.filter((f) => !String(settings.shipper[f] ?? "").trim());
 }
 
+/** Запит створення накладної + джерело параметрів посилки (для знімка запиту, не надсилається перевізнику). */
+export type BuiltShipmentRequest = CreateShipmentRequest & {
+  packageCode: string;
+  parcelSource: ParcelSource;
+  parcelBoxMaterialId: string | null;
+  autoBoxReason: SelectBoxReason | null;
+  parcelWeightSource: "manual" | "computed";
+};
+
+/**
+ * parcelPlan — коробка, визначена до побудови (planParcelBox: вибрана вручну або підібрана автоматично).
+ * Без нього (null/не передано) — лише ручне коригування замовлення або типова упаковка (як до етапу 5).
+ */
 export function buildShipmentRequest(
   order: OrderRow,
   items: Awaited<ReturnType<typeof loadLineItems>>,
   settings: AllSettings,
   reference: string,
   issuedAt?: Date,
-): CreateShipmentRequest & { packageCode: string } {
+  parcelPlan?: ParcelBoxPlan | null,
+): BuiltShipmentRequest {
   const defaultPkg =
     settings.packaging.packages.find((p) => p.code === settings.packaging.defaultPackageCode) ??
     settings.packaging.packages[0]!;
-  // Етап 5: ручне коригування габаритів посилки на рівні замовлення (мм → см, угору) має пріоритет над упаковкою.
-  const overrideDims = order.parcelLengthMm && order.parcelWidthMm && order.parcelHeightMm;
-  const pkg = overrideDims
-    ? {
-        ...defaultPkg,
-        lengthCm: Math.ceil(order.parcelLengthMm! / 10),
-        widthCm: Math.ceil(order.parcelWidthMm! / 10),
-        heightCm: Math.ceil(order.parcelHeightMm! / 10),
-      }
-    : defaultPkg;
+  // Етап 5: посилка — ручне коригування замовлення (мм → см, угору) → коробка (вручну/автоматично) → типова упаковка.
+  const chosen = chooseParcelPackage(order, defaultPkg, parcelPlan);
+  const pkg = chosen.pkg;
+  // Вага товарів — ті самі позиції й кількості (без повернених/видалених одиниць), що й для підбору коробки (parcelGoods).
   const computed = computeParcelWeights({
-    items: items.map((i) => ({ weightGrams: i.variant?.weightGrams ?? 0, quantity: i.quantity })),
+    items: parcelWeightItems(items),
     pkg,
     volumetricDivisor: settings.packaging.volumetricDivisor,
   });
@@ -202,6 +213,10 @@ export function buildShipmentRequest(
     reference,
     orderNumber: order.orderNumber,
     packageCode: pkg.code,
+    parcelSource: chosen.source,
+    parcelBoxMaterialId: chosen.boxMaterialId,
+    autoBoxReason: parcelPlan?.autoReason ?? null,
+    parcelWeightSource: order.parcelWeightGrams ? "manual" : "computed",
     sender: {
       name: s.contactName,
       company: s.companyName || null,
@@ -265,11 +280,16 @@ export function buildShipmentRequest(
 }
 
 /** Знімок запиту для історії — без персональних даних отримувача. */
-function requestSnapshot(req: CreateShipmentRequest & { packageCode: string }) {
+function requestSnapshot(req: BuiltShipmentRequest) {
   return {
     reference: req.reference,
     orderNumber: req.orderNumber,
     packageCode: req.packageCode,
+    // Етап 5: звідки взято габарити/тару посилки (manual | manual_box | auto_box | default_package) і вагу.
+    parcelSource: req.parcelSource,
+    parcelBoxMaterialId: req.parcelBoxMaterialId,
+    autoBoxReason: req.autoBoxReason,
+    parcelWeightSource: req.parcelWeightSource,
     destinationCountry: req.recipient.address.countryCode,
     parcels: req.parcels,
     customsItems: req.customsItems,
@@ -339,10 +359,11 @@ export async function createWaybill(
       .orderBy(desc(shipments.generation))
       .limit(1);
     const freshOrder = await loadOrderRow(tx, orderId);
+    const parcelPlan = await planParcelBox(tx, freshOrder, items);
     let shipment: ShipmentRow;
-    let request: CreateShipmentRequest & { packageCode: string };
+    let request: BuiltShipmentRequest;
     if (last && last.status === "failed") {
-      request = buildShipmentRequest(freshOrder, items, settings, last.carrierReference, ctx.now());
+      request = buildShipmentRequest(freshOrder, items, settings, last.carrierReference, ctx.now(), parcelPlan);
       const [row] = await tx
         .update(shipments)
         .set({
@@ -364,7 +385,7 @@ export async function createWaybill(
     } else {
       const generation = (last?.generation ?? 0) + 1;
       const id = randomUUID();
-      request = buildShipmentRequest(freshOrder, items, settings, referenceFor(freshOrder, generation, id), ctx.now());
+      request = buildShipmentRequest(freshOrder, items, settings, referenceFor(freshOrder, generation, id), ctx.now(), parcelPlan);
       const [row] = await tx
         .insert(shipments)
         .values({

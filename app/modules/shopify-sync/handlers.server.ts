@@ -5,6 +5,7 @@ import { SHOP_CURRENCY_QUERY } from "~/integrations/shopify/graphql";
 import type { JobHandlers } from "~/modules/jobs/worker.server";
 import type { ServiceContext } from "~/server/types";
 import { runTrackingPollJob } from "~/modules/tracking/tracking.server";
+import { createInventorySyncHandlers } from "~/modules/inventory-sync/handlers.server";
 import { fulfillShipment, reportFulfillmentFailure } from "./fulfillment.server";
 import {
   JOB,
@@ -111,6 +112,8 @@ export function createSyncHandlers(deps: SyncDeps): JobHandlers {
         await runTrackingPollJob(ctx());
       },
     },
+    // Етап 5: передача внутрішніх рухів у Shopify (inventory.push) і звірка залишків (inventory.reconcile).
+    ...createInventorySyncHandlers({ db: deps.db, admin: deps.admin }),
   };
 }
 

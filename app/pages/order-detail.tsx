@@ -42,6 +42,9 @@ import {
   updateVariantCustomsData,
   validateOrderById,
 } from "~/modules/orders/workflow.server";
+import { PRIORITIES, PRIORITY_KEYS, parsePriority } from "~/modules/packing/constants";
+import { setOrderPriority } from "~/modules/packing/packing.server";
+import { loadPackingSummary } from "~/modules/packing/view.server";
 import { MANUALLY_CLOSABLE_ISSUE_CODES } from "~/modules/problems/categories";
 import { OVERRIDE_FIELDS, type OverrideField } from "~/modules/products/customs-overrides";
 import { loadVariantCustomsParts } from "~/modules/products/repository.server";
@@ -190,7 +193,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     throw e;
   });
   const variantIds = [...new Set(agg.items.flatMap((i) => (i.variant ? [i.variant.id] : [])))];
-  const [history, ruleRows, settings, trackingEvents, variantParts, shopifyPush] = await Promise.all([
+  const [history, ruleRows, settings, trackingEvents, variantParts, shopifyPush, packingSummary] = await Promise.all([
     loadOrderHistory(ctx.db, orderId),
     loadCountryRuleRows(ctx.db),
     getSettings(ctx.db),
@@ -218,6 +221,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     loadVariantCustomsParts(ctx.db, variantIds),
     // Етап 4: стан передачі підтверджених змін контактів/адреси в Shopify (черга + відкриті помилки синхронізації).
     loadShopifyPushState(ctx.db, ctx.shopify.kind, agg.order),
+    // Етап 5: пакування (працівник, чекліст, посилка, розбіжність з накладною) і пріоритет.
+    loadPackingSummary(ctx.db, orderId),
   ]);
   const { order } = agg;
   const now = ctx.now().getTime();
@@ -420,6 +425,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     shopifyPushEnabled: settings.tracking.pushToShopify,
     /** Етап 4: стан передачі виправлених контактів/адреси в Shopify (без персональних даних, лише тексти Shopify). */
     shopifyPush,
+    /** Етап 5: картка «Пакування» (без даних покупця). */
+    packing: packingSummary,
     /** Лише назви незаповнених полів відправника — без значень. */
     missingShipperFields: REQUIRED_SHIPPER_FIELDS.filter((f) => !String(settings.shipper[f] ?? "").trim()),
   };
@@ -709,6 +716,14 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<A
       case "resendShopify":
         return resendResult(await resendOrderToShopify(ctx, orderId));
 
+      case "setPriority": {
+        // Етап 5: пріоритет відправлення (черга пакування); дозвіл orders.edit перевіряє сервіс.
+        const priority = parsePriority(formString(form, "priority"));
+        if (priority === null) return { ok: false, error: "packing.error.invalidPriority" };
+        const r = await setOrderPriority(ctx, orderId, priority);
+        return { ok: true, message: r.changed ? "packing.priority.saved" : "packing.priority.unchanged", tone: r.changed ? "success" : "info" };
+      }
+
       case "refreshTracking": {
         const shipmentId = await ownShipmentId();
         if (!shipmentId) return { ok: false, error: "error.notFound" };
@@ -946,6 +961,7 @@ export default function OrderDetailPage() {
           </Stack>
           <Stack gap={4}>
             <WaybillCard data={data} />
+            <PackingCard data={data} />
             <SummaryCard order={order} />
             <HistoryCard data={data} />
           </Stack>
@@ -2221,6 +2237,104 @@ function PreviousShipments({ shipments }: { shipments: Shipment[] }) {
         ))}
       </Stack>
     </Stack>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 6а. Пакування (етап 5): працівник, чекліст, посилка, розбіжність з накладною, пріоритет
+// ---------------------------------------------------------------------------
+
+function PackingCard({ data }: { data: Data }) {
+  const t = useT();
+  const locale = useLocale();
+  const can = useCan();
+  const href = useHref();
+  const busy = useBusy();
+  const { packing: summary, order } = data;
+  const p = summary.packing;
+  const canPriority = can("orders.edit") && !isShipped(order.status) && order.status !== "cancelled";
+  if (!p && !summary.inQueue && !summary.packedWithoutWaybill && !canPriority) return null;
+  const dims = summary.parcel.dimsMm ? summary.parcel.dimsMm.join(" × ") : null;
+  const items: KeyValueItem[] = [
+    {
+      key: "state",
+      label: t("packing.summary.state"),
+      value: p ? t(`packing.summary.status.${p.status}`) : t("packing.summary.notStarted"),
+    },
+    ...(p?.startedByName
+      ? [{ key: "started", label: t("packing.screen.startedBy"), value: `${p.startedByName} · ${formatDateTime(p.startedAt, locale)}` }]
+      : []),
+    ...(p?.packedByName
+      ? [{ key: "packed", label: t("packing.screen.packedBy"), value: `${p.packedByName} · ${formatDateTime(p.packedAt, locale)}` }]
+      : []),
+    ...(p && summary.progress.requiredUnits > 0
+      ? [{ key: "progress", label: t("packing.summary.checklist"), value: t("packing.progress.short", { packed: summary.progress.packedUnits, required: summary.progress.requiredUnits }) }]
+      : []),
+    ...(p?.boxName ? [{ key: "box", label: t("packing.parcel.box"), value: p.boxName }] : []),
+    ...(summary.parcel.weightGrams || dims
+      ? [
+          {
+            key: "parcel",
+            label: t("packing.summary.parcel"),
+            value: [summary.parcel.weightGrams ? formatWeight(summary.parcel.weightGrams, locale) : null, dims ? `${dims} ${t("packing.unit.mm")}` : null]
+              .filter(Boolean)
+              .join(" · "),
+          },
+        ]
+      : []),
+  ];
+  return (
+    <Card title={t("packing.summary.title")}>
+      <Stack gap={3}>
+        <KeyValueList items={items} />
+        {summary.mismatch ? (
+          <Banner tone="warning" title={t("packing.mismatch.title")}>
+            {summary.mismatch.weight ? (
+              <p>
+                {t("packing.mismatch.weight", {
+                  waybill: formatWeight(summary.mismatch.weight.waybillGrams, locale),
+                  packed: formatWeight(summary.mismatch.weight.packedGrams, locale),
+                })}
+              </p>
+            ) : null}
+            {summary.mismatch.dims ? (
+              <p>{t("packing.mismatch.dims", { waybill: summary.mismatch.dims.waybillMm.join(" × "), packed: summary.mismatch.dims.packedMm.join(" × ") })}</p>
+            ) : null}
+            <p>{t(order.status === "packed" ? "packing.mismatch.packedHint" : "packing.mismatch.hint")}</p>
+          </Banner>
+        ) : null}
+        {summary.packedWithoutWaybill ? (
+          <Banner tone="warning" title={t("packing.screen.packedNoWaybill.title")}>
+            {t("packing.screen.packedNoWaybill.body")}
+          </Banner>
+        ) : null}
+        {summary.materialsConsumed && p?.status !== "packed" ? (
+          <Text variant="caption" tone="subdued">
+            {t("packing.materials.consumedNote")}
+          </Text>
+        ) : null}
+        {(summary.inQueue || summary.packedWithoutWaybill) && can("packing.perform") ? (
+          <Button to={href(`picking/${order.id}`)}>{t("packing.summary.open")}</Button>
+        ) : null}
+        {canPriority ? (
+          <Form method="post">
+            <Hidden intent="setPriority" />
+            <Stack direction="horizontal" gap={2} align="end" wrap>
+              <Select
+                id="order-priority"
+                name="priority"
+                label={t("packing.priority.label")}
+                options={PRIORITIES.map((value) => ({ value: String(value), label: t(`packing.priority.${PRIORITY_KEYS[value]}`) }))}
+                defaultValue={String(summary.priority)}
+              />
+              <Button type="submit" loading={busy("setPriority")}>
+                {t("common.save")}
+              </Button>
+            </Stack>
+          </Form>
+        ) : null}
+      </Stack>
+    </Card>
   );
 }
 

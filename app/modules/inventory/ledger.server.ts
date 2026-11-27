@@ -463,9 +463,10 @@ export async function evaluateStockAlerts(
   if (ids.length === 0) return result;
   const defaultThreshold = opts.defaultThreshold ?? (await getSetting(tx, "warehouse")).lowStockThreshold;
   const rows = await tx
-    .select({ b: inventoryBalances, threshold: stockItems.lowStockThreshold })
+    .select({ b: inventoryBalances, threshold: stockItems.lowStockThreshold, materialActive: packagingMaterials.active })
     .from(inventoryBalances)
     .innerJoin(stockItems, eq(stockItems.id, inventoryBalances.stockItemId))
+    .leftJoin(packagingMaterials, eq(packagingMaterials.id, stockItems.materialId))
     .where(inArray(inventoryBalances.stockItemId, ids));
   const open = await tx
     .select()
@@ -474,7 +475,9 @@ export async function evaluateStockAlerts(
   const openByKey = new Map(open.map((a) => [`${a.warehouseId}|${a.stockItemId}|${a.kind}`, a]));
   const now = new Date();
   const seen = new Set<string>();
-  for (const { b, threshold } of rows) {
+  for (const { b, threshold, materialActive } of rows) {
+    // Неактивний пакувальний матеріал не попереджає: відкриті попередження нижче закриваються (не в `seen`).
+    if (materialActive === false) continue;
     const effective = threshold ?? defaultThreshold;
     const details = { onHand: b.onHand, reserved: b.reserved, available: availableOf(b), threshold: effective };
     for (const kind of alertKindsFor({ onHand: b.onHand, reserved: b.reserved, threshold: effective })) {

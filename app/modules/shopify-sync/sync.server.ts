@@ -15,6 +15,7 @@ import { loadOrderRow, shippingAddressOf, type OrderRow } from "~/modules/orders
 import { VALIDATABLE_STATUSES, validateOrderInTx } from "~/modules/orders/workflow.server";
 import { cancelOrder, processPaidOrder } from "~/modules/shipments/waybill.server";
 import { syncOrderReservations } from "~/modules/inventory/reservations.server";
+import { scheduleReconcileForInventoryWebhook } from "~/modules/inventory-sync/schedule.server";
 import type { AdminGraphql } from "~/integrations/shopify/admin-client.server";
 import type { ShopifyGateway, ShopifySyncResult } from "~/integrations/shopify/types";
 import {
@@ -132,6 +133,12 @@ export async function syncProductsPage(db: Db, admin: AdminGraphql, shop: string
   return data.products.nodes.length;
 }
 
+/**
+ * Webhook inventory_levels/update: оновлення знімка залишку товару (shopify.sync_product) і — етап 5 — ВІДКЛАДЕНА
+ * звірка цієї позиції зі складом застосунку (~10 хв, щоб замовлення встигло синхронізуватися й зарезервуватися;
+ * повторні події відкладають ту саму звірку, dedupe; лише для товарів, відкритих в обліку складу).
+ * Значення з webhook напряму не застосовується.
+ */
 export async function syncInventoryItem(db: Db, admin: AdminGraphql, shop: string, inventoryItemGid: string) {
   const data = await admin<{ inventoryItem: { variant: { product: { id: string } | null } | null } | null }>(
     INVENTORY_ITEM_PRODUCT_QUERY,
@@ -139,6 +146,7 @@ export async function syncInventoryItem(db: Db, admin: AdminGraphql, shop: strin
   );
   const productGid = data.inventoryItem?.variant?.product?.id;
   if (productGid) await enqueueJob(db, JOB.syncProduct, { shop, productGid }, { dedupeKey: `product:${productGid}` });
+  await scheduleReconcileForInventoryWebhook(db, shop, inventoryItemGid);
 }
 
 // ---------------------------------------------------------------------------
