@@ -948,6 +948,10 @@ function ParcelForm({ data }: { data: Data }) {
             </div>
           ) : null}
         </Stack>
+        {/* Одиниця — у заголовку групи: на вузькому екрані (320 px) суфікс «мм» не лишав місця для значення. */}
+        <Text variant="body-sm" weight="semibold">
+          {t("packing.parcel.dimsLabel")}
+        </Text>
         <Grid columns={{ xs: 3 }} gap={2}>
           {(["lengthMm", "widthMm", "heightMm"] as const).map((name, index) => (
             <TextField
@@ -960,7 +964,6 @@ function ParcelForm({ data }: { data: Data }) {
               max={MAX_PARCEL_DIMENSION_MM}
               step={1}
               label={t(`packing.parcel.${name}`)}
-              suffix={t("packing.unit.mm")}
               value={state.dims[index]}
               onChange={(e) => dispatch({ type: "dim", index: index as 0 | 1 | 2, value: e.currentTarget.value })}
               error={err(name)}
