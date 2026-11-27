@@ -14,7 +14,7 @@ import type { ProductionBatchStatus } from "~/db/schema";
 import { can, ForbiddenError, requirePermission } from "~/domain/permissions";
 import { useLocale, useT } from "~/i18n";
 import { DomainError } from "~/lib/errors";
-import { formatDate, formatNumber } from "~/lib/format";
+import { formatDate, formatIsoDate, formatNumber } from "~/lib/format";
 import { UUID_RE, closeBatch, startProduction } from "~/modules/production/batches.server";
 import {
   ACTIVE_BATCH_STATUSES,
@@ -27,6 +27,8 @@ import {
   kyivDate,
 } from "~/modules/production/calc";
 import { countActiveBatches, listBatchFilterOptions, listBatches } from "~/modules/production/queries.server";
+import { DEFAULT_STATS_PERIOD, STATS_PERIODS, isStatsPeriod, type StatsPeriodKey } from "~/modules/production/stats";
+import { loadProductionStats, type ProductionStats } from "~/modules/production/stats.server";
 import { getRequestContext } from "~/server/context.server";
 import { formString, toActionError } from "~/server/http.server";
 import {
@@ -53,8 +55,9 @@ import {
 
 /**
  * Виробництво (етап 5): перелік партій із фільтрами (стан, товар/модель/колір, прострочені), масові дії
- * (запуск, закриття — з підтвердженням і кількостями). Перегляд — warehouse.view; дії — production.manage;
- * собівартість — лише finance.view (у даних loader для інших її немає). Логіка — modules/production.
+ * (запуск, закриття — з підтвердженням і кількостями), статистика за період (?stats=30|90|365: отримано якісних,
+ * брак за моделями й кольорами, вчасність партій — modules/production/stats*.ts). Перегляд — warehouse.view;
+ * дії — production.manage; собівартість — лише finance.view (у даних loader для інших її немає).
  */
 
 const PAGE_SIZE = 50;
@@ -72,6 +75,8 @@ interface ListFilters {
   color: string | null;
   overdue: boolean;
   page: number;
+  /** Період блоку статистики. */
+  stats: StatsPeriodKey;
 }
 
 function parseFilters(params: URLSearchParams): ListFilters {
@@ -82,6 +87,7 @@ function parseFilters(params: URLSearchParams): ListFilters {
     return v === "" ? null : v;
   };
   const product = text("product");
+  const stats = params.get("stats");
   return {
     tab: (TABS as readonly string[]).includes(tab) ? (tab as Tab) : "active",
     q: text("q") ?? "",
@@ -90,6 +96,7 @@ function parseFilters(params: URLSearchParams): ListFilters {
     color: text("color"),
     overdue: params.get("overdue") === "1",
     page: /^\d{1,6}$/.test(pageRaw) ? Math.max(1, Number(pageRaw)) : 1,
+    stats: isStatsPeriod(stats) ? stats : DEFAULT_STATS_PERIOD,
   };
 }
 
@@ -102,6 +109,7 @@ function buildSearch(f: Partial<ListFilters>): string {
   if (f.color) params.set("color", f.color);
   if (f.overdue) params.set("overdue", "1");
   if (f.page && f.page > 1) params.set("page", String(f.page));
+  if (f.stats && f.stats !== DEFAULT_STATS_PERIOD) params.set("stats", f.stats);
   const s = params.toString();
   return s ? `?${s}` : "";
 }
@@ -133,7 +141,11 @@ export async function loader({ request }: LoaderFunctionArgs) {
     filters.page = pages;
     list = await listBatches(ctx.db, query, { today, includeCosts, limit: PAGE_SIZE, offset: (pages - 1) * PAGE_SIZE });
   }
-  const [options, activeBatches] = await Promise.all([listBatchFilterOptions(ctx.db), countActiveBatches(ctx.db)]);
+  const [options, activeBatches, stats] = await Promise.all([
+    listBatchFilterOptions(ctx.db),
+    countActiveBatches(ctx.db),
+    loadProductionStats(ctx.db, { today, period: filters.stats, includeCosts }),
+  ]);
   const counts = list.statusCounts;
   return {
     /** Активні партії (заплановано / у виробництві / частково отримано). */
@@ -151,6 +163,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
     } as Record<Tab, number>,
     overdueCount: list.overdueCount,
     options,
+    // Собівартість у статистиці — лише власник (finance.view): без нього costs = null.
+    stats: { ...stats, costs: includeCosts ? stats.costs : null },
     total: list.total,
     page: filters.page,
     pages,
@@ -324,7 +338,7 @@ export default function ProductionPage() {
       render: (r) =>
         r.totals.defective > 0 ? (
           <Text as="span" tone="warning">
-            {t("production.defectValue", { count: formatNumber(r.totals.defective, locale), rate: r.totals.defectRate ?? 0 })}
+            {t("production.defectValue", { count: formatNumber(r.totals.defective, locale), rate: formatNumber(r.totals.defectRate ?? 0, locale) })}
           </Text>
         ) : (
           "0"
@@ -394,6 +408,7 @@ export default function ProductionPage() {
         <Disclosure collapsedOnMobile summary={activeFilterCount > 0 ? t("production.filters.titleActive", { count: activeFilterCount }) : t("common.filters")}>
           <Form key={location.search} method="get" role="search">
             {filters.tab !== "active" ? <input type="hidden" name="tab" value={filters.tab} /> : null}
+            {filters.stats !== DEFAULT_STATS_PERIOD ? <input type="hidden" name="stats" value={filters.stats} /> : null}
             <Stack gap={4}>
               <Grid columns={{ xs: 1, md: 2, lg: 4 }} gap={3}>
                 <TextField
@@ -437,7 +452,7 @@ export default function ProductionPage() {
                 <Button type="submit" variant="primary" loading={isFiltering}>
                   {t("common.apply")}
                 </Button>
-                <Button to={listHref({ tab: filters.tab })} disabled={!data.isFiltered}>
+                <Button to={listHref({ tab: filters.tab, stats: filters.stats })} disabled={!data.isFiltered}>
                   {t("common.reset")}
                 </Button>
               </Stack>
@@ -561,8 +576,155 @@ export default function ProductionPage() {
             />
           </Stack>
         </Card>
+
+        <ProductionStatsCard stats={data.stats} periodHref={(stats) => listHref({ ...filters, stats })} />
       </Stack>
     </Page>
+  );
+}
+
+/**
+ * Статистика виробництва за період: отримано якісних і браку, частка браку за моделями й кольорами, вчасність
+ * партій; собівартість — лише з finance.view (costs від сервера, інакше null).
+ */
+function ProductionStatsCard({ stats, periodHref }: { stats: ProductionStats; periodHref: (key: StatsPeriodKey) => string }) {
+  const t = useT();
+  const locale = useLocale();
+  const n = (v: number) => formatNumber(v, locale);
+  const pct = (v: number | null) => (v === null ? "—" : `${formatNumber(v, locale)}%`);
+  const { totals, timeliness } = stats;
+  const tabs = STATS_PERIODS.map((key) => ({ key, label: t(`production.stats.period.${key}`), href: periodHref(key) }));
+  const groupColumns = (kind: "model" | "color"): Array<DataTableColumn<ProductionStats["byModel"][number]>> => [
+    {
+      key: "value",
+      header: t(kind === "model" ? "production.stats.col.model" : "production.stats.col.color"),
+      primary: true,
+      render: (g) =>
+        g.value ?? (
+          <Text as="span" tone="subdued">
+            {t(kind === "model" ? "production.stats.noModel" : "production.stats.noColor")}
+          </Text>
+        ),
+    },
+    { key: "good", header: t("production.stats.col.good"), align: "end", render: (g) => n(g.good) },
+    { key: "defective", header: t("production.stats.col.defective"), align: "end", render: (g) => n(g.defective) },
+    {
+      key: "rate",
+      header: t("production.stats.col.rate"),
+      align: "end",
+      render: (g) => (
+        <Text as="span" numeric tone={g.defective > 0 ? "warning" : undefined}>
+          {pct(g.defectRate)}
+        </Text>
+      ),
+    },
+  ];
+  return (
+    <Card
+      title={t("production.stats.title")}
+      titleAs="h2"
+      description={t("production.stats.range", { from: formatIsoDate(stats.period.from, locale), to: formatIsoDate(stats.period.to, locale) })}
+    >
+      <Stack gap={4}>
+        <Tabs items={tabs} selected={stats.period.key} ariaLabel={t("production.stats.periodLabel")} />
+        <Grid columns={{ xs: 2, md: 4 }} gap={3}>
+          <StatValue label={t("production.stats.good")} value={n(totals.good)} />
+          <StatValue
+            label={t("production.stats.defective")}
+            value={totals.defective > 0 ? `${n(totals.defective)} (${pct(totals.defectRate)})` : n(0)}
+            tone={totals.defective > 0 ? "warning" : undefined}
+          />
+          <StatValue
+            label={t("production.stats.onTime")}
+            value={timeliness.onTimeRate === null ? "—" : pct(timeliness.onTimeRate)}
+            hint={
+              timeliness.onTimeRate === null
+                ? t("production.stats.onTimeNone")
+                : t("production.stats.onTimeValue", { onTime: n(timeliness.onTime), total: n(timeliness.onTime + timeliness.late) })
+            }
+          />
+          <StatValue
+            label={t("production.stats.overdueOpen")}
+            value={n(stats.overdueOpen)}
+            tone={stats.overdueOpen > 0 ? "critical" : undefined}
+          />
+        </Grid>
+        {totals.produced > 0 || timeliness.completed > 0 ? (
+          <Text variant="body-sm" tone="subdued">
+            {[
+              t("production.stats.receipts", { count: n(totals.receipts), batches: n(totals.batches) }),
+              timeliness.late > 0 ? t("production.stats.late", { count: n(timeliness.late) }) : null,
+              timeliness.withoutDate > 0 ? t("production.stats.noDate", { count: n(timeliness.withoutDate) }) : null,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </Text>
+        ) : null}
+        {stats.costs && totals.produced > 0 ? (
+          <Stack gap={1}>
+            <Text variant="body-sm" weight="semibold">
+              {t("production.stats.cost")}
+            </Text>
+            {stats.costs.totals.length === 0 ? (
+              <Text variant="body-sm" tone="subdued">
+                —
+              </Text>
+            ) : (
+              stats.costs.totals.map((c) => (
+                <Text key={c.currency} variant="body-sm" numeric>
+                  {formatCost(c.amount, c.currency, locale)}
+                  {c.perGoodUnit ? ` · ${t("production.list.perGoodUnit", { amount: formatCost(c.perGoodUnit, c.currency, locale) })}` : ""}
+                </Text>
+              ))
+            )}
+            {stats.costs.unitsWithoutCost > 0 ? (
+              <Text variant="caption" tone="subdued">
+                {t("production.stats.costMissing", { units: n(stats.costs.unitsWithoutCost) })}
+              </Text>
+            ) : null}
+          </Stack>
+        ) : null}
+        {totals.produced === 0 ? (
+          <Text tone="subdued">{t("production.stats.empty")}</Text>
+        ) : (
+          <Grid columns={{ xs: 1, lg: 2 }} gap={3}>
+            <Stack gap={2}>
+              <Text as="h3" variant="heading-sm">
+                {t("production.stats.byModel")}
+              </Text>
+              <DataTable caption={t("production.stats.byModel")} columns={groupColumns("model")} rows={stats.byModel} rowKey={(g) => g.value ?? ""} />
+            </Stack>
+            <Stack gap={2}>
+              <Text as="h3" variant="heading-sm">
+                {t("production.stats.byColor")}
+              </Text>
+              <DataTable caption={t("production.stats.byColor")} columns={groupColumns("color")} rows={stats.byColor} rowKey={(g) => g.value ?? ""} />
+            </Stack>
+          </Grid>
+        )}
+        <Text variant="caption" tone="subdued">
+          {t("production.stats.onTimeHint")}
+        </Text>
+      </Stack>
+    </Card>
+  );
+}
+
+function StatValue({ label, value, hint, tone }: { label: string; value: string; hint?: string; tone?: "warning" | "critical" }) {
+  return (
+    <Stack gap={0}>
+      <Text as="span" variant="heading-md" numeric tone={tone}>
+        {value}
+      </Text>
+      <Text as="span" variant="caption" tone="subdued">
+        {label}
+      </Text>
+      {hint ? (
+        <Text as="span" variant="caption" tone="subdued">
+          {hint}
+        </Text>
+      ) : null}
+    </Stack>
   );
 }
 

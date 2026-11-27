@@ -10,7 +10,7 @@ import { DICTIONARIES } from "~/i18n";
 import type { RequestContext } from "~/server/types";
 import { OWNER, STAFF, createTestEnv, type TestEnv } from "../helpers";
 
-/** «Склад» → «Комплектація» (/demo/warehouse/kits, /app/warehouse/kits): права, форма шаблону, перевірка на замовленні. */
+/** «Склад» → «Шаблони комплектації» (/demo/warehouse/kits, /app/warehouse/kits): права, форма шаблону, перевірка на замовленні. */
 const m = vi.hoisted(() => ({ ctx: null as RequestContext | null }));
 vi.mock("~/server/context.server", () => ({
   getRequestContext: async () => {

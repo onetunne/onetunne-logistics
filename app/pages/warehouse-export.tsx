@@ -1,9 +1,10 @@
 /**
- * Ресурсний маршрут: CSV-експорт складу (…/warehouse/export?dataset=stock|movements|sales&sep=semicolon|comma
- * &period=7|30|90|custom&from=&to=&model=&color=&product=). Лише читання (GET) — нічого не змінює, окрім запису
- * в журналі про експорт.
+ * Ресурсний маршрут: CSV-експорт складу (…/warehouse/export?dataset=stock|movements|sales|production
+ * &sep=semicolon|comma&period=7|30|90|custom&from=&to=&model=&color=&product=). Лише читання (GET) — нічого не
+ * змінює, окрім запису в журналі про експорт.
  * Авторизація — як у сторінок (getRequestContext: /app → Shopify, /demo → демо); дозвіл warehouse.view, колонки
- * собівартості — лише finance.view (перевіряє modules/warehouse-analytics/export.server.ts).
+ * собівартості — лише finance.view; набір production (партії із собівартістю) — увесь лише finance.view
+ * (EXPORT_DATASET_PERMISSIONS тут і повторно в modules/warehouse-analytics/export.server.ts).
  * У вбудованому застосунку файл завантажується через fetch (App Bridge додає токен сесії) — див. warehouse-analytics.tsx.
  */
 import type { LoaderFunctionArgs } from "react-router";
@@ -15,7 +16,7 @@ import { resolvePeriod } from "~/modules/warehouse-analytics/calc";
 import { CSV_CONTENT_TYPE } from "~/modules/warehouse-analytics/csv";
 import { EXPORT_HEADERS } from "~/modules/warehouse-analytics/export-contract";
 import { exportWarehouseCsv } from "~/modules/warehouse-analytics/export.server";
-import { filtersOf, parseAnalyticsQuery, parseExportParams } from "~/modules/warehouse-analytics/params";
+import { EXPORT_DATASET_PERMISSIONS, filtersOf, parseAnalyticsQuery, parseExportParams } from "~/modules/warehouse-analytics/params";
 import { businessDate } from "~/modules/warehouse/dates";
 import { getRequestContext } from "~/server/context.server";
 
@@ -41,6 +42,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const url = new URL(request.url);
   const { dataset, separator } = parseExportParams(url.searchParams);
   if (!dataset) return text(ctx.locale, 400, "warehouseAnalytics.export.error.dataset");
+  if (!can(ctx.actor, EXPORT_DATASET_PERMISSIONS[dataset])) return text(ctx.locale, 403, "warehouseAnalytics.export.error.forbidden");
   const query = parseAnalyticsQuery(url.searchParams);
   const period = resolvePeriod({ key: query.period, from: query.from, to: query.to, today: businessDate(ctx.now()) });
   if (period.invalid) return text(ctx.locale, 400, "warehouseAnalytics.export.error.period");
@@ -53,7 +55,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
         "Content-Disposition": `attachment; filename="${csv.fileName}"`,
         "Cache-Control": "private, no-store",
         "X-Content-Type-Options": "nosniff",
-        // Обрізаний файл (лише movements, понад MAX_EXPORT_MOVEMENTS рядків) — сторінка показує попередження.
+        // Обрізаний файл (movements і production, понад MAX_EXPORT_MOVEMENTS рядків) — сторінка показує попередження
+        // (truncated / truncatedProduction).
         [EXPORT_HEADERS.rows]: String(csv.rows),
         [EXPORT_HEADERS.truncated]: csv.truncated ? "1" : "0",
         [EXPORT_HEADERS.withCosts]: csv.withCosts ? "1" : "0",

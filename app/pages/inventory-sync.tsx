@@ -882,7 +882,8 @@ function Explanation({ row }: { row: ConflictView }) {
   if (row.returnsPending > 0) lines.push(t("inventorySync.why.returnsPending", { count: row.returnsPending }));
   if (row.returnsAwaiting > 0) lines.push(t("inventorySync.why.returnsAwaiting", { count: row.returnsAwaiting }));
   if (row.shopifyOtherStates > 0) lines.push(t("inventorySync.why.otherStates", { count: row.shopifyOtherStates }));
-  if (row.uncertain && row.returnsPending === 0) lines.push(t("inventorySync.why.uncertain"));
+  if (row.partiallyFulfilled) lines.push(t("inventorySync.why.uncertain"));
+  if (row.linesPending) lines.push(t("inventorySync.why.linesPending"));
   if (row.autoApplyBlocked) lines.push(t("inventorySync.why.autoBlocked"));
   if (lines.length === 0) lines.push(t("inventorySync.why.external"));
   if (row.autoApplyBlockers.length > 0) lines.push(t("inventorySync.why.autoSkipped"));

@@ -77,7 +77,7 @@ const messages: MessageModule = {
     "inventorySync.action.accept.message":
       "Фактичний залишок складу зміниться на {diff} шт. — склад вважатиме правильним значення Shopify. Зміна запишеться в історію руху.",
     "inventorySync.action.accept.warning":
-      "Є невдалі передачі або частково виконані/повернені замовлення — перевірте, чи справді змінився фактичний залишок.",
+      "Є невдалі передачі, частково виконані/повернені замовлення або зміни товарів у Shopify, ще не застосовані в застосунку — перевірте, чи справді змінився фактичний залишок.",
     "inventorySync.action.accept.unsentWarning":
       "Склад має зміни на {delta} шт., яких Shopify не отримав (надходження, брак, коригування, повернення). Прийняття значення Shopify їх скасує. Якщо ці зміни правильні — оберіть «Надіслати склад» (повернення, які Shopify поповнить сам, воно не надсилає).",
     "inventorySync.action.accept.awaitingWarning":
@@ -93,7 +93,7 @@ const messages: MessageModule = {
     "inventorySync.action.pushApp.message":
       "Залишок «доступно» в Shopify зміниться на {delta} шт. (з {shopify} на {to}). Якщо в Shopify значення вже інше, зміна не застосується — застосунок звірить товар заново.",
     "inventorySync.action.pushApp.warning":
-      "Є частково виконані/повернені замовлення — розподіл одиниць неточний, перевірте значення в Shopify після надсилання.",
+      "Є частково виконані/повернені замовлення або зміни товарів у Shopify, ще не застосовані в застосунку — розподіл одиниць неточний, перевірте значення в Shopify після надсилання.",
     "inventorySync.action.pushApp.noScope": "«Надіслати склад» недоступно: немає дозволу write_inventory.",
     "inventorySync.action.pushApp.otherStates":
       "«Надіслати склад» недоступно: уся різниця — {count} шт., які Shopify тримає в станах «брак», «резерв», «безпечний запас» або «контроль якості» (вони вже у фактичному залишку Shopify, тож надсилання додало б їх удруге). Брак — позначте брак на складі; резерв і безпечний запас Shopify тримає свідомо (різниця лишається, доки їх не звільнять у Shopify); контроль якості — завершіть його в Shopify. Потім звірте товар.",
@@ -182,6 +182,8 @@ const messages: MessageModule = {
     "inventorySync.why.inFlight": "Передано перевізнику, але ще не виконано в Shopify: {count} шт.",
     "inventorySync.why.otherStates": "У Shopify {count} шт. позначено як недоступні (брак, резерв, безпечний запас, контроль якості)",
     "inventorySync.why.uncertain": "Є частково виконані замовлення — перевірте вручну",
+    "inventorySync.why.linesPending":
+      "Shopify змінив товари у відкритому замовленні, а застосунок ще не застосував ці зміни (напр., є накладна) — резерв застарів, перевірте вручну",
     "inventorySync.why.autoBlocked": "Автоприйняття не виконано: фактичний залишок став би від'ємним",
     "inventorySync.why.unsent":
       "Склад має {count} змін(и), яких Shopify не отримав (разом {delta} шт.): передачу вимкнено, немає дозволу, зміни до запуску обліку, відхилені невдалі передачі або повернення покупця, які Shopify поповнює сам. «Прийняти Shopify» їх скасує. «Надіслати склад» донесе до Shopify усе, крім повернень, що чекають поповнення в Shopify",
@@ -334,7 +336,7 @@ const messages: MessageModule = {
     "inventorySync.action.accept.message":
       "Warehouse on-hand stock changes by {diff} pcs — the warehouse treats the Shopify value as correct. The change is recorded in the movement history.",
     "inventorySync.action.accept.warning":
-      "There are failed sends or partially fulfilled/returned orders — check that the physical stock really changed.",
+      "There are failed sends, partially fulfilled/returned orders or Shopify item changes the app has not applied yet — check that the physical stock really changed.",
     "inventorySync.action.accept.unsentWarning":
       "The warehouse has changes of {delta} pcs that Shopify did not receive (receipts, defects, adjustments, returns). Accepting the Shopify value cancels them. If these changes are correct, choose “Send warehouse” (it does not send returns that Shopify restocks itself).",
     "inventorySync.action.accept.awaitingWarning":
@@ -350,7 +352,7 @@ const messages: MessageModule = {
     "inventorySync.action.pushApp.message":
       "Shopify “available” changes by {delta} pcs (from {shopify} to {to}). If the value in Shopify has already changed, nothing is applied and the app reconciles the product again.",
     "inventorySync.action.pushApp.warning":
-      "There are partially fulfilled/returned orders — the split of units is uncertain, check the value in Shopify after sending.",
+      "There are partially fulfilled/returned orders or Shopify item changes the app has not applied yet — the split of units is uncertain, check the value in Shopify after sending.",
     "inventorySync.action.pushApp.noScope": "“Send warehouse” is unavailable: the write_inventory permission is missing.",
     "inventorySync.action.pushApp.otherStates":
       "“Send warehouse” is unavailable: the whole difference is {count} pcs that Shopify keeps as “damaged”, “reserved”, “safety stock” or “quality control” (they are already in Shopify's on-hand stock, so sending would add them a second time). Damaged — record a defect in the warehouse; reserved and safety stock are held by Shopify on purpose (the difference stays until they are released in Shopify); quality control — finish it in Shopify. Then reconcile the product.",
@@ -438,6 +440,8 @@ const messages: MessageModule = {
     "inventorySync.why.inFlight": "Handed to the carrier but not yet fulfilled in Shopify: {count} pcs",
     "inventorySync.why.otherStates": "{count} pcs are marked unavailable in Shopify (damaged, reserved, safety stock, quality control)",
     "inventorySync.why.uncertain": "There are partially fulfilled orders — check manually",
+    "inventorySync.why.linesPending":
+      "Shopify changed the items of an open order and the app has not applied the change yet (e.g. it has a waybill) — the reservation is out of date, check manually",
     "inventorySync.why.autoBlocked": "Not accepted automatically: on-hand stock would become negative",
     "inventorySync.why.unsent":
       "The warehouse has {count} change(s) Shopify did not receive (total {delta} pcs): sending is off, the permission is missing, changes before accounting was started, dismissed failed sends or customer returns that Shopify restocks itself. “Accept Shopify” cancels them. “Send warehouse” delivers everything except returns waiting for Shopify's restock",

@@ -1,4 +1,4 @@
-import { count, eq, sql } from "drizzle-orm";
+import { count, eq, inArray, sql } from "drizzle-orm";
 import type { Db, DbOrTx } from "~/db/client.server";
 import {
   auditLog,
@@ -50,7 +50,15 @@ import { DEFAULT_COUNTRY_RULES } from "~/modules/validation/default-country-rule
 import type { ServiceContext } from "~/server/types";
 import { ensureDefaultWarehouse } from "~/modules/inventory/warehouse.server";
 import { syncOrderReservations } from "~/modules/inventory/reservations.server";
-import { DEMO_COLLECTIONS, DEMO_ORDERS, DEMO_PRODUCTS, DEMO_SHIPPER, SIMULATED_ORDER_TEMPLATES, type DemoOrderSeed } from "./demo-data";
+import {
+  DEMO_COLLECTIONS,
+  DEMO_ORDERS,
+  DEMO_PRODUCTS,
+  DEMO_SALES_HISTORY,
+  DEMO_SHIPPER,
+  SIMULATED_ORDER_TEMPLATES,
+  type DemoOrderSeed,
+} from "./demo-data";
 import { isDemoWarehouseSeeded, seedDemoWarehouse, upgradeDemoWarehouseForCollections } from "./demo-warehouse.server";
 
 /** Довідкові дані, потрібні в обох режимах (ідемпотентно; наявні записи не перезаписуються). */
@@ -85,8 +93,11 @@ export const DEMO_SETTINGS: Partial<AllSettings> = {
   testCarrier: { simulation: "none" },
 };
 
-async function insertDemoCatalog(db: Db): Promise<Map<string, { id: string; title: string; variantTitle: string; sku: string; price: string; imageUrl: string }>> {
-  const byKey = new Map<string, { id: string; title: string; variantTitle: string; sku: string; price: string; imageUrl: string }>();
+/** Варіант демо-каталогу за ключем DEMO_PRODUCTS (для позицій вигаданих замовлень). */
+type DemoCatalog = Map<string, { id: string; title: string; variantTitle: string; sku: string; price: string; imageUrl: string }>;
+
+async function insertDemoCatalog(db: Db): Promise<DemoCatalog> {
+  const byKey: DemoCatalog = new Map();
   for (const p of DEMO_PRODUCTS) {
     const [product] = await db
       .insert(products)
@@ -128,11 +139,28 @@ async function insertDemoCatalog(db: Db): Promise<Map<string, { id: string; titl
   return byKey;
 }
 
+/** Демо-каталог з бази (за SKU демо-варіантів): ключ DEMO_PRODUCTS → варіант. Варіанти, яких немає, пропускаються. */
+async function loadDemoCatalog(db: DbOrTx): Promise<DemoCatalog> {
+  const catalogRows = await db
+    .select({ id: productVariants.id, sku: productVariants.sku, title: products.title, variantTitle: productVariants.title, price: productVariants.price, imageUrl: products.imageUrl })
+    .from(productVariants)
+    .innerJoin(products, eq(productVariants.productId, products.id));
+  const catalog: DemoCatalog = new Map();
+  for (const p of DEMO_PRODUCTS) {
+    for (const v of p.variants) {
+      const row = catalogRows.find((r) => r.sku === v.sku);
+      if (row) catalog.set(v.key, { id: row.id, title: row.title, variantTitle: row.variantTitle, sku: v.sku, price: row.price, imageUrl: row.imageUrl ?? "" });
+    }
+  }
+  return catalog;
+}
+
 async function insertOrder(
   db: DbOrTx,
   seed: DemoOrderSeed,
-  catalog: Awaited<ReturnType<typeof insertDemoCatalog>>,
+  catalog: DemoCatalog,
   now: Date,
+  opts: { status?: OrderStatus } = {},
 ): Promise<string> {
   const lines = seed.items.map((i, position) => {
     const v = catalog.get(i.variant);
@@ -146,7 +174,7 @@ async function insertOrder(
     .values({
       source: "demo",
       orderNumber: seed.number,
-      status: "paid",
+      status: opts.status ?? "paid",
       currency: "EUR",
       subtotal,
       shippingPaid: seed.shippingPaid,
@@ -187,7 +215,7 @@ async function insertOrder(
 }
 
 /** Просуває історичне замовлення дозволеними переходами (без обходу автомата станів). */
-async function advanceStatus(db: Db, orderId: string, path: OrderStatus[]): Promise<void> {
+async function advanceStatus(db: DbOrTx, orderId: string, path: OrderStatus[]): Promise<void> {
   const [row] = await db.select({ status: orders.status }).from(orders).where(eq(orders.id, orderId));
   let current = row!.status;
   for (const next of path) {
@@ -207,6 +235,9 @@ export async function seedDemoData(ctx: ServiceContext): Promise<void> {
   const db = ctx.db;
   await seedReferenceData(db, DEMO_SETTINGS);
   if (!(await isDemoSeeded(db))) await seedDemoOrders(ctx);
+  // Етап 5: історія продажів для аналітики (окремо ідемпотентно — і для демо-баз, заповнених до її появи). До складу:
+  // у новій базі відкриття обліку бачить її як відправлену — нічого не резервує й не враховує.
+  await seedDemoSalesHistory(ctx);
   // Етап 5: колекції й склад (окремо ідемпотентно — і для демо-баз, заповнених до етапу 5).
   const collectionsCreated = await seedDemoCollections(db);
   const warehouseSeededBefore = await isDemoWarehouseSeeded(ctx);
@@ -253,6 +284,43 @@ async function seedDemoOrders(ctx: ServiceContext): Promise<void> {
     }
   }
   await writeAudit(db, SYSTEM_ACTOR, "demo.seeded", { type: "system" }, { orders: DEMO_ORDERS.length });
+}
+
+/**
+ * Етап 5: вигадана історія продажів (DEMO_SALES_HISTORY) — оплачені й уже доставлені замовлення за 6–85 днів до
+ * заповнення, для аналітики складу (тренд, швидкість, прогноз вичерпання, рекомендації партій).
+ * Як імпорт історії з Shopify (shopify-sync/mappers.ts initialStatus): виконане раніше замовлення з'являється
+ * «Передано перевізнику» без накладної застосунку й далі лише дозволеним переходом стає «Доставлено». Тож воно:
+ * - не потрапляє в чергу пакування (лише замовлення з накладною до передачі);
+ * - не резервується й не списується: відкриття обліку й резерви пропускають відправлені замовлення
+ *   (opening.server.ts NON_RESERVING_STATUSES), а синхронізація резервів його не викликає (немає накладної, Shopify,
+ *   скасування) — початкові залишки й наявні сценарії (#0996–#0998, #1001–#1013) не змінюються.
+ * Ідемпотентно: якщо хоч одне замовлення історії вже є — нічого не робить. Так демо-база, заповнена до появи історії,
+ * отримує її один раз під час запуску (дати — від цього моменту). Позиції варіантів, яких у базі немає (змінено SKU),
+ * пропускаються. Повертає кількість створених замовлень.
+ */
+export async function seedDemoSalesHistory(ctx: ServiceContext): Promise<number> {
+  const db = ctx.db;
+  const numbers = DEMO_SALES_HISTORY.map((o) => o.number);
+  const [existing] = await db.select({ c: count() }).from(orders).where(inArray(orders.orderNumber, numbers));
+  if (Number(existing?.c ?? 0) > 0) return 0;
+  const catalog = await loadDemoCatalog(db);
+  if (catalog.size === 0) return 0;
+  const now = ctx.now();
+  const created = await db.transaction(async (tx) => {
+    let n = 0;
+    for (const h of DEMO_SALES_HISTORY) {
+      const items = h.items.filter((i) => catalog.has(i.variant));
+      if (items.length === 0) continue;
+      const seed: DemoOrderSeed = { ...h, items, contactPhone: null, hoursAgo: h.daysAgo * 24, scenario: "history: sales history (delivered)" };
+      const orderId = await insertOrder(tx, seed, catalog, now, { status: "handed_to_carrier" });
+      await advanceStatus(tx, orderId, ["delivered"]);
+      n += 1;
+    }
+    return n;
+  });
+  if (created > 0) await writeAudit(db, SYSTEM_ACTOR, "demo.sales_history_seeded", { type: "system" }, { orders: created });
+  return created;
 }
 
 /** Повне скидання демо-даних (лише демо-режим, лише власник — перевіряється у маршруті). */
@@ -315,17 +383,7 @@ export async function insertSimulatedOrder(ctx: ServiceContext): Promise<string>
     .where(sql`${orders.orderNumber} ~ '^#[0-9]+$'`);
   const next = Math.max(Number(maxRow?.max ?? 1013), 1013) + 1;
   const template = SIMULATED_ORDER_TEMPLATES[simulatedCounter++ % SIMULATED_ORDER_TEMPLATES.length]!;
-  const catalogRows = await db
-    .select({ id: productVariants.id, sku: productVariants.sku, title: products.title, variantTitle: productVariants.title, price: productVariants.price, imageUrl: products.imageUrl })
-    .from(productVariants)
-    .innerJoin(products, eq(productVariants.productId, products.id));
-  const catalog = new Map<string, { id: string; title: string; variantTitle: string; sku: string; price: string; imageUrl: string }>();
-  for (const p of DEMO_PRODUCTS) {
-    for (const v of p.variants) {
-      const row = catalogRows.find((r) => r.sku === v.sku);
-      if (row) catalog.set(v.key, { id: row.id, title: row.title, variantTitle: row.variantTitle, sku: v.sku, price: row.price, imageUrl: row.imageUrl ?? "" });
-    }
-  }
+  const catalog = await loadDemoCatalog(db);
   // Як webhook orders/paid: замовлення й резерв складу — в одній транзакції.
   const orderId = await db.transaction(async (tx) => {
     const id = await insertOrder(tx, { ...template, number: `#${next}`, hoursAgo: 0 }, catalog, ctx.now());

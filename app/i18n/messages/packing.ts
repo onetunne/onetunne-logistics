@@ -55,6 +55,8 @@ const messages: MessageModule = {
       "Запаковані замовлення без накладної (накладну скасовано після «Запаковано»): відкрийте замовлення й натисніть «Розпакувати» — воно повернеться в «Очікує перевірки», після цього можна створити нову накладну. Матеріали вдруге не списуються.",
     // Масові дії
     "packing.bulk.label": "Масові дії з чергою",
+    "packing.bulk.summary": "Масові дії",
+    "packing.bulk.summarySelected": "Масові дії · вибрано: {count}",
     "packing.bulk.hint": "Позначте замовлення в таблиці.",
     "packing.bulk.preview": "Можна почати: {startable} · уже в роботі: {inProgress} · запаковано: {packed} · з етикеткою: {withLabel}",
     "packing.bulk.noneSelected": "Не вибрано жодного замовлення.",
@@ -220,7 +222,7 @@ const messages: MessageModule = {
     "packing.parcel.save": "Зберегти посилку",
     "packing.parcel.saved": "Параметри посилки збережено (змінено полів: {count}).",
     "packing.parcel.noChanges": "Параметри посилки не змінилися.",
-    "packing.parcel.mismatch": "Посилка відрізняється від накладної — див. попередження вгорі.",
+    "packing.parcel.mismatch": "Посилка відрізняється від накладної — див. попередження нижче.",
     "packing.parcel.startFirst": "Почніть пакування, щоб вибрати коробку й ввести вагу.",
     "packing.unit.g": "г",
     "packing.unit.mm": "мм",
@@ -469,7 +471,7 @@ const messages: MessageModule = {
     "packing.pickList.reason.packed": "уже запаковано",
     "packing.pickList.reason.not_in_queue": "не в черзі пакування",
     // Етап 5 (G1b, NEW-1): зважена вага, менша за 90 % ваги товарів за Shopify.
-    "packing.parcel.weightIgnoredSaved": "Зважена вага менша за 90 % ваги товарів за даними Shopify — для накладної її не буде використано. Див. попередження вгорі.",
+    "packing.parcel.weightIgnoredSaved": "Зважена вага менша за 90 % ваги товарів за даними Shopify — для накладної її не буде використано. Див. попередження нижче.",
     "packing.parcel.savedIgnoredHint": "Збережено, але для накладної не використовується (менша за вагу товарів за Shopify) — див. попередження вгорі.",
     "packing.weightCheck.title": "Зважену вагу не буде використано для накладної",
     "packing.weightCheck.body": "Зважена вага посилки {manual} менша за 90 % ваги товарів за даними Shopify ({goods}; без підтвердження накладна приймає щонайменше {min}). Нова або переоформлена накладна надішле перевізнику розрахункову вагу, тож переоформлення розбіжності не усуне.",
@@ -544,6 +546,8 @@ const messages: MessageModule = {
       "Packed orders without a waybill (the waybill was cancelled after “Packed”): open the order and press “Unpack” — it returns to “Awaiting review”, then a new waybill can be created. Materials are not written off twice.",
     // Bulk actions
     "packing.bulk.label": "Bulk actions for the queue",
+    "packing.bulk.summary": "Bulk actions",
+    "packing.bulk.summarySelected": "Bulk actions · selected: {count}",
     "packing.bulk.hint": "Select orders in the table.",
     "packing.bulk.preview": "Can start: {startable} · already in progress: {inProgress} · packed: {packed} · with label: {withLabel}",
     "packing.bulk.noneSelected": "No orders selected.",
@@ -709,7 +713,7 @@ const messages: MessageModule = {
     "packing.parcel.save": "Save parcel",
     "packing.parcel.saved": "Parcel details saved (fields changed: {count}).",
     "packing.parcel.noChanges": "Parcel details did not change.",
-    "packing.parcel.mismatch": "The parcel differs from the waybill — see the warning above.",
+    "packing.parcel.mismatch": "The parcel differs from the waybill — see the warning below.",
     "packing.parcel.startFirst": "Start packing to choose a box and enter the weight.",
     "packing.unit.g": "g",
     "packing.unit.mm": "mm",
@@ -958,7 +962,7 @@ const messages: MessageModule = {
     "packing.pickList.reason.packed": "already packed",
     "packing.pickList.reason.not_in_queue": "not in the packing queue",
     // Stage 5 (G1b, NEW-1): weighed weight below 90% of the Shopify goods weight.
-    "packing.parcel.weightIgnoredSaved": "The weighed weight is below 90% of the goods weight in Shopify — it will not be used for the waybill. See the warning above.",
+    "packing.parcel.weightIgnoredSaved": "The weighed weight is below 90% of the goods weight in Shopify — it will not be used for the waybill. See the warning below.",
     "packing.parcel.savedIgnoredHint": "Saved, but not used for the waybill (below the goods weight in Shopify) — see the warning above.",
     "packing.weightCheck.title": "The weighed weight will not be used for the waybill",
     "packing.weightCheck.body": "The weighed parcel weight {manual} is below 90% of the goods weight in Shopify ({goods}; without confirmation the waybill accepts at least {min}). A new or re-issued waybill sends the calculated weight to the carrier, so re-issuing does not remove the difference.",

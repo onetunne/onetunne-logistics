@@ -24,6 +24,7 @@ import production from "./messages/production";
 import packaging from "./messages/packaging";
 import packing from "./messages/packing";
 import warehouseAnalytics from "./messages/warehouse-analytics";
+import warehouseInsights from "./messages/warehouse-insights";
 import staff from "./messages/staff";
 
 export * from "./types";
@@ -53,6 +54,7 @@ export const MESSAGE_MODULES: Record<string, MessageModule> = {
   packaging,
   packing,
   warehouseAnalytics,
+  warehouseInsights,
   staff,
 };
 

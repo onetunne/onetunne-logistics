@@ -17,6 +17,7 @@ import { hasKey, useLocale, useT, type TFunction } from "~/i18n";
 import { formatMoney, formatNumber, formatWeight } from "~/lib/format";
 import { BOX_KINDS } from "~/modules/packaging/box-selection";
 import {
+  MATERIAL_CONSUMPTION_DAYS,
   applyMaterialStock,
   createMaterial,
   getMaterial,
@@ -121,7 +122,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       activity: filters.activity,
       statuses: filters.status === "all" ? undefined : [filters.status as MaterialStockStatus],
     },
-    { includeCosts },
+    { includeCosts, now: ctx.now() },
   );
   const editParam = params.get("edit");
   let editing: MaterialView | null = null;
@@ -129,7 +130,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
   if (canEdit && editParam === "new") creating = true;
   else if (canEdit && editParam && UUID_RE.test(editParam)) {
     try {
-      editing = await getMaterial(ctx.db, editParam, { includeCosts });
+      editing = await getMaterial(ctx.db, editParam, { includeCosts, now: ctx.now() });
     } catch {
       editing = null;
     }
@@ -154,6 +155,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
      */
     operationId: globalThis.crypto.randomUUID(),
     defaultThreshold: (await getSetting(ctx.db, "warehouse")).lowStockThreshold,
+    /** Період «Витрачено за … днів» (materials.server.ts — лише сервер, тому передається даними). */
+    consumptionDays: MATERIAL_CONSUMPTION_DAYS,
   };
 }
 
@@ -383,6 +386,28 @@ export default function MaterialsPage() {
           ) : null}
         </Stack>
       ),
+    },
+    {
+      // Витрата при пакуванні за 30 днів і на скільки днів вистачить залишку (materials.server.ts materialDaysLeft).
+      key: "usage",
+      header: t("warehouseInsights.material.consumed", { days: data.consumptionDays }),
+      render: (r) =>
+        r.consumedRecent > 0 ? (
+          <Stack as="span" gap={0}>
+            <Text as="span" numeric>
+              {formatNumber(r.consumedRecent, locale)} {unitLabel(r.unit)}
+            </Text>
+            <Text as="span" variant="caption" tone={r.daysLeft === 0 ? "critical" : "subdued"}>
+              {r.daysLeft === 0
+                ? t("warehouseInsights.material.runOut")
+                : t("warehouseInsights.material.daysLeftValue", { days: formatNumber(r.daysLeft ?? 0, locale) })}
+            </Text>
+          </Stack>
+        ) : (
+          <Text as="span" variant="body-sm" tone="subdued">
+            {t("warehouseInsights.material.noUsage")}
+          </Text>
+        ),
     },
     {
       key: "threshold",

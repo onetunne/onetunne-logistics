@@ -162,6 +162,9 @@ const messages: MessageModule = {
     "warehouseAnalytics.export.dataset.stock": "Залишки",
     "warehouseAnalytics.export.dataset.movements": "Рух за період",
     "warehouseAnalytics.export.dataset.sales": "Продажі за варіантами",
+    "warehouseAnalytics.export.dataset.production": "Партії виробництва",
+    "warehouseAnalytics.export.productionHelp":
+      "«Партії виробництва» (лише власник) — рядок на позицію партії: номер, стан, дати (план, запуск, надходження, закриття), модель, колір, SKU, замовлено, отримано якісних і браку, ціна одиниці, додаткові витрати й собівартість якісної одиниці. Фільтри товару, моделі й кольору діють, період — ні.",
     "warehouseAnalytics.export.help":
       "UTF-8; десятковий знак — за роздільником (для Excel — кома, для програм — крапка), без пробілів між розрядами; дати ISO (РРРР-ММ-ДД); назви колонок — англійською (стабільні для програм). Рух і продажі — за вибраним періодом і фільтрами.",
     "warehouseAnalytics.export.costsOwner": "Файли містять собівартість — не пересилайте їх стороннім.",
@@ -176,6 +179,8 @@ const messages: MessageModule = {
     "warehouseAnalytics.export.truncated.title": "Файл неповний",
     "warehouseAnalytics.export.truncated":
       "У файлі лише перші {max} рядків руху за період (найстаріші) — решту не включено. Зменште період, щоб отримати повну історію.",
+    "warehouseAnalytics.export.truncatedProduction":
+      "Позицій партій у файлі — не більше {max} (найстаріших партій), решту не включено. Оберіть товар, модель або колір, щоб отримати повний перелік.",
 
     // Команди складу (Telegram / асистент)
     "warehouseCommands.name.stock_summary": "Зведення складу",
@@ -186,6 +191,8 @@ const messages: MessageModule = {
     "warehouseCommands.name.receive_stock": "Оприбуткувати надходження",
     "warehouseCommands.name.mark_defective": "Позначити брак",
     "warehouseCommands.name.start_packing": "Почати пакування",
+    "warehouseCommands.name.receive_production": "Надходження з виробництва",
+    "warehouseCommands.name.material_receive": "Надходження матеріалів",
     "warehouseCommands.summary":
       "Склад: {variants, plural, one {# позиція} few {# позиції} many {# позицій} other {# позиції}}. Доступно {available} шт. (на складі {onHand}, у резерві {reserved}), брак {defective}, у виробництві {inProduction}.",
     "warehouseCommands.summary.alerts": "Попередження: мало — {low}, немає — {out}, продано більше, ніж є — {oversold}, від'ємний залишок — {negative}.",
@@ -209,6 +216,19 @@ const messages: MessageModule = {
     "warehouseCommands.confirm.change": "Доступно: {before} → {after}",
     "warehouseCommands.confirm.insufficient": "Увага: на складі лише {onHand} шт. — операцію буде відхилено.",
     "warehouseCommands.confirm.startPacking": "Почати пакування замовлення {order} ({units} шт., статус: {status})?",
+    "warehouseCommands.confirm.receiveProduction": "Оприбуткувати надходження з партії {number}: якісних {good}, браку {defective}?",
+    "warehouseCommands.confirm.receiveProduction.line": "• {item}: якісних {good}, браку {defective} (лишалося у виробництві {remaining})",
+    "warehouseCommands.confirm.batchStatus": "Стан партії: {before} → {after}",
+    "warehouseCommands.confirm.overReceived":
+      "Понад замовлене: {count, plural, one {# одиниця} few {# одиниці} many {# одиниць} other {# одиниці}} — одразу на склад.",
+    "warehouseCommands.confirm.materialReceive": "Оприбуткувати матеріал {item}: +{quantity} {unit}?",
+    "warehouseCommands.confirm.materialChange": "На складі: {before} → {after}",
+    "warehouseCommands.production.blocked.status": "Оприбуткувати не можна: партія в стані «{status}».",
+    "warehouseCommands.production.blocked.nothing_remaining": "Нічого оприбутковувати: у партії не лишилося одиниць у виробництві.",
+    "warehouseCommands.production.blocked.over_receipt":
+      "Більше, ніж лишилося у виробництві, — підтвердження буде відхилено. Надлишок понад замовлене — лише з явним дозволом.",
+    "warehouseCommands.receivedProduction": "Оприбутковано з партії {number}: якісних {good}, браку {defective}. Стан партії: {status}.",
+    "warehouseCommands.materialReceived": "Оприбутковано матеріал {item}: +{quantity} {unit}. На складі: {onHand}.",
     "warehouseCommands.received": "Оприбутковано: {item} +{quantity} (брак {defective}). Доступно: {available}.",
     "warehouseCommands.marked": "Позначено брак: {item} — {quantity} шт. Доступно: {available}.",
     "warehouseCommands.replay": "Цю операцію вже виконано раніше — залишок не змінено вдруге.",
@@ -224,6 +244,13 @@ const messages: MessageModule = {
     "warehouseCommands.error.itemNotFound": "товар із таким SKU або штрихкодом не знайдено.",
     "warehouseCommands.error.itemAmbiguous": "знайдено кілька товарів ({count}) — уточніть SKU або штрихкод.",
     "warehouseCommands.error.operationReused": "цей ідентифікатор операції вже використано для іншої дії — почніть нову операцію.",
+    "warehouseCommands.error.batchLineNotFound": "у партії немає товару {item}.",
+    "warehouseCommands.error.batchLineAmbiguous": "у партії кілька позицій для {item} — уточніть SKU або штрихкод.",
+    "warehouseCommands.error.batchLineDuplicate": "товар {item} вказано двічі.",
+    "warehouseCommands.error.materialNotFound": "матеріал із таким кодом не знайдено.",
+    "warehouseCommands.error.materialAmbiguous": "знайдено кілька матеріалів ({count}) — уточніть код.",
+    "warehouseCommands.error.batchNotFound": "партію з таким номером не знайдено — перевірте номер (наприклад, PB-2026-0001).",
+    "warehouseCommands.error.orderNotFound": "замовлення з таким номером не знайдено — перевірте номер.",
   },
   en: {
     "warehouseAnalytics.nav": "Analytics",
@@ -370,6 +397,9 @@ const messages: MessageModule = {
     "warehouseAnalytics.export.dataset.stock": "Stock",
     "warehouseAnalytics.export.dataset.movements": "Movements in period",
     "warehouseAnalytics.export.dataset.sales": "Sales by variant",
+    "warehouseAnalytics.export.dataset.production": "Production batches",
+    "warehouseAnalytics.export.productionHelp":
+      "“Production batches” (owner only) — one row per batch line: number, status, dates (planned, started, received, closed), model, colour, SKU, ordered, good and defective received, unit cost, extra costs and cost per good unit. The product, model and colour filters apply, the period does not.",
     "warehouseAnalytics.export.help":
       "UTF-8; the decimal mark follows the separator (a comma for Excel, a dot for software), no digit grouping; ISO dates (YYYY-MM-DD); column names in English (stable for software). Movements and sales follow the selected period and filters.",
     "warehouseAnalytics.export.costsOwner": "The files contain unit costs — do not share them with third parties.",
@@ -384,6 +414,8 @@ const messages: MessageModule = {
     "warehouseAnalytics.export.truncated.title": "The file is incomplete",
     "warehouseAnalytics.export.truncated":
       "The file contains only the first {max} movement rows of the period (the oldest) — the rest are not included. Shorten the period to get the full history.",
+    "warehouseAnalytics.export.truncatedProduction":
+      "The file contains only the first {max} batch lines (the oldest batches) — the rest are not included. Choose a product, model or colour to get the full list.",
 
     "warehouseCommands.name.stock_summary": "Stock summary",
     "warehouseCommands.name.low_stock": "Low stock",
@@ -393,6 +425,8 @@ const messages: MessageModule = {
     "warehouseCommands.name.receive_stock": "Receive stock",
     "warehouseCommands.name.mark_defective": "Mark defective",
     "warehouseCommands.name.start_packing": "Start packing",
+    "warehouseCommands.name.receive_production": "Receive from production",
+    "warehouseCommands.name.material_receive": "Receive materials",
     "warehouseCommands.summary":
       "Warehouse: {variants, plural, one {# item} other {# items}}. Available {available, plural, one {# unit} other {# units}} (on hand {onHand}, reserved {reserved}), defective {defective}, in production {inProduction}.",
     "warehouseCommands.summary.alerts": "Alerts: low — {low}, out — {out}, oversold — {oversold}, negative stock — {negative}.",
@@ -416,6 +450,18 @@ const messages: MessageModule = {
     "warehouseCommands.confirm.change": "Available: {before} → {after}",
     "warehouseCommands.confirm.insufficient": "Warning: only {onHand, plural, one {# unit} other {# units}} on hand — the operation will be rejected.",
     "warehouseCommands.confirm.startPacking": "Start packing order {order} ({units, plural, one {# unit} other {# units}}, status: {status})?",
+    "warehouseCommands.confirm.receiveProduction": "Receive from batch {number}: good {good}, defective {defective}?",
+    "warehouseCommands.confirm.receiveProduction.line": "• {item}: good {good}, defective {defective} (left in production {remaining})",
+    "warehouseCommands.confirm.batchStatus": "Batch status: {before} → {after}",
+    "warehouseCommands.confirm.overReceived": "Over the ordered quantity: {count, plural, one {# unit} other {# units}} — straight to stock.",
+    "warehouseCommands.confirm.materialReceive": "Receive material {item}: +{quantity} {unit}?",
+    "warehouseCommands.confirm.materialChange": "On hand: {before} → {after}",
+    "warehouseCommands.production.blocked.status": "Cannot receive: the batch is «{status}».",
+    "warehouseCommands.production.blocked.nothing_remaining": "Nothing to receive: no units of the batch are left in production.",
+    "warehouseCommands.production.blocked.over_receipt":
+      "More than is left in production — the confirmation will be rejected. Units over the ordered quantity need an explicit permission.",
+    "warehouseCommands.receivedProduction": "Received from batch {number}: good {good}, defective {defective}. Batch status: {status}.",
+    "warehouseCommands.materialReceived": "Received material {item}: +{quantity} {unit}. On hand: {onHand}.",
     "warehouseCommands.received": "Received: {item} +{quantity} (defective {defective}). Available: {available}.",
     "warehouseCommands.marked": "Marked defective: {item} — {quantity, plural, one {# unit} other {# units}}. Available: {available}.",
     "warehouseCommands.replay": "This operation was already done — stock was not changed twice.",
@@ -431,6 +477,13 @@ const messages: MessageModule = {
     "warehouseCommands.error.itemNotFound": "no product with this SKU or barcode.",
     "warehouseCommands.error.itemAmbiguous": "several products found ({count}) — specify the SKU or barcode.",
     "warehouseCommands.error.operationReused": "this operation id was already used for a different action — start a new operation.",
+    "warehouseCommands.error.batchLineNotFound": "the batch has no item {item}.",
+    "warehouseCommands.error.batchLineAmbiguous": "the batch has several lines for {item} — specify the SKU or barcode.",
+    "warehouseCommands.error.batchLineDuplicate": "item {item} is listed twice.",
+    "warehouseCommands.error.materialNotFound": "no packaging material with this code.",
+    "warehouseCommands.error.materialAmbiguous": "several materials found ({count}) — specify the code.",
+    "warehouseCommands.error.batchNotFound": "no production batch with this number — check the number (e.g. PB-2026-0001).",
+    "warehouseCommands.error.orderNotFound": "no order with this number — check the number.",
   },
 };
 

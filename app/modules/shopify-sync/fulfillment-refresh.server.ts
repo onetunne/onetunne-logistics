@@ -27,6 +27,7 @@ import { and, asc, inArray, isNotNull, sql } from "drizzle-orm";
 import type { DbOrTx } from "~/db/client.server";
 import { orders, shipments } from "~/db/schema";
 import { SHIPPED_STATUSES } from "~/domain/order-status";
+import { NOT_FULFILLED_IN_SHOPIFY_SQL } from "~/modules/inventory-sync/reconcile.server";
 import { enqueueJob } from "~/modules/jobs/queue.server";
 import { JOB, orderRefreshDedupeKey } from "./jobs";
 import { currentShop } from "./sync.server";
@@ -73,7 +74,7 @@ export type FulfillmentRefreshOutcome =
 
 /**
  * Замовлення із застарілим статусом виконання: відправлені (SHIPPED_STATUSES), пов'язані з Shopify, у базі «в дорозі»
- * (inFlightInDb — те саме правило, що notFulfilled в orderTiming); передані перевізнику (остання накладна з
+ * (NOT_FULFILLED_IN_SHOPIFY_SQL з modules/inventory-sync/reconcile.server.ts — те саме правило, що в orderTiming); передані перевізнику (остання накладна з
  * handed_over_at; без неї — дата замовлення) понад STALE_FULFILLMENT_AFTER_MS тому; не перевірені за останні FULFILLMENT_RECHECK_MS; у вікні читання замовлень.
  */
 export async function staleFulfillmentOrders(
@@ -84,9 +85,8 @@ export async function staleFulfillmentOrders(
   const recheckBefore = new Date(opts.now.getTime() - FULFILLMENT_RECHECK_MS).toISOString();
   const windowStart = new Date(opts.now.getTime() - ORDERS_DEFAULT_READ_WINDOW_MS).toISOString();
   const handedOver = sql`coalesce((select max(${shipments.handedOverAt}) from ${shipments} where ${shipments.orderId} = ${orders.id}), ${orders.placedAt})`;
-  // Як notFulfilled у modules/inventory-sync/reconcile.server.ts (orderTiming): shopify_shippable_fulfilled null — як true.
-  const fs = sql`coalesce(${orders.fulfillmentStatus}, '')`;
-  const inFlightInDb = sql`not (${fs} in ('fulfilled', 'restocked') or (${fs} = 'partially_fulfilled' and coalesce(${orders.shopifyShippableFulfilled}, true)))`;
+  // Те саме правило, що й «в дорозі» у звірці складу (orderTiming): спільний предикат, не копія.
+  const inFlightInDb = NOT_FULFILLED_IN_SHOPIFY_SQL;
   const rows = await db
     .select({ id: orders.id, shopifyOrderId: orders.shopifyOrderId })
     .from(orders)

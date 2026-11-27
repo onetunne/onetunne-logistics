@@ -112,6 +112,10 @@ export async function reissueWaybill(ctx: ServiceContext, shipmentId: string, op
   if (shipment.status !== "created" || !shipment.waybillNumber) throw new DomainError("waybill.notCancellable", 409);
   if (shipment.handedOverAt) throw new DomainError("waybill.alreadyHandedOver", 409);
   if (!REISSUE_ORDER_STATUSES.includes(order.status)) {
+    // Накладну й замовлення прочитано окремо: паралельний запит міг скасувати цю накладну між читаннями (скасування
+    // й «Очікує перевірки» — одна транзакція). Тоді це «паралельний запит», а не відмова за статусом замовлення.
+    const [latest] = await ctx.db.select().from(shipments).where(eq(shipments.id, shipmentId));
+    if (latest && latest.status === "cancelled") return { kind: "concurrent", active: await findActiveShipment(ctx.db, order.id) };
     throw new DomainError("waybill.reissueNotAllowed", 409, { status: order.status });
   }
 

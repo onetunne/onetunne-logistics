@@ -22,6 +22,7 @@ const PRINT_CSS = `
 .ot-handover__sheet { margin-bottom: var(--ot-space-5); }
 .ot-handover__check { display: inline-block; width: 14px; height: 14px; border: 1.5px solid currentColor; border-radius: 2px; }
 .ot-handover__signatures { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--ot-space-4); margin-top: var(--ot-space-5); }
+.ot-handover__sign { display: flex; flex-direction: column; justify-content: flex-end; }
 .ot-handover__line { border-bottom: 1px solid currentColor; min-height: 28px; }
 @media print {
   .ot-handover__sheet { margin: 0; break-after: page; page-break-after: always; }
@@ -175,16 +176,17 @@ function GroupSheet({ group, printedAt }: { group: HandoverGroup; printedAt: Dat
           </tbody>
         </table>
       </div>
+      {/* Клітинка вирівнює лінію за низом: підписи різної довжини (перенос у вузькій колонці) — лінії на одному рівні. */}
       <div className="ot-handover__signatures">
-        <div>
+        <div className="ot-handover__sign">
           <p className="ot-invoice__label">{t("packing.handover.sign.handedBy")}</p>
           <div className="ot-handover__line" />
         </div>
-        <div>
+        <div className="ot-handover__sign">
           <p className="ot-invoice__label">{t("packing.handover.sign.receivedBy")}</p>
           <div className="ot-handover__line" />
         </div>
-        <div>
+        <div className="ot-handover__sign">
           <p className="ot-invoice__label">{t("packing.handover.sign.dateTime")}</p>
           <div className="ot-handover__line" />
         </div>

@@ -555,7 +555,12 @@ function Qty({ value, strong, tone }: { value: number; strong?: boolean; tone?: 
   );
 }
 
-function ShopifyValue({ row }: { row: RowView }) {
+/**
+ * Значення Shopify «доступно» і позначка «розбіжність». live = false (демо): Shopify не оновлюється — після операцій
+ * складу значення лишаються вигаданими демо-даними, тож розбіжність не позначається (на неї не можна відреагувати:
+ * «Звірка з Shopify» в демо недоступна); замість неї — нейтральна підказка.
+ */
+function ShopifyValue({ row, live }: { row: RowView; live: boolean }) {
   const t = useT();
   const locale = useLocale();
   if (row.shopifyAvailable === null) {
@@ -565,10 +570,12 @@ function ShopifyValue({ row }: { row: RowView }) {
       </Text>
     );
   }
-  const differs = row.tracking === "opened" && row.shopifyAvailable !== row.available;
-  const title = row.shopifySyncedAt
-    ? t("warehouse.stock.shopify.asOf", { time: formatDateTime(row.shopifySyncedAt, locale) })
-    : t("warehouse.stock.shopify.hint");
+  const differs = live && row.tracking === "opened" && row.shopifyAvailable !== row.available;
+  const title = !live
+    ? t("warehouse.stock.shopify.demoHint")
+    : row.shopifySyncedAt
+      ? t("warehouse.stock.shopify.asOf", { time: formatDateTime(row.shopifySyncedAt, locale) })
+      : t("warehouse.stock.shopify.hint");
   return (
     <Stack as="span" direction="horizontal" gap={1} align="center" justify="end">
       <span title={title}>
@@ -680,8 +687,9 @@ function StockList({ data, actionData }: { data: LoaderData; actionData: Warehou
         </Stack>
       ),
     },
-    // На телефоні теж (працівники складу користуються телефонами): значення Shopify й позначка «розбіжність».
-    { key: "shopify", header: t("warehouse.stock.col.shopify"), align: "end", render: (r) => <ShopifyValue row={r} /> },
+    // На телефоні теж (працівники складу користуються телефонами): значення Shopify й позначка «розбіжність» (лише в
+    // робочому режимі; у демо Shopify не оновлюється — нейтральна підказка).
+    { key: "shopify", header: t("warehouse.stock.col.shopify"), align: "end", render: (r) => <ShopifyValue row={r} live={data.isProduction} /> },
   ];
 
   const activeFormFilters = [filters.q, filters.model, filters.color, filters.product, filters.tracking, filters.inactive].filter(
@@ -931,7 +939,7 @@ function StockList({ data, actionData }: { data: LoaderData; actionData: Warehou
             {t("warehouse.stock.legend")}
           </Text>
           <Text variant="caption" tone="subdued">
-            {t("warehouse.stock.shopify.legend")}
+            {t(data.isProduction ? "warehouse.stock.shopify.legend" : "warehouse.stock.shopify.demoLegend")}
           </Text>
         </Stack>
 

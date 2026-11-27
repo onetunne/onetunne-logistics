@@ -560,6 +560,61 @@ export async function computeWarehouseAnalytics(db: DbOrTx, opts: ComputeAnalyti
   };
 }
 
+// ---------------------------------------------------------------------------
+// Короткий підсумок рекомендацій (головна сторінка)
+// ---------------------------------------------------------------------------
+
+export interface RecommendationSummary {
+  /** Позицій під ризиком (немає доступних при попиті або закінчаться раніше, ніж встигне нова партія). */
+  atRisk: number;
+  /** З них уже немає доступних. */
+  outOfStock: number;
+  /** Позицій, для яких рекомендовано нову партію (quantity > 0). */
+  recommendations: number;
+  /** Рекомендовано одиниць разом. */
+  recommendedUnits: number;
+}
+
+/**
+ * Лічильники ризиків і рекомендацій партій — ті самі правила й числа, що kpi.atRisk / kpi.recommendations у
+ * computeWarehouseAnalytics (без фільтрів), але дешевше: лише ВІДКРИТІ позиції активних товарів (прогноз робиться
+ * лише для них), без продажів за період і без метаданих архівних товарів. Без собівартості й даних покупців —
+ * лише кількості (для головної: картка «Нові партії» для production.manage).
+ */
+export async function loadRecommendationSummary(db: DbOrTx, today: string): Promise<RecommendationSummary> {
+  const warehouseSettings = await getSetting(db, "warehouse");
+  const settings: ForecastSettings = {
+    productionLeadDays: warehouseSettings.productionLeadDays,
+    targetCoverDays: warehouseSettings.targetCoverDays,
+    batchRounding: warehouseSettings.batchRounding,
+  };
+  const opened: StockRow[] = [];
+  for (let offset = 0; offset < MAX_ANALYTICS_VARIANTS; offset += 500) {
+    const page = await listStock(db, { tracking: ["opened"] }, { sort: "product", limit: 500, offset });
+    opened.push(...page.rows);
+    if (page.rows.length < 500 || opened.length >= page.total) break;
+  }
+  const summary: RecommendationSummary = { atRisk: 0, outOfStock: 0, recommendations: 0, recommendedUnits: 0 };
+  if (opened.length === 0) return summary;
+  const [velocityUnits, production] = await Promise.all([loadVelocityUnits(db, today), openProductionByVariant(db)]);
+  const planned = new Map(production.map((p) => [p.variantId, p.planned]));
+  for (const s of opened) {
+    const vu = velocityUnits.get(s.variantId) ?? { units30: 0, units90: 0 };
+    const f = forecastItem(
+      { ...vu, available: s.available, inProduction: s.inProduction, planned: planned.get(s.variantId) ?? 0 },
+      settings,
+      today,
+    );
+    if (f.risk !== "none") summary.atRisk += 1;
+    if (f.risk === "out") summary.outOfStock += 1;
+    if (f.recommendation.quantity > 0) {
+      summary.recommendations += 1;
+      summary.recommendedUnits += f.recommendation.quantity;
+    }
+  }
+  return summary;
+}
+
 /**
  * Зведення від імені актора: warehouse.view обов'язково (ForbiddenError), собівартість — лише finance.view.
  * Період за замовчуванням — 30 днів до сьогодні (Київ).

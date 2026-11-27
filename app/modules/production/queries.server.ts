@@ -133,7 +133,8 @@ function lineMatch(db: DbOrTx, cond: SQL | undefined): SQL {
   );
 }
 
-function overdueCondition(today: string): SQL {
+/** Прострочені: планова дата < сьогодні (за Києвом), партію ще не отримано повністю (як isOverdue у calc.ts). */
+export function overdueCondition(today: string): SQL {
   return and(
     isNotNull(productionBatches.plannedReadyDate),
     lt(productionBatches.plannedReadyDate, today),

@@ -880,7 +880,8 @@ describe("rendering", () => {
     const route = { path: "warehouse", loader: stockPage.loader, action: stockPage.action, Component: stockPage.default };
     const html = await render("/demo/warehouse", route);
     expect(html).not.toContain("ot-dt__cell--hide-mobile");
-    expect(html).toContain(esc(uk("warehouse.stock.shopify.legend")));
+    // Демо: Shopify не оновлюється — демо-легенда (робочий режим — tests/pages/warehouse-demo-sync.test.ts).
+    expect(html).toContain(esc(uk("warehouse.stock.shopify.demoLegend")));
   });
 
   it("receive form offers 'send this return to Shopify' only when changes of this item go to Shopify", async () => {

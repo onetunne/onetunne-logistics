@@ -24,6 +24,9 @@
  * - у знімку, але замовлення вже виконане (частково) в Shopify поза застосунком (orders.fulfillment_status): одиниць
  *   немає ні у знімку, ні фізично (або розподіл часткового виконання невідомий) → позиція НЕ резервується й не
  *   коригується; «Відправлено поза застосунком» її теж не списує (історичне). Так само робить initializeInventory.
+ *   Часткове виконання ЛИШЕ позицій без доставки (orders.shopify_shippable_fulfilled = false: подарункова картка,
+ *   цифровий товар) — не «виконано»: фізичні позиції ще committed у Shopify й на складі, тож резервуються
+ *   (isOrderFulfilledInShopify, як у звірці складу й «Відправлено поза застосунком»).
  *   Обмеження (документовано): для частково виконаного до знімка замовлення невиконані одиниці теж не рахуються в
  *   on_hand (доступно — точне, on_hand занижено на них до відправлення).
  * Невідкритий товар (Shopify не відстежує залишок або ще не ініціалізовано) не резервується й не списується —
@@ -33,7 +36,7 @@
 import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import type { DbOrTx, Tx } from "~/db/client.server";
 import { inventoryBalances, orderLineItems, orders, stockItems, stockReservations, type ReservationStatus } from "~/db/schema";
-import { isFulfilledInShopify, isShipped, type OrderStatus } from "~/domain/order-status";
+import { isOrderFulfilledInShopify, isShipped, type OrderStatus } from "~/domain/order-status";
 import { NotFoundError } from "~/lib/errors";
 import { inventoryKeys } from "./keys";
 import { applyMovements, type MovementActor, type MovementInput } from "./ledger.server";
@@ -298,7 +301,13 @@ export function lineInSnapshot(placedAt: Date, shopifyAddedAt: Date | null, snap
 
 export async function syncOrderReservations(tx: Tx, orderId: string, actor: MovementActor): Promise<ReservationSyncResult> {
   const [order] = await tx
-    .select({ id: orders.id, status: orders.status, placedAt: orders.placedAt, fulfillmentStatus: orders.fulfillmentStatus })
+    .select({
+      id: orders.id,
+      status: orders.status,
+      placedAt: orders.placedAt,
+      fulfillmentStatus: orders.fulfillmentStatus,
+      shopifyShippableFulfilled: orders.shopifyShippableFulfilled,
+    })
     .from(orders)
     .where(eq(orders.id, orderId))
     .for("no key update");
@@ -324,8 +333,9 @@ export async function syncOrderReservations(tx: Tx, orderId: string, actor: Move
     .where(eq(orderLineItems.orderId, orderId));
   const reservedLines = new Set(reservations.map((r) => r.orderLineItemId));
   // Виконане в Shopify поза застосунком (застосунок ще не відправив): позиції зі знімка, які ще не резервувалися, —
-  // історичні (див. вгорі файлу).
-  const fulfilledOutside = mode !== "none" && !isShipped(order.status) && isFulfilledInShopify(order.fulfillmentStatus);
+  // історичні (див. вгорі файлу). Часткове виконання лише позицій без доставки (shopify_shippable_fulfilled = false)
+  // фізичних позицій не торкається — вони резервуються (те саме правило, що у відкритті обліку, opening.server.ts).
+  const fulfilledOutside = mode !== "none" && !isShipped(order.status) && isOrderFulfilledInShopify(order);
   const opened = await loadOpenedVariants(
     tx,
     warehouse.id,

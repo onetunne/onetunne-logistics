@@ -147,6 +147,15 @@ const messages: MessageModule = {
     "dashboard.stage5.production.overdue": "Прострочено: {count}",
     "dashboard.stage5.production.dueSoon": "Готовність у найближчі {days} дн.: {count}",
     "dashboard.stage5.production.open": "Відкрити партії",
+    "dashboard.stage5.recommendations.title": "Нові партії",
+    "dashboard.stage5.recommendations.hint": "Прогноз за швидкістю продажів і терміном виробництва (позиції з відкритим обліком).",
+    "dashboard.stage5.recommendations.atRisk": "Під ризиком закінчення",
+    "dashboard.stage5.recommendations.needBatch": "Потребують нової партії",
+    "dashboard.stage5.recommendations.outOfStock": "Уже немає в наявності: {count}",
+    "dashboard.stage5.recommendations.units":
+      "Рекомендовано виготовити: {units, plural, one {# одиницю} few {# одиниці} many {# одиниць} other {# одиниці}}",
+    "dashboard.stage5.recommendations.none": "Ризиків закінчення й рекомендацій нових партій немає.",
+    "dashboard.stage5.recommendations.open": "Відкрити аналітику",
   },
   en: {
     "dashboard.subtitle": "Stage 1: paid order → data check → fix problems → waybill (not yet a shipment).",
@@ -281,6 +290,14 @@ const messages: MessageModule = {
     "dashboard.stage5.production.overdue": "Overdue: {count}",
     "dashboard.stage5.production.dueSoon": "Ready within {days, plural, one {# day} other {# days}}: {count}",
     "dashboard.stage5.production.open": "Open batches",
+    "dashboard.stage5.recommendations.title": "Next batches",
+    "dashboard.stage5.recommendations.hint": "Forecast from sales velocity and production lead time (items with opened tracking).",
+    "dashboard.stage5.recommendations.atRisk": "At risk of running out",
+    "dashboard.stage5.recommendations.needBatch": "Need a new batch",
+    "dashboard.stage5.recommendations.outOfStock": "Already out of stock: {count}",
+    "dashboard.stage5.recommendations.units": "Recommended to produce: {units, plural, one {# unit} other {# units}}",
+    "dashboard.stage5.recommendations.none": "No stock-out risks or new batch recommendations.",
+    "dashboard.stage5.recommendations.open": "Open analytics",
   },
 };
 

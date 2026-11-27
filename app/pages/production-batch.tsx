@@ -391,7 +391,7 @@ function BatchView({ data, detail }: { data: Data; detail: Detail }) {
       key: "defective",
       header: t("production.lines.defective"),
       align: "end",
-      render: (l) => (l.defective > 0 ? t("production.defectValue", { count: formatNumber(l.defective, locale), rate: l.defectRate ?? 0 }) : "0"),
+      render: (l) => (l.defective > 0 ? t("production.defectValue", { count: formatNumber(l.defective, locale), rate: formatNumber(l.defectRate ?? 0, locale) }) : "0"),
     },
   ];
   // Запланована партія: «до виготовлення» = «замовлено» — окрема колонка не потрібна (див. підсумки).
@@ -492,7 +492,7 @@ function BatchView({ data, detail }: { data: Data; detail: Detail }) {
                 {
                   key: "defective",
                   label: t("production.totals.defective"),
-                  value: totals.defective > 0 ? t("production.defectValue", { count: formatNumber(totals.defective, locale), rate: totals.defectRate ?? 0 }) : "0",
+                  value: totals.defective > 0 ? t("production.defectValue", { count: formatNumber(totals.defective, locale), rate: formatNumber(totals.defectRate ?? 0, locale) }) : "0",
                 },
                 kind === "inProduction"
                   ? { key: "remaining", label: t("production.totals.remaining"), value: formatNumber(detail.inProduction, locale) }

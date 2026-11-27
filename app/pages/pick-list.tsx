@@ -23,6 +23,11 @@ const PRINT_CSS = `
 .ot-pick__qty { font-size: 1.5rem; font-weight: 700; line-height: 1; text-align: end; min-width: 3ch; }
 .ot-pick__check { display: inline-block; width: 18px; height: 18px; border: 1.5px solid currentColor; border-radius: 3px; margin-top: 2px; }
 .ot-pick__meta { overflow-wrap: anywhere; }
+.ot-pick__materials { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--ot-space-1); }
+@media (max-width: 480px) {
+  .ot-pick__meta { grid-column: 1 / -1; grid-row: 2; }
+  .ot-pick__qty { grid-column: 3; grid-row: 1; }
+}
 @media print {
   .ot-pick__row { padding: 6px 8px; gap: 8px; }
   .ot-pick__qty { font-size: 1.15rem; }
@@ -119,7 +124,8 @@ export default function PickListPage() {
             {data.materials.length > 0 ? (
               <section className="ot-invoice__declaration">
                 <h3 className="ot-invoice__label">{t("packing.pickList.materials")}</h3>
-                <ul>
+                {/* Маркер пункту — квадратик для позначки (без крапки списку). */}
+                <ul className="ot-pick__materials">
                   {data.materials.map((m) => (
                     <li key={m.materialId}>
                       <span className="ot-pick__check" aria-hidden="true" /> {m.name} × {m.quantity}

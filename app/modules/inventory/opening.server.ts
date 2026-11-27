@@ -303,6 +303,7 @@ async function initializeInTx(tx: Tx, env: OpeningEnv, opts: InitializeInventory
           shopifyAddedAt: orderLineItems.shopifyAddedAt,
           placedAt: orders.placedAt,
           fulfillmentStatus: orders.fulfillmentStatus,
+          shopifyShippableFulfilled: orders.shopifyShippableFulfilled,
         })
         .from(orderLineItems)
         .innerJoin(orders, eq(orders.id, orderLineItems.orderId))
@@ -310,8 +311,10 @@ async function initializeInTx(tx: Tx, env: OpeningEnv, opts: InitializeInventory
       for (const r of rows) {
         const inSnapshot = lineInSnapshot(r.placedAt, r.shopifyAddedAt, byVariant.get(r.variantId!)!.snapshotAt);
         // До знімка й уже виконане в Shopify поза застосунком: одиниць немає ні в S, ні на складі — не рахуємо й не
-        // резервуємо (те саме правило першої появи — у syncOrderReservations).
-        if (inSnapshot && isFulfilledInShopify(r.fulfillmentStatus)) {
+        // резервуємо (те саме правило першої появи — у syncOrderReservations). Часткове виконання лише позицій без
+        // доставки (shopify_shippable_fulfilled = false: подарункова картка) фізичних позицій не торкається — вони
+        // ще committed у Shopify й на складі, тож рахуються й резервуються.
+        if (inSnapshot && isFulfilledInShopify(r.fulfillmentStatus, r.shopifyShippableFulfilled)) {
           excludedFulfilledLines++;
           continue;
         }

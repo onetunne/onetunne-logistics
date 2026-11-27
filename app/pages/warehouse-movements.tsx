@@ -24,6 +24,7 @@ import {
   listMovementActors,
   searchStockItemIds,
 } from "~/modules/warehouse/lookup.server";
+import { stockFilterOptions } from "~/modules/warehouse/stock.server";
 import { getRequestContext } from "~/server/context.server";
 import {
   Badge,
@@ -49,7 +50,8 @@ import {
 
 /**
  * Історія руху залишків (warehouse/movements): фільтри за типом, датою (Europe/Kyiv), позицією, замовленням,
- * виконавцем, видом позиції; сторінки. Собівартість одиниці — ЛИШЕ з finance.view (сервер не передає її іншим).
+ * виконавцем, видом позиції, моделлю й кольором варіанта (ті самі значення й точний збіг, що в переліку залишків —
+ * stockFilterOptions); сторінки. Собівартість одиниці — ЛИШЕ з finance.view (сервер не передає її іншим).
  */
 
 export interface MovementPageFilters {
@@ -71,6 +73,9 @@ export interface MovementPageFilters {
   movement: string | null;
   actor: string | null;
   kind: StockItemKind | null;
+  /** Модель / колір варіанта (точний збіг, як у переліку залишків). */
+  model: string | null;
+  color: string | null;
   page: number;
 }
 
@@ -93,6 +98,8 @@ function parseFilters(params: URLSearchParams): MovementPageFilters {
     movement: UUID_RE.test(movement) ? movement : null,
     actor: text("actor", 120) || null,
     kind: kind && (ITEM_KINDS as readonly string[]).includes(kind) ? (kind as StockItemKind) : null,
+    model: text("model") || null,
+    color: text("color") || null,
     page: /^\d{1,6}$/.test(pageRaw) ? Math.max(1, Number(pageRaw)) : 1,
   };
 }
@@ -109,6 +116,8 @@ function buildSearch(f: Partial<MovementPageFilters>): string {
   if (f.movement) params.set("movement", f.movement);
   if (f.actor) params.set("actor", f.actor);
   if (f.kind) params.set("kind", f.kind);
+  if (f.model) params.set("model", f.model);
+  if (f.color) params.set("color", f.color);
   if (f.page && f.page > 1) params.set("page", String(f.page));
   const search = params.toString();
   return search ? `?${search}` : "";
@@ -177,6 +186,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
     orderId: orderRef?.id,
     actorId: filters.actor ?? undefined,
     kind: filters.kind ?? undefined,
+    models: filters.model ? [filters.model] : undefined,
+    colors: filters.color ? [filters.color] : undefined,
     from: filters.from ? businessDayStart(filters.from) : undefined,
     to: filters.to ? businessDayEnd(filters.to) : undefined,
   };
@@ -191,8 +202,15 @@ export async function loader({ request }: LoaderFunctionArgs) {
     page = pages;
     result = await fetchPage(page);
   }
-  const actors = await listMovementActors(ctx.db);
+  const [actors, stockOptions] = await Promise.all([listMovementActors(ctx.db), stockFilterOptions(ctx.db)]);
   if (filters.actor && !actors.some((a) => a.id === filters.actor)) actors.push({ id: filters.actor, name: filters.actor });
+  // Ті самі значення, що у фільтрах переліку залишків; вибране значення (напр. архівного товару) лишається у списку.
+  const withSelected = (values: string[], selected: string | null) =>
+    selected && !values.includes(selected) ? [...values, selected] : values;
+  const options = {
+    models: withSelected(stockOptions.models, filters.model),
+    colors: withSelected(stockOptions.colors, filters.color),
+  };
 
   return {
     filters: { ...filters, page },
@@ -202,6 +220,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     pages,
     pageSize: MOVEMENTS_PAGE_SIZE,
     actors,
+    options,
     itemLabel: itemLabel ? { ...itemLabel, variantTitle: displayVariantTitle(itemLabel.variantTitle) } : null,
     orderRef,
     orderMissing,
@@ -217,7 +236,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
       filters.orderId ||
       filters.movement ||
       filters.actor ||
-      filters.kind,
+      filters.kind ||
+      filters.model ||
+      filters.color,
     ),
   };
 }
@@ -366,9 +387,17 @@ export default function WarehouseMovementsPage() {
     { key: "note", header: t("warehouse.history.col.note"), hideOnMobile: true, render: (r) => r.note ?? "—" },
   ];
 
-  const activeFilters = [filters.type, filters.from, filters.to, filters.q, filters.order, filters.actor, filters.kind].filter(
-    Boolean,
-  ).length;
+  const activeFilters = [
+    filters.type,
+    filters.from,
+    filters.to,
+    filters.q,
+    filters.order,
+    filters.actor,
+    filters.kind,
+    filters.model,
+    filters.color,
+  ].filter(Boolean).length;
   const from = data.total === 0 ? 0 : (data.page - 1) * data.pageSize + 1;
   const to = from === 0 ? 0 : from + data.rows.length - 1;
   const dateInvalid = filters.from && filters.to && filters.from > filters.to;
@@ -500,6 +529,22 @@ export default function WarehouseMovementsPage() {
                     placeholder={t("common.all")}
                     options={ITEM_KINDS.map((k) => ({ value: k, label: t(`warehouse.history.kind.${k}`) }))}
                     defaultValue={filters.kind ?? ""}
+                  />
+                  <Select
+                    id="wh-history-model"
+                    name="model"
+                    label={t("warehouse.filters.model")}
+                    placeholder={t("warehouse.filters.allModels")}
+                    options={data.options.models.map((v) => ({ value: v, label: v }))}
+                    defaultValue={filters.model ?? ""}
+                  />
+                  <Select
+                    id="wh-history-color"
+                    name="color"
+                    label={t("warehouse.filters.color")}
+                    placeholder={t("warehouse.filters.allColors")}
+                    options={data.options.colors.map((v) => ({ value: v, label: v }))}
+                    defaultValue={filters.color ?? ""}
                   />
                 </Grid>
                 <Stack direction="horizontal" gap={2}>

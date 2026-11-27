@@ -11,11 +11,14 @@
  * Залишки змінюються ЛИШЕ через applyMovements (тип receipt_manual / adjustment) з ключами manual:<операція>:<матеріал>:
  * подвійне надсилання тієї самої форми не дублює рух. Матеріал не може піти в мінус (правило журналу).
  *
+ * Витрата: «Витрачено за 30 днів» — сума рухів material_consume (списання при пакуванні) за останні
+ * MATERIAL_CONSUMPTION_DAYS днів за Києвом; «вистачить на» — фактичний залишок / середня витрата за день (materialDaysLeft).
+ *
  * Попередження «мало / немає» матеріалів оцінює цей модуль (refreshMaterialAlerts): активні — як у ядрі, неактивні —
  * закриваються й не відкриваються (власник вивів матеріал з ужитку). Блокування: рядки матеріалів → баланси
  * (FOR UPDATE у порядку stock_item_id) → попередження — той самий порядок, що й у ledger.server.ts.
  */
-import { and, asc, count, eq, ilike, inArray, or } from "drizzle-orm";
+import { and, asc, count, eq, gte, ilike, inArray, lte, or, sql } from "drizzle-orm";
 import type { DbOrTx, Tx } from "~/db/client.server";
 import {
   inventoryBalances,
@@ -42,6 +45,7 @@ import {
 } from "~/modules/inventory/ledger.server";
 import { getDefaultWarehouse } from "~/modules/inventory/warehouse.server";
 import { getSetting } from "~/modules/settings/settings.server";
+import { businessDate, businessDayEnd, businessDayStart } from "~/modules/warehouse/dates";
 import type { ServiceContext } from "~/server/types";
 import { BOX_KINDS, boxInnerDims } from "./box-selection";
 import { matchesVersion, touchedAt, versionToken } from "./version";
@@ -89,8 +93,64 @@ export interface MaterialView {
   status: StockLevelStatus;
   /** Скільки рядків шаблонів комплектації посилаються на матеріал. */
   kitLines: number;
+  /** Витрачено при пакуванні за останні MATERIAL_CONSUMPTION_DAYS днів (рухи material_consume). */
+  consumedRecent: number;
+  /** На скільки днів вистачить фактичного залишку за такої витрати; null — витрат за цей час не було. */
+  daysLeft: number | null;
   /** Мітка версії для оптимістичного блокування форми (version.ts). */
   version: string;
+}
+
+/** Період «Витрачено за … днів» і прогнозу «вистачить на» (днів, до сьогодні включно, за Києвом). */
+export const MATERIAL_CONSUMPTION_DAYS = 30;
+
+/** "YYYY-MM-DD" + n днів (календарна дата, без часового поясу). */
+function isoAddDays(iso: string, n: number): string {
+  const d = new Date(`${iso}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * На скільки днів вистачить залишку onHand за витрати consumed за `days` днів (униз до цілих днів).
+ * Без витрат — null (прогнозу немає); немає залишку — 0.
+ */
+export function materialDaysLeft(onHand: number, consumed: number, days: number = MATERIAL_CONSUMPTION_DAYS): number | null {
+  if (!Number.isSafeInteger(consumed) || consumed <= 0 || !Number.isSafeInteger(days) || days <= 0) return null;
+  if (onHand <= 0) return 0;
+  return Math.floor((onHand * days) / consumed);
+}
+
+/**
+ * Витрата матеріалів (Σ −on_hand_delta рухів material_consume) за останні `days` днів до сьогодні включно (за Києвом)
+ * на складі — для позицій обліку stockItemIds. Позиції без витрат у результаті відсутні.
+ */
+export async function loadMaterialConsumption(
+  db: DbOrTx,
+  stockItemIds: readonly string[],
+  opts: { warehouseId: string; now?: Date; days?: number },
+): Promise<Map<string, number>> {
+  const ids = [...new Set(stockItemIds)];
+  if (ids.length === 0) return new Map();
+  const days = opts.days ?? MATERIAL_CONSUMPTION_DAYS;
+  const today = businessDate(opts.now ?? new Date());
+  const rows = await db
+    .select({
+      stockItemId: inventoryMovements.stockItemId,
+      consumed: sql<number>`coalesce(sum(-${inventoryMovements.onHandDelta}), 0)`.mapWith(Number),
+    })
+    .from(inventoryMovements)
+    .where(
+      and(
+        eq(inventoryMovements.warehouseId, opts.warehouseId),
+        inArray(inventoryMovements.stockItemId, ids),
+        eq(inventoryMovements.type, "material_consume"),
+        gte(inventoryMovements.createdAt, businessDayStart(isoAddDays(today, -(days - 1)))),
+        lte(inventoryMovements.createdAt, businessDayEnd(today)),
+      ),
+    )
+    .groupBy(inventoryMovements.stockItemId);
+  return new Map(rows.filter((r) => r.consumed > 0).map((r) => [r.stockItemId, r.consumed]));
 }
 
 export interface MaterialListFilters {
@@ -121,7 +181,7 @@ const likePattern = (search: string) => `%${search.trim().replace(/[\\%_]/g, (c)
 export async function listMaterials(
   db: DbOrTx,
   filters: MaterialListFilters = {},
-  opts: { includeCosts?: boolean } = {},
+  opts: { includeCosts?: boolean; /** «Сьогодні» для витрат за 30 днів (ctx.now()). */ now?: Date } = {},
 ): Promise<MaterialListResult> {
   const warehouse = await getDefaultWarehouse(db);
   const defaultThreshold = (await getSetting(db, "warehouse")).lowStockThreshold;
@@ -162,6 +222,11 @@ export async function listMaterials(
         .groupBy(kitTemplateLines.materialId)
     : [];
   const usageBy = new Map(usage.map((u) => [u.materialId, Number(u.c)]));
+  const consumption = await loadMaterialConsumption(
+    db,
+    rows.flatMap((r) => (r.stockItemId ? [r.stockItemId] : [])),
+    { warehouseId: warehouse.id, now: opts.now },
+  );
   const views = rows.map((r) =>
     toView(r.material, {
       stockItemId: r.stockItemId,
@@ -170,6 +235,7 @@ export async function listMaterials(
       reserved: r.reserved ?? 0,
       defaultThreshold,
       kitLines: usageBy.get(r.material.id) ?? 0,
+      consumedRecent: r.stockItemId ? (consumption.get(r.stockItemId) ?? 0) : 0,
       includeCosts: opts.includeCosts === true,
       version: r.version,
     }),
@@ -197,6 +263,7 @@ function toView(
     reserved: number;
     defaultThreshold: number;
     kitLines: number;
+    consumedRecent: number;
     includeCosts: boolean;
     version: string;
   },
@@ -225,12 +292,14 @@ function toView(
     threshold,
     status: stockLevelStatus({ onHand: s.onHand, reserved: s.reserved, threshold }),
     kitLines: s.kitLines,
+    consumedRecent: s.consumedRecent,
+    daysLeft: materialDaysLeft(s.onHand, s.consumedRecent),
     version: s.version,
   };
 }
 
 /** Один матеріал (у т.ч. неактивний). */
-export async function getMaterial(db: DbOrTx, id: string, opts: { includeCosts?: boolean } = {}): Promise<MaterialView> {
+export async function getMaterial(db: DbOrTx, id: string, opts: { includeCosts?: boolean; now?: Date } = {}): Promise<MaterialView> {
   const { rows } = await listMaterials(db, { ids: [id], activity: "all" }, opts);
   const row = rows[0];
   if (!row) throw new NotFoundError("material");

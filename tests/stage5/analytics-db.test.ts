@@ -314,6 +314,12 @@ describe("analytics overview", () => {
         expect(v.risk).toBe("none");
       }
     }
+    // Демо-історія продажів (DEMO_SALES_HISTORY): ризик з датою вичерпання, рекомендація партії, попередній період.
+    const demoRisk = data.atRisk.filter((v) => v.sku?.startsWith("OT-"));
+    expect(demoRisk.length).toBeGreaterThanOrEqual(1);
+    for (const v of demoRisk) expect(v.stockOutDate, v.sku!).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(data.recommendations.filter((v) => v.sku?.startsWith("OT-") && (v.recommendation?.quantity ?? 0) > 0).length).toBeGreaterThanOrEqual(1);
+    expect(data.variants.filter((v) => v.sku?.startsWith("OT-") && v.previousUnits > 0).length).toBeGreaterThanOrEqual(1);
     const json = JSON.stringify(data);
     for (const s of PII) expect(json, s).not.toContain(s);
   });

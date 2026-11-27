@@ -176,6 +176,20 @@ export async function targetForStockItem(db: DbOrTx, stockItemId: string): Promi
 
 export { RETURN_PENDING_WINDOW_MS } from "./returns.server";
 
+/** Статус виконання замовлення в Shopify, як його зберігає база (orders.fulfillment_status; null → ''). */
+export const SHOPIFY_FULFILLMENT_STATUS_SQL = sql`coalesce(${orders.fulfillmentStatus}, '')`;
+/**
+ * Часткове виконання, яке могло зачепити фізичні позиції: shopify_shippable_fulfilled = false — виконано лише позиції
+ * без доставки; null (невідомо, дані до етапу 5) — як true (безпечніше, як isFulfilledInShopify).
+ */
+export const PARTIAL_PHYSICAL_FULFILLMENT_SQL = sql`(${SHOPIFY_FULFILLMENT_STATUS_SQL} = 'partially_fulfilled' and coalesce(${orders.shopifyShippableFulfilled}, true))`;
+/**
+ * Фізичні позиції замовлення в Shopify ще не виконано («в дорозі», якщо застосунок уже передав їх перевізнику): не
+ * «fulfilled», не старе «restocked» і не часткове виконання фізичних позицій. Єдине правило для звірки (orderTiming)
+ * і планового перечитування статусу (shopify-sync/fulfillment-refresh.server.ts) — змінювати лише тут.
+ */
+export const NOT_FULFILLED_IN_SHOPIFY_SQL = sql`not (${SHOPIFY_FULFILLMENT_STATUS_SQL} in ('fulfilled', 'restocked') or ${PARTIAL_PHYSICAL_FULFILLMENT_SQL})`;
+
 /**
  * Замовлення, передані/виконані не синхронно в застосунку й Shopify (поправка до committed − reserved):
  * - inFlight: передано перевізнику (списано в застосунку), у Shopify ще не виконано — committed Shopify містить поточну
@@ -203,11 +217,9 @@ export async function orderTiming(db: DbOrTx, warehouseId: string, stockItemIds:
     return t;
   };
   const shipped = inArray(orders.status, [...SHIPPED_STATUSES]);
-  const fs = sql`coalesce(${orders.fulfillmentStatus}, '')`;
-  // Часткове виконання, яке могло зачепити фізичні позиції: shopify_shippable_fulfilled = false — виконано лише позиції
-  // без доставки; null (невідомо, дані до етапу 5) — як true (безпечніше, як isFulfilledInShopify).
-  const partialPhysical = sql`(${fs} = 'partially_fulfilled' and coalesce(${orders.shopifyShippableFulfilled}, true))`;
-  const notFulfilled = sql`not (${fs} in ('fulfilled', 'restocked') or ${partialPhysical})`;
+  const fs = SHOPIFY_FULFILLMENT_STATUS_SQL;
+  const partialPhysical = PARTIAL_PHYSICAL_FULFILLMENT_SQL;
+  const notFulfilled = NOT_FULFILLED_IN_SHOPIFY_SQL;
   // Shopify змінив позиції відкритого замовлення, а застосунок їх ще не застосував (shopify-sync/pending-lines.server.ts):
   // резерв застосунку — за старими позиціями, committed Shopify — уже за новими (currentQuantity).
   const linesPending = sql`(${orders.shopifyLinesPendingAt} is not null and ${orders.status} <> 'cancelled' and not ${shipped})`;

@@ -10,6 +10,7 @@ import type { StockLevelStatus } from "~/modules/inventory/alerts";
 import { ensureStockItemForMaterial, ensureStockItemForVariant, movementHistory, type MovementView } from "~/modules/inventory/ledger.server";
 import { getDefaultWarehouse } from "~/modules/inventory/warehouse.server";
 import { returnOrderSuggestions } from "~/modules/inventory-sync/returns.server";
+import { MATERIAL_CONSUMPTION_DAYS, loadMaterialConsumption, materialDaysLeft } from "~/modules/packaging/materials.server";
 import { getSetting } from "~/modules/settings/settings.server";
 import {
   DEFAULT_COST_CURRENCY,
@@ -137,6 +138,15 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         lastStocktake(ctx.db, sid),
       ])
     : [[], { rows: [], total: 0, totalQty: 0 }, { rows: [], total: 0 }, null];
+  // Матеріал: витрата при пакуванні за 30 днів і на скільки днів вистачить фактичного залишку (як у «Матеріалах»).
+  const consumedRecent =
+    card.kind === "material" && sid
+      ? ((await loadMaterialConsumption(ctx.db, [sid], { warehouseId: warehouse.id, now: ctx.now() })).get(sid) ?? 0)
+      : 0;
+  const materialUsage =
+    card.kind === "material"
+      ? { days: MATERIAL_CONSUMPTION_DAYS, consumed: consumedRecent, daysLeft: materialDaysLeft(card.onHand, consumedRecent) }
+      : null;
   // Підказки замовлення для повернення покупця (форма надходження): лише номер; посилання — лише з orders.view.
   const canSeeOrders = can(ctx.actor, "orders.view");
   const returnSuggestions =
@@ -168,7 +178,11 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     movements: history.rows.map((r) => serializeMovement(r, ctx.locale, ctx.mode)),
     movementsTotal: history.total,
     lastStocktake: last ? { at: last.at.toISOString(), actorName: last.actorName, delta: last.delta } : null,
+    /** Лише для матеріалу: витрата за MATERIAL_CONSUMPTION_DAYS днів і прогноз (днів); для товару — null. */
+    materialUsage,
     canSeeCosts: includeCosts,
+    /** Робочий режим: позначка розбіжності з Shopify і посилання на звірку. У демо Shopify не оновлюється — лише підказка. */
+    isProduction: ctx.mode === "production",
     /** Внутрішні зміни цього товару надсилаються в Shopify (передачу ввімкнено, товар відкрито). */
     // У демо Shopify не підключено: нічого не надсилається (ledger movementOptionsFor), тож і підказок про передачу немає.
     pushesToShopify: itemPushesToShopify(ctx.mode, card, settings.shopifyPush),
@@ -431,12 +445,25 @@ function deltaSummary(t: TFunction, m: MovementRow, format: (n: number) => strin
   return parts.map((p) => `${t(`inventory.bucket.${p.bucket}`)} ${signedNumber(p.delta, format)}`).join(" · ");
 }
 
-function Stat({ label, value, emphasis, tone }: { label: string; value: number; emphasis?: boolean; tone?: "critical" }) {
+function Stat({
+  label,
+  value,
+  text,
+  emphasis,
+  tone,
+}: {
+  label: string;
+  value: number;
+  /** Текст замість числа (напр. «прогнозу немає»). */
+  text?: string;
+  emphasis?: boolean;
+  tone?: "critical";
+}) {
   const locale = useLocale();
   return (
     <Stack gap={0}>
-      <Text as="span" variant={emphasis ? "heading-lg" : "heading-md"} numeric tone={tone}>
-        {formatNumber(value, locale)}
+      <Text as="span" variant={text ? "body-sm" : emphasis ? "heading-lg" : "heading-md"} numeric={!text} tone={tone}>
+        {text ?? formatNumber(value, locale)}
       </Text>
       <Text as="span" variant="caption" tone="subdued">
         {label}
@@ -578,18 +605,38 @@ export default function WarehouseItemPage() {
                 )}
               </Stack>
             </Stack>
-            <Grid columns={{ xs: 2, md: 5 }} gap={3}>
-              <Stat
-                label={t("inventory.bucket.available")}
-                value={item.available}
-                emphasis
-                tone={item.available < 0 ? "critical" : undefined}
-              />
-              <Stat label={t("inventory.bucket.onHand")} value={item.onHand} tone={item.onHand < 0 ? "critical" : undefined} />
-              <Stat label={t("inventory.bucket.reserved")} value={item.reserved} />
-              <Stat label={t("inventory.bucket.inProduction")} value={item.inProduction} />
-              <Stat label={t("inventory.bucket.defective")} value={item.defective} />
-            </Grid>
+            {data.materialUsage ? (
+              // Матеріал: продажу, резервів і виробництва немає — лише фактичний залишок, брак і витрата при пакуванні.
+              <Stack gap={2}>
+                <Grid columns={{ xs: 2, md: 4 }} gap={3}>
+                  <Stat label={t("inventory.bucket.onHand")} value={item.onHand} emphasis tone={item.onHand < 0 ? "critical" : undefined} />
+                  <Stat label={t("inventory.bucket.defective")} value={item.defective} />
+                  <Stat label={t("warehouseInsights.material.consumed", { days: data.materialUsage.days })} value={data.materialUsage.consumed} />
+                  <Stat
+                    label={t("warehouseInsights.material.daysLeft")}
+                    value={data.materialUsage.daysLeft ?? 0}
+                    text={data.materialUsage.daysLeft === null ? t("warehouseInsights.material.noForecast") : undefined}
+                    tone={data.materialUsage.daysLeft === 0 ? "critical" : undefined}
+                  />
+                </Grid>
+                <Text variant="caption" tone="subdued">
+                  {t("warehouseInsights.material.forecastHint", { days: data.materialUsage.days })}
+                </Text>
+              </Stack>
+            ) : (
+              <Grid columns={{ xs: 2, md: 5 }} gap={3}>
+                <Stat
+                  label={t("inventory.bucket.available")}
+                  value={item.available}
+                  emphasis
+                  tone={item.available < 0 ? "critical" : undefined}
+                />
+                <Stat label={t("inventory.bucket.onHand")} value={item.onHand} tone={item.onHand < 0 ? "critical" : undefined} />
+                <Stat label={t("inventory.bucket.reserved")} value={item.reserved} />
+                <Stat label={t("inventory.bucket.inProduction")} value={item.inProduction} />
+                <Stat label={t("inventory.bucket.defective")} value={item.defective} />
+              </Grid>
+            )}
             <KeyValueList
               items={[
                 {
@@ -631,7 +678,14 @@ export default function WarehouseItemPage() {
                 { key: "updated", label: t("warehouse.item.updatedAt"), value: formatDateTime(item.updatedAt, locale) },
               ]}
             />
-            {item.kind === "product" &&
+            {item.kind === "product" && item.shopifyAvailable !== null && !data.isProduction ? (
+              // Демо: значення Shopify вигадане й не оновлюється — розбіжність не позначаємо (як у списку «Склад»).
+              <Text variant="body-sm" tone="subdued">
+                {t("warehouse.stock.shopify.demoHint")}
+              </Text>
+            ) : null}
+            {data.isProduction &&
+            item.kind === "product" &&
             item.shopifyAvailable !== null &&
             item.tracking === "opened" &&
             item.shopifyAvailable !== item.available ? (

@@ -16,7 +16,7 @@ import {
 } from "~/modules/warehouse-analytics/calc";
 import { CSV_SEPARATORS, DEFAULT_CSV_SEPARATOR, isCsvSeparatorKey, type CsvSeparatorKey } from "~/modules/warehouse-analytics/csv";
 import { exportResponseOutcome, MAX_EXPORT_MOVEMENTS } from "~/modules/warehouse-analytics/export-contract";
-import { analyticsSearch, EXPORT_DATASETS, filtersOf, parseAnalyticsQuery, type AnalyticsQuery, type ExportDataset } from "~/modules/warehouse-analytics/params";
+import { analyticsSearch, exportDatasetsFor, filtersOf, parseAnalyticsQuery, type AnalyticsQuery, type ExportDataset } from "~/modules/warehouse-analytics/params";
 import { computeWarehouseAnalytics, type VariantAnalytics } from "~/modules/warehouse-analytics/queries.server";
 import { MAX_SEARCH_LENGTH, WAREHOUSE_RELATED_LINKS, WAREHOUSE_SECTION_LINKS } from "~/modules/warehouse/constants";
 import { businessDate } from "~/modules/warehouse/dates";
@@ -285,6 +285,9 @@ function ExportCard({ query, canSeeCosts }: { query: AnalyticsQuery; canSeeCosts
   const t = useT();
   const locale = useLocale();
   const href = useHref();
+  const canDo = useCan();
+  // Набір «Партії виробництва» (собівартість) — лише власник (finance.view); сервер перевіряє сам.
+  const datasets = exportDatasetsFor(canDo);
   const [separator, setSeparator] = useState<CsvSeparatorKey>(DEFAULT_CSV_SEPARATOR);
   const [pending, setPending] = useState<ExportDataset | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -319,7 +322,7 @@ function ExportCard({ query, canSeeCosts }: { query: AnalyticsQuery; canSeeCosts
           />
         </Grid>
         <Stack direction="horizontal" gap={2}>
-          {EXPORT_DATASETS.map((dataset) => (
+          {datasets.map((dataset) => (
             <Button
               key={dataset}
               size="sm"
@@ -337,6 +340,11 @@ function ExportCard({ query, canSeeCosts }: { query: AnalyticsQuery; canSeeCosts
         <Text variant="body-sm" tone="subdued">
           {canSeeCosts ? t("warehouseAnalytics.export.costsOwner") : t("warehouseAnalytics.export.costsStaff")}
         </Text>
+        {datasets.includes("production") ? (
+          <Text variant="body-sm" tone="subdued">
+            {t("warehouseAnalytics.export.productionHelp")}
+          </Text>
+        ) : null}
         {error ? (
           <Banner tone="critical" title={t("warehouseAnalytics.export.error.title")}>
             {t(error)}
@@ -344,7 +352,9 @@ function ExportCard({ query, canSeeCosts }: { query: AnalyticsQuery; canSeeCosts
         ) : null}
         {truncated ? (
           <Banner tone="warning" title={t("warehouseAnalytics.export.truncated.title")}>
-            {t("warehouseAnalytics.export.truncated", { max: formatNumber(MAX_EXPORT_MOVEMENTS, locale) })}
+            {t(truncated === "production" ? "warehouseAnalytics.export.truncatedProduction" : "warehouseAnalytics.export.truncated", {
+              max: formatNumber(MAX_EXPORT_MOVEMENTS, locale),
+            })}
           </Banner>
         ) : null}
       </Stack>

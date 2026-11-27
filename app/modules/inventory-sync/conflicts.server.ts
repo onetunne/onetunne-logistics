@@ -518,6 +518,13 @@ export interface ConflictView {
   /** Оприбутковані складом повернення, які Shopify ще має поповнити сам. */
   returnsAwaiting: number;
   uncertain: boolean;
+  /**
+   * Окремі причини uncertain (для пояснення власнику): частково виконані замовлення (Shopify виконав або міг виконати
+   * фізичні позиції) і резерви відкритих замовлень із неперенесеними змінами позицій Shopify (shopify_lines_pending_at).
+   * Спостереження, збережені до появи цих полів: partiallyFulfilled — як раніше (uncertain без повернень), linesPending — false.
+   */
+  partiallyFulfilled: boolean;
+  linesPending: boolean;
   /** Час спроби «надіслати склад» із невідомим результатом (null — немає). */
   pushAttemptAt: string | null;
   /** Причини, з яких автоприйняття не виконано (режим apply). */
@@ -647,6 +654,9 @@ function toView(r: ListRow): ConflictView {
     returnsPending: obs?.returnsPending ?? 0,
     returnsAwaiting: obs?.returnsAwaiting ?? 0,
     uncertain: obs?.uncertain ?? false,
+    partiallyFulfilled:
+      typeof obs?.partiallyFulfilled === "boolean" ? obs.partiallyFulfilled : Boolean(obs?.uncertain && (obs?.returnsPending ?? 0) === 0),
+    linesPending: obs?.linesPending === true,
     pushAttemptAt: r.c.status === "open" ? (obs?.pushAttempt?.at ?? null) : null,
     autoApplyBlockers: r.c.status === "open" && Array.isArray(d.autoApplyBlockers) ? d.autoApplyBlockers.filter((x): x is string => typeof x === "string") : [],
     pushBlockedOtherStates: obs ? pushBlockedByOtherStates(obs) : false,

@@ -16,17 +16,22 @@ import { hasKey, useLocale, useT, type TFunction } from "~/i18n";
 import { DomainError } from "~/lib/errors";
 import { formatDateTime, formatNumber, formatWeight } from "~/lib/format";
 import { writeAudit } from "~/modules/audit/audit.server";
-import { kitProductMatchesQuery } from "~/modules/packaging/kit-options";
+import {
+  kitProductMatchesQuery,
+  kitTemplateMatchesVariantFilter,
+  variantFilterSelection,
+  type KitVariantAttributes,
+} from "~/modules/packaging/kit-options";
 import { normalizeVariantValue } from "~/modules/packaging/kit-resolution";
 import {
-  collectionModels,
+  collectionVariantAttributes,
   createKitTemplate,
   deleteKitTemplate,
   listKitCollectionOptions,
   listKitProductOptions,
   listKitTemplates,
   listKitVariantAttributes,
-  productModels,
+  productVariantAttributes,
   setKitTemplatesActive,
   updateKitTemplate,
   type KitAppliesTo,
@@ -66,6 +71,7 @@ import {
  * «Склад» → «Комплектація» (етап 5, WP «Упаковка»): шаблони — що додається до замовлення (на замовлення) або до
  * кожної одиниці товару (на товар). Ціль шаблону: усі товари, вибрані товари або колекції Shopify (нові товари
  * колекції — автоматично) + необов'язковий фільтр за моделлю/кольором варіанта. Правила — kit-resolution.ts.
+ * Перелік шаблонів фільтрується за моделлю й кольором варіанта (kitTemplateMatchesVariantFilter у kit-options.ts).
  * Перевірка на замовленні показує матеріали (усі шаблони, що підходять) і запропоновану коробку.
  * Дозволи — на сервері (modules/packaging/kits.server.ts): перегляд warehouse.view, зміни warehouse.adjust.
  *
@@ -86,6 +92,7 @@ interface Filters {
   status: StatusTab;
   appliesTo: KitAppliesTo | null;
   model: string;
+  color: string;
   order: string;
 }
 
@@ -97,6 +104,7 @@ function parseFilters(params: URLSearchParams): Filters {
     status: status && (STATUS_TABS as readonly string[]).includes(status) ? (status as StatusTab) : "all",
     appliesTo: isApplies(applies) ? applies : null,
     model: (params.get("model") ?? "").trim().slice(0, MAX_QUERY_LENGTH),
+    color: (params.get("color") ?? "").trim().slice(0, MAX_QUERY_LENGTH),
     order: (params.get("order") ?? "").trim().slice(0, 40),
   };
 }
@@ -107,6 +115,7 @@ function buildSearch(f: Partial<Filters> & { edit?: string | null }): string {
   if (f.status && f.status !== "all") params.set("status", f.status);
   if (f.appliesTo) params.set("applies", f.appliesTo);
   if (f.model) params.set("model", f.model);
+  if (f.color) params.set("color", f.color);
   if (f.order) params.set("order", f.order);
   if (f.edit) params.set("edit", f.edit);
   const s = params.toString();
@@ -123,26 +132,34 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const canEdit = can(ctx.actor, "warehouse.adjust");
   const templates = await listKitTemplates(ctx.db);
   const attributes = await listKitVariantAttributes(ctx.db);
-  const [modelsByProduct, modelsByCollection] = await Promise.all([
-    productModels(ctx.db, templates.flatMap((t) => t.products.map((p) => p.id))),
-    collectionModels(ctx.db, templates.flatMap((t) => t.collections.map((c) => c.id))),
-  ]);
-  const models = [...new Set([...attributes.models, ...templates.flatMap((t) => t.models)])].sort((a, b) => a.localeCompare(b));
+  const variantFilter = { model: filters.model, color: filters.color };
+  const [byProduct, byCollection] =
+    filters.model || filters.color
+      ? await Promise.all([
+          productVariantAttributes(ctx.db, templates.flatMap((t) => t.products.map((p) => p.id))),
+          collectionVariantAttributes(ctx.db, templates.flatMap((t) => t.collections.map((c) => c.id))),
+        ])
+      : [new Map<string, KitVariantAttributes[]>(), new Map<string, KitVariantAttributes[]>()];
+  const sorted = (values: Iterable<string>) => [...new Set(values)].sort((a, b) => a.localeCompare(b));
+  // Поле фільтра показує вибране значення, навіть коли воно відрізняється від варіанта регістром/пробілами або його
+  // немає в каталозі (фільтр порівнює нормалізовано) — інакше повторне «Застосувати» скидало б фільтр.
+  const modelSelect = variantFilterSelection(sorted([...attributes.models, ...templates.flatMap((t) => t.models)]), filters.model);
+  const colorSelect = variantFilterSelection(sorted([...attributes.colors, ...templates.flatMap((t) => t.colors)]), filters.color);
 
   const q = lower(filters.q);
-  const model = normalizeVariantValue(filters.model);
-  const hasModel = (values: readonly string[] | undefined) => (values ?? []).some((v) => normalizeVariantValue(v) === model);
   const visible = templates.filter((tpl) => {
     if (filters.status === "active" && !tpl.active) return false;
     if (filters.status === "inactive" && tpl.active) return false;
     if (filters.appliesTo && tpl.appliesTo !== filters.appliesTo) return false;
-    if (model) {
-      // Фільтр моделі шаблону — головний; без нього: «усі товари» підходять будь-якій моделі, інакше — моделі цілі.
-      if (tpl.models.length > 0) {
-        if (!hasModel(tpl.models)) return false;
-      } else if (tpl.appliesTo === "products" && !tpl.products.some((p) => hasModel(modelsByProduct.get(p.id)))) return false;
-      else if (tpl.appliesTo === "collections" && !tpl.collections.some((c) => hasModel(modelsByCollection.get(c.id)))) return false;
-    }
+    // Модель і колір: власний фільтр шаблону — головний; інакше «усі товари» підходять будь-якому значенню,
+    // вибрані товари/колекції — якщо є варіант цілі з такою моделлю й кольором.
+    const targetVariants =
+      tpl.appliesTo === "products"
+        ? tpl.products.flatMap((p) => byProduct.get(p.id) ?? [])
+        : tpl.appliesTo === "collections"
+          ? tpl.collections.flatMap((c) => byCollection.get(c.id) ?? [])
+          : null;
+    if (!kitTemplateMatchesVariantFilter(tpl, targetVariants, variantFilter)) return false;
     if (q) {
       const haystack = [
         tpl.name,
@@ -184,14 +201,17 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
   return {
     filters,
-    isFiltered: Boolean(filters.q || filters.appliesTo || filters.model),
+    isFiltered: Boolean(filters.q || filters.appliesTo || filters.model || filters.color),
     templates: visible,
     counts: {
       all: templates.length,
       active: templates.filter((t) => t.active).length,
       inactive: templates.filter((t) => !t.active).length,
     },
-    models,
+    models: modelSelect.options,
+    colors: colorSelect.options,
+    /** Значення полів фільтра (варіант зі списку, рівний вибраному після нормалізації). */
+    selected: { model: modelSelect.value, color: colorSelect.value },
     editing,
     creating,
     canEdit,
@@ -328,7 +348,7 @@ export default function KitsPage() {
   const listHref = (f: Partial<Filters>) => `${basePath}${buildSearch({ ...filters, ...f })}`;
   const closeHref = listHref({});
   const showForm = (data.creating || data.editing) && !(actionData?.ok && (isFormIntent || actionData.intent === "deleteKit"));
-  const activeFilters = [filters.q, filters.appliesTo, filters.model].filter(Boolean).length;
+  const activeFilters = [filters.q, filters.appliesTo, filters.model, filters.color].filter(Boolean).length;
 
   const tabs = STATUS_TABS.map((s) => ({ key: s, label: t(`packaging.kits.tab.${s}`), href: listHref({ status: s }), count: data.counts[s] }));
 
@@ -433,7 +453,7 @@ export default function KitsPage() {
             <Form key={location.search} method="get" role="search">
               {filters.status !== "all" ? <input type="hidden" name="status" value={filters.status} /> : null}
               <Stack gap={4}>
-                <Grid columns={{ xs: 1, md: 3 }} gap={3}>
+                <Grid columns={{ xs: 1, md: 2, lg: 4 }} gap={3}>
                   <TextField
                     id="kits-filter-q"
                     type="search"
@@ -459,7 +479,15 @@ export default function KitsPage() {
                     label={t("packaging.filters.model")}
                     placeholder={t("packaging.filters.anyModel")}
                     options={data.models.map((m) => ({ value: m, label: m }))}
-                    defaultValue={filters.model}
+                    defaultValue={data.selected.model}
+                  />
+                  <Select
+                    id="kits-filter-color"
+                    name="color"
+                    label={t("packaging.filters.color")}
+                    placeholder={t("packaging.filters.anyColor")}
+                    options={data.colors.map((c) => ({ value: c, label: c }))}
+                    defaultValue={data.selected.color}
                   />
                 </Grid>
                 <Stack direction="horizontal" gap={2}>
@@ -554,7 +582,7 @@ function OrderCheckCard({ filters, check }: { filters: Filters; check: Data["che
     <Card title={t("packaging.check.title")} description={t("packaging.check.description")}>
       <Stack gap={3}>
         <Form method="get" role="search">
-          {(["q", "model"] as const).map((k) => (filters[k] ? <input key={k} type="hidden" name={k} value={filters[k]} /> : null))}
+          {(["q", "model", "color"] as const).map((k) => (filters[k] ? <input key={k} type="hidden" name={k} value={filters[k]} /> : null))}
           {filters.status !== "all" ? <input type="hidden" name="status" value={filters.status} /> : null}
           {filters.appliesTo ? <input type="hidden" name="applies" value={filters.appliesTo} /> : null}
           <Stack direction="horizontal" gap={2} align="end">

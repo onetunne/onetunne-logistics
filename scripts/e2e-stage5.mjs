@@ -15,12 +15,20 @@
  *    масовий старт, друк документів, етикетки; передача перевізнику → списання в історії руху (повтор — без
  *    другого списання); розпакування й повторне «Запаковано» без повторного списання матеріалів;
  *    аналітика, CSV-експорт, сторінки синхронізації з Shopify (демо: нічого не надсилається);
- *  - працівник: не бачить собівартості (виробництво, рух, картка, матеріали, експорт), не відкриває/не виконує дії
- *    власника (403 або відмова), може оприбуткувати й пакувати;
+ *    етап 5, раунд 6: аналітика свіжого демо (швидкість, запас у днях, ризики, рекомендації, «Створити партію» з
+ *    кількістю) і віджети головної; ремонт і списання браку; статистика виробництва, фільтри й скасування партії;
+ *    підбір коробки за габаритами (#1006) і «частина без габаритів» (#1005); шаблон на колекцію з фільтром моделі;
+ *    лист комплектації й список передачі перевізнику; ручні ±1 з причиною; вага < 90 % (підтверджує лише власник);
+ *    етикетки — PDF тестового перевізника; фільтр руху за моделлю/кольором; витрата матеріалу за 30 днів;
+ *    «Проблеми» → «Склад» (скасування запакованого замовлення → «Повернуто на склад»);
+ *  - працівник: не бачить собівартості (виробництво, рух, картка, матеріали, експорт, головна), не відкриває/не виконує
+ *    дії власника (403 або відмова: партії виробництва в CSV, списання браку, підтвердження ваги), може оприбуткувати,
+ *    пакувати, друкувати лист комплектації й список передачі;
  *  - телефони 320×568, 375×667, 390×844 (власник і працівник): без горизонтальної прокрутки, розмір елементів
- *    керування, надсилання форм;
+ *    керування, надсилання форм, згорнуті «Масові дії» черги пакування;
  *  - англійська: пошук неперекладених українських рядків і сирих ключів i18n;
  *  - на кожній сторінці: помилки консолі (зокрема гідратації React #418/#423/#425), невдалі запити.
+ *  Для налагодження: E2E_SKIP_PHONES=1 і E2E_SKIP_EN=1 пропускають телефони / англійську.
  *
  * Використання: зібрати й запустити демо (`npm run demo` або `npm run build && npm run start:demo`), потім
  *   BASE_URL=http://localhost:3000 SCREENSHOTS_DIR=screenshots/stage5 node scripts/e2e-stage5.mjs
@@ -190,6 +198,15 @@ async function submitGet(page, trigger) {
   await trigger.click();
   await page.waitForURL((u) => u.toString() !== before, { timeout: ACTION_TIMEOUT }).catch(() => {});
   await settle(page);
+  // Адреса змінюється трохи раніше, ніж React показує нові дані.
+  await page.waitForTimeout(250);
+}
+
+/** Клієнтський перехід (кнопка з navigate()): дочекатися адреси й елемента нової сторінки. */
+async function arrive(page, urlRe, selector) {
+  await page.waitForURL(urlRe, { timeout: ACTION_TIMEOUT });
+  await settle(page);
+  if (selector) await page.locator(selector).first().waitFor({ timeout: ACTION_TIMEOUT }).catch(() => {});
 }
 
 async function banners(page) {
@@ -348,6 +365,72 @@ async function openDetails(page, summaryText) {
   if (!(await details.evaluate((d) => d.open).catch(() => false))) await summary.click();
 }
 
+/**
+ * Рядки таблиці DataTable за підписом (<caption>): [{ _text, «заголовок колонки»: значення }]. Значення — текст
+ * .ot-dt__value (без мобільної мітки колонки) або всієї клітинки. null — таблиці з таким підписом немає.
+ */
+async function tableRows(page, caption) {
+  return page.evaluate((caption) => {
+    const norm = (s) => (s ?? "").replace(/\s+/g, " ").trim();
+    const table = [...document.querySelectorAll("main table")].find((t) => norm(t.querySelector("caption")?.textContent).startsWith(caption));
+    if (!table) return null;
+    const heads = [...table.querySelectorAll("thead th")].map((th) => norm(th.textContent));
+    return [...table.querySelectorAll("tbody tr")].map((tr) => {
+      const row = { _text: norm(tr.innerText) };
+      [...tr.children].forEach((cell, i) => {
+        row[heads[i] || `#${i}`] = norm((cell.querySelector(".ot-dt__value") ?? cell).textContent);
+      });
+      return row;
+    });
+  }, caption);
+}
+
+/** Значення колонки, заголовок якої починається з prefix (заголовки можуть мати підказки). */
+const col = (row, prefix) => {
+  const key = Object.keys(row ?? {}).find((k) => k.startsWith(prefix));
+  return key ? row[key] : undefined;
+};
+
+/** Перше число в тексті (українська десяткова кома, пробіли між розрядами, «−»). */
+const num = (s) => {
+  const m = String(s ?? "")
+    .replace(/[\u00a0\u202f]/g, " ")
+    .replace(/(\d) (?=\d{3}\b)/g, "$1")
+    .replace("−", "-")
+    .match(/-?\d+(?:[.,]\d+)?/);
+  return m ? Number(m[0].replace(",", ".")) : NaN;
+};
+
+/** Дата за київським часом через n днів у форматі інтерфейсу (ДД.ММ.РРРР). */
+const kyivDate = (n = 0) =>
+  new Intl.DateTimeFormat("uk-UA", { timeZone: "Europe/Kyiv", day: "2-digit", month: "2-digit", year: "numeric" }).format(new Date(Date.now() + n * 86_400_000));
+/** Дата збігається з «сьогодні + n» (±1 день — запас на північ і округлення прогнозу). */
+const isAroundDay = (text, n) => [n - 1, n, n + 1].some((d) => String(text ?? "").includes(kyivDate(d)));
+
+/** Новий контекст браузера з роллю демо (cookie) і мовою; сторінка зі спостереженням за помилками. */
+async function rolePage(role, viewport = { width: 1280, height: 900 }, locale = "uk") {
+  const ctx = await browser.newContext({ viewport, locale: locale === "en" ? "en-US" : "uk-UA", acceptDownloads: true });
+  await setPref(ctx, "demoRole", role);
+  await setPref(ctx, "locale", locale);
+  const page = await ctx.newPage();
+  monitor(page, { role, viewport: `${viewport.width}x${viewport.height}` });
+  page.setDefaultTimeout(ACTION_TIMEOUT);
+  page.__role = role;
+  return { ctx, page };
+}
+
+/** Текст картки «Перевірити на замовленні» сторінки шаблонів (без переліку шаблонів над нею). */
+async function kitCheckText(page) {
+  return (await page.locator("main section:has(#kits-check-order)").first().innerText().catch(() => "")).replace(/\s+/g, " ");
+}
+
+/** Позиції листа комплектації: [{ text, qty }]. */
+async function pickRows(page) {
+  return page.locator("main .ot-pick__row").evaluateAll((els) =>
+    els.map((el) => ({ text: el.innerText.replace(/\s+/g, " ").trim(), qty: Number(el.querySelector(".ot-pick__qty")?.textContent?.trim() ?? "NaN") })),
+  );
+}
+
 const today = () => new Date(Date.now() + 2 * 3600_000).toISOString().slice(0, 10);
 const inDays = (n) => new Date(Date.now() + n * 86_400_000).toISOString().slice(0, 10);
 const COST_RE = /собіварт|₴|\bUAH\b|unit cost|cost per/i;
@@ -388,6 +471,73 @@ try {
     state.index = await stockIndex(p);
     ck(Object.keys(state.index).length >= 9, `stock list has all demo variants (${Object.keys(state.index).length})`);
     ck((await p.locator("main table thead").innerText()).includes("Доступно"), "stock table shows available column");
+  });
+
+  // Свіжі демо-дані (типові налаштування): історія продажів демо (#0978–#0995, 6–85 днів тому) дає швидкість продажів,
+  // запас у днях, ризики й рекомендації. Значення — до будь-яких операцій сценарію.
+  await step("analytics (fresh demo): velocity, days of stock, risks, recommendations, prefilled batch", D, p, async (ck) => {
+    const res = await go(p, "/demo/warehouse/analytics");
+    ck(res?.status() === 200, `analytics 200 (${res?.status()})`);
+    // Головне меню: «Аналітика» — звичайний пункт основної групи, веде на аналітику складу.
+    const menu = p.locator('nav.ot-nav > ul.ot-nav__list a[href="/demo/warehouse/analytics"]');
+    ck((await menu.count()) === 1 && (await menu.innerText()).includes("Аналітика"), "main menu «Аналітика» → /demo/warehouse/analytics (main group)");
+    ck((await p.locator('nav.ot-nav .ot-nav__group a[href="/demo/analytics"]').count()) === 0, "«Аналітика» not in the planned group");
+    const txt = await mainText(p);
+    const risk = txt.match(/Під ризиком З них немає в наявності: (\d+) (\d+)/);
+    const rec = txt.match(/Позицій до виробництва Разом ([\d\s]+?) шт\. (\d+)/);
+    const unitsSold = num(txt.match(/Продано, шт\. ([\d\s]+)/)?.[1]);
+    state.kpi = { atRisk: Number(risk?.[2]), out: Number(risk?.[1]), recs: Number(rec?.[2]), units: num(rec?.[1]) };
+    ck(state.kpi.atRisk === 2 && state.kpi.out === 0, `KPI: 2 at risk, 0 out of stock (${JSON.stringify(state.kpi)})`);
+    ck(state.kpi.recs === 2 && state.kpi.units === 40, `KPI: 2 items / 40 units to produce (${JSON.stringify(state.kpi)})`);
+
+    const riskRows = (await tableRows(p, "Позиції під ризиком")) ?? [];
+    const bagRisk = riskRows.find((r) => r._text.includes("OT-BG-BLK"));
+    const whtRisk = riskRows.find((r) => r._text.includes("OT-PH-WHT"));
+    ck(riskRows.length === 2 && bagRisk && whtRisk, `risk list: OT-BG-BLK and OT-PH-WHT (${riskRows.map((r) => r._text.slice(0, 60)).join(" | ")})`);
+    ck(isAroundDay(col(bagRisk, "Закінчиться"), 22), `OT-BG-BLK runs out ≈ today+22 = ${kyivDate(22)} (${col(bagRisk, "Закінчиться")})`);
+    ck(isAroundDay(col(whtRisk, "Закінчиться"), 23), `OT-PH-WHT runs out ≈ today+23 = ${kyivDate(23)} (${col(whtRisk, "Закінчиться")})`);
+    const v30 = num(col(bagRisk, "Швидкість"));
+    const cover = num(col(bagRisk, "Запасу на"));
+    const available = num(col(bagRisk, "Доступно"));
+    ck(v30 > 0 && Math.abs(cover - available / v30) <= Math.max(0.6, cover * 0.03), `days of stock = available / velocity (${available} / ${v30} ≈ ${cover} дн.)`);
+    ck(/50 шт\./.test(col(whtRisk, "Надходить") ?? ""), `OT-PH-WHT: incoming 50 from the seeded batch (${col(whtRisk, "Надходить")})`);
+
+    const recRows = (await tableRows(p, "Рекомендації виробництва")) ?? [];
+    const bagRec = recRows.find((r) => r._text.includes("OT-BG-BLK"));
+    const fkxRec = recRows.find((r) => r._text.includes("OT-FK-X"));
+    ck(recRows.length === 2 && num(col(bagRec, "Виготовити")) === 30 && num(col(fkxRec, "Виготовити")) === 10, `recommendations: OT-BG-BLK 30, OT-FK-X 10 (${recRows.map((r) => `${r._text.slice(0, 40)}…`).join(" | ")})`);
+    ck(num(col(bagRec, "Швидкість")) > 0 && /30 дн\.: \d/.test(col(bagRec, "Швидкість") ?? ""), `recommendation shows velocity (${col(bagRec, "Швидкість")})`);
+    ck(/Попит за 90 дн\.: \d+/.test(col(bagRec, "Розрахунок") ?? ""), `recommendation explains the calculation (${col(bagRec, "Розрахунок")})`);
+
+    const sales = (await tableRows(p, "Продажі за варіантами")) ?? [];
+    const bagSales = sales.find((r) => r._text.includes("OT-BG-BLK"));
+    const soldSum = sales.reduce((a, r) => a + num(col(r, "Продано")), 0);
+    ck(sales.length >= 9 && soldSum === unitsSold, `sales by variant add up to the KPI «Продано» (${soldSum} = ${unitsSold})`);
+    ck(num(col(bagSales, "Шт./день")) === v30 && num(col(bagSales, "Запасу на")) === cover, `sales row velocity/cover match the risk list (${col(bagSales, "Шт./день")}, ${col(bagSales, "Запасу на")})`);
+
+    // «Створити партію» — форма нової партії з рекомендованою кількістю (не зберігаємо).
+    const create = p.locator("main table", { has: p.locator("caption", { hasText: "Рекомендації виробництва" }) }).locator("tbody tr", { hasText: "OT-BG-BLK" }).locator("a", { hasText: "Створити партію" });
+    ck((await create.count()) === 1, "«Створити партію» link in the OT-BG-BLK row");
+    await create.first().click();
+    await arrive(p, /\/demo\/production\/new\?/, "#batch-title");
+    const u = new URL(p.url());
+    const bagId = state.index["OT-BG-BLK"].variantId;
+    ck(u.searchParams.get("product") && u.searchParams.get(`qty.${bagId}`) === "30", `prefilled URL: product + qty.<OT-BG-BLK>=30 (${u.pathname}${u.search})`);
+    const field = p.locator(`input[name="qty.${bagId}"]`);
+    await field.waitFor().catch(() => {});
+    ck((await field.count()) === 1 && (await field.inputValue()) === "30", `batch form: OT-BG-BLK quantity = 30 (${await field.inputValue().catch(() => "—")})`);
+  });
+
+  await step("dashboard (fresh demo): risk / recommendation counts match analytics", D, p, async (ck) => {
+    const res = await go(p, "/demo");
+    ck(res?.status() === 200, `dashboard 200 (${res?.status()})`);
+    const t = await mainText(p);
+    const atRisk = Number(t.match(/Під ризиком закінчення (\d+)/)?.[1]);
+    const recs = Number(t.match(/Потребують нової партії (\d+)/)?.[1]);
+    const units = num(t.match(/Рекомендовано виготовити: ([\d\s]+)/)?.[1]);
+    ck(atRisk === state.kpi?.atRisk && recs === state.kpi?.recs && units === state.kpi?.units, `dashboard ${atRisk} at risk, ${recs} items, ${units} units = analytics ${JSON.stringify(state.kpi)}`);
+    ck((await p.locator('main a[href="/demo/warehouse/analytics"]', { hasText: "Відкрити аналітику" }).count()) === 1, "dashboard links to warehouse analytics");
+    ck(/Попередження складу/.test(t) && /Черга пакування/.test(t) && /Активних партій/.test(t), "stock alerts, packing queue and production widgets shown");
   });
 
   await step("warehouse: filters by model / color / product / status", D, p, async (ck) => {
@@ -451,6 +601,13 @@ try {
     const b2 = await itemBalances(p);
     ck(JSON.stringify(b2) === JSON.stringify(b1), `replay did not change stock (${JSON.stringify(b2)})`);
     state.phBlk = b2;
+    // Демо: Shopify не оновлюється — після надходження «доступно» відрізняється від демо-значення Shopify, але
+    // розбіжність не позначається ні в картці, ні в списку (лише нейтральна підказка; звірка в демо нічого не робить).
+    const card = await mainText(p);
+    ck(!/Розбіжність перевіряється звіркою/.test(card) && /Демо: Shopify не оновлюється/.test(card), "item card: demo hint instead of the Shopify «differs» note");
+    await go(p, "/demo/warehouse");
+    const body = (await p.locator("main table tbody").innerText()).replace(/\s+/g, " ");
+    ck(!/розбіжність/i.test(body), "stock list (demo): no «розбіжність» marker in rows");
   });
 
   await step("item: mark defective + stocktake (count) on the card", D, p, async (ck) => {
@@ -490,6 +647,34 @@ try {
     const txt = await mainText(p);
     ck(/Коригування|Інвентаризац/.test(txt) && txt.includes("Demo Owner"), "movement with actor name shown in recent movements");
     ck(COST_RE.test(txt), "owner sees cost in item movements");
+  });
+
+  await step("item: repair a defect and write off a defect (replayed write-off not applied twice)", D, p, async (ck) => {
+    const item = state.index["OT-PH-BLK"];
+    await go(p, item.href);
+    const b0 = await itemBalances(p);
+    ck(b0.defective >= 2, `item has defective units (${b0.defective})`);
+    await openDetails(p, "Брак відремонтовано");
+    const rf = p.locator("form:has(input[name=intent][value=repair])");
+    await rf.locator("#wh-repair-qty").fill("1");
+    await submitPost(p, rf.locator("button[type=submit]"));
+    const b1 = await itemBalances(p);
+    ck(b1.defective === b0.defective - 1 && b1.onHand === b0.onHand + 1 && b1.available === b0.available + 1, `repair: defective −1, on hand +1 (${JSON.stringify(b1)})`);
+    await openDetails(p, "Списати брак");
+    const wf = p.locator("form:has(input[name=intent][value=writeOff])");
+    const opId = await wf.locator("input[name=operationId]").inputValue();
+    await wf.locator("#wh-writeoff-qty").fill("1");
+    const reason = await wf.locator("#wh-writeoff-reason").inputValue();
+    await submitPost(p, wf.locator("button[aria-haspopup=dialog]"), { confirm: true });
+    const b2 = await itemBalances(p);
+    ck(b2.defective === b1.defective - 1 && b2.onHand === b1.onHand && b2.available === b1.available, `write-off: defective −1, on hand unchanged (${JSON.stringify(b2)})`);
+    const replay = await p.request.post(`${BASE}${item.href}`, { form: { intent: "writeOff", operationId: opId, quantity: "1", reason, note: "" }, headers: { Origin: ORIGIN } });
+    ck(replay.ok() && (await replay.text()).includes("вже надіслано"), `replayed write-off answered «already submitted» (${replay.status()})`);
+    await go(p, item.href);
+    ck(JSON.stringify(await itemBalances(p)) === JSON.stringify(b2), "replayed write-off did not change stock");
+    await go(p, `/demo/warehouse/movements?item=${encodeURIComponent(item.href.split("/").pop())}`);
+    const mv = await mainText(p);
+    ck(mv.includes("Брак відремонтовано") && mv.includes("Списання браку"), "repair and write-off movements in history");
   });
 
   await step("warehouse: bulk stocktake sheet for selected items", D, p, async (ck) => {
@@ -678,6 +863,77 @@ try {
     ck(COST_RE.test(await mainText(p)), "owner sees cost per good unit on closed batch");
   });
 
+  await step("production: statistics block counts the receipts (good, defective share, on time)", D, p, async (ck) => {
+    await go(p, "/demo/production");
+    const stats = async () => (await p.locator("main section", { hasText: "Статистика виробництва" }).last().innerText()).replace(/\s+/g, " ");
+    let t = await stats();
+    // Партія E2E: 8 якісних + 2 браку, потім решта 10 + 10 — разом 28 якісних і 2 браку; отримано до планової дати.
+    const good = num(t.match(/([\d\s]+) Отримано якісних/)?.[1]);
+    ck(good === 28, `good units received = 28 (${good}; ${t.slice(0, 200)})`);
+    ck(/Брак \(частка\)/.test(t) && /\b2 \(6[,.]\d+\s?%\)/.test(t), `defective 2 (6,7 %) shown (${t.match(/[^.]{0,40}Брак \(частка\)[^.]{0,40}/)?.[0]})`);
+    ck(/1 з 1 з плановою датою/.test(t), "1 of 1 batches with a planned date received on time");
+    ck(/Брак за моделями/.test(t) && /Брак за кольорами/.test(t) && /Model X/.test(t) && /Чорний/.test(t), "defects by model and by colour");
+    ck(/Собівартість отриманого/.test(t), "owner sees the cost of units received");
+    for (const [label, period] of [["30 днів", "30"], ["Рік", "365"]]) {
+      await p.locator("main a", { hasText: new RegExp(`^${label}$`) }).first().click();
+      await p.waitForURL(new RegExp(`stats=${period}`));
+      await settle(p);
+      await p.waitForTimeout(250);
+      t = await stats();
+      ck(num(t.match(/([\d\s]+) Отримано якісних/)?.[1]) === 28, `period ${label}: same receipts (today) counted`);
+    }
+  });
+
+  await step("production: list filters (model, colour, product, search) + cancel a started batch", D, p, async (ck) => {
+    // Перша таблиця — перелік партій (нижче — таблиці статистики браку).
+    const listRows = async () => (await p.locator("main table").first().locator("tbody tr").allInnerTexts()).map((r) => r.replace(/\s+/g, " "));
+    const filter = async (field, label) => {
+      await go(p, "/demo/production?tab=all");
+      const f = p.locator("form[role=search]");
+      if (label === null) await f.locator(`input[name=${field}]`).fill("E2E batch");
+      else await f.locator(`select[name=${field}]`).selectOption({ label });
+      await submitGet(p, f.locator("button[type=submit]"));
+      return listRows();
+    };
+    let rows = await filter("model", "Model S");
+    ck(rows.length === 1 && rows[0].includes("PB-2026-0001"), `model=Model S → seeded batch only (${rows.length})`);
+    rows = await filter("color", "Білий");
+    ck(rows.length === 1 && rows[0].includes("PB-2026-0001"), `colour=Білий → seeded batch only (${rows.length})`);
+    rows = await filter("product", "Крило заднє");
+    ck(rows.length === 2, `product=Крило заднє → both batches with fenders (${rows.length})`);
+    rows = await filter("q", null);
+    ck(rows.length === 1 && rows[0].includes("E2E batch"), `search «E2E batch» → the E2E batch (${rows.length})`);
+
+    // Нова партія → запуск → скасування: «у виробництві» повертається, надходжень немає.
+    const gry = state.index["OT-GR-GRY"];
+    await go(p, gry.href);
+    const g0 = await itemBalances(p);
+    await go(p, "/demo/production/new");
+    await p.getByRole("checkbox", { name: /Грипси силіконові/ }).check();
+    await submitGet(p, p.getByRole("button", { name: "Показати сітку" }));
+    await p.locator(`input[name="qty.${gry.variantId}"]`).waitFor();
+    await p.locator("#batch-title").fill("E2E batch to cancel");
+    await p.locator("#batch-ready").fill(inDays(14));
+    await p.locator(`input[name="qty.${gry.variantId}"]`).fill("5");
+    await submitPost(p, p.getByRole("button", { name: "Створити партію" }));
+    await p.waitForURL(/\/production\/[0-9a-f-]{36}/).catch(() => {});
+    const cancelUrl = new URL(p.url()).pathname;
+    await submitPost(p, p.getByRole("button", { name: "Запустити у виробництво" }), { confirm: true });
+    await go(p, gry.href);
+    ck((await itemBalances(p)).inProduction === g0.inProduction + 5, "started: OT-GR-GRY in production +5");
+    await go(p, cancelUrl);
+    await submitPost(p, p.getByRole("button", { name: "Скасувати партію" }), { confirm: true });
+    ck(/Партію скасовано\. Знято з «У виробництві»: 5/.test(await bannerText(p)), `cancel banner (${(await bannerText(p)).slice(0, 160)})`);
+    ck((await mainText(p)).includes("Скасовано"), "batch status: cancelled");
+    ck((await p.getByRole("button", { name: "Запустити у виробництво" }).count()) === 0 && (await p.locator('button[value="receive"]').count()) === 0, "no start / receipt on a cancelled batch");
+    await go(p, gry.href);
+    const g1 = await itemBalances(p);
+    ck(g1.inProduction === g0.inProduction && g1.onHand === g0.onHand, `cancel: in production back, on hand unchanged (${JSON.stringify(g1)})`);
+    await go(p, "/demo/production?tab=cancelled");
+    rows = await listRows();
+    ck(rows.length === 1 && rows[0].includes("E2E batch to cancel"), `«Скасовано» tab lists the batch (${rows.length})`);
+  });
+
   // ---------------- Упаковка ----------------
   await step("packaging: materials list + bulk receive", D, p, async (ck) => {
     const before = await materialStock(p);
@@ -730,6 +986,22 @@ try {
     ck(txt.includes("Скотч пакувальний"), "new all-orders kit applies to #1002");
   });
 
+  await step("packaging: automatic box by dimensions (#1006) and «part without dimensions» (#1005)", D, p, async (ck) => {
+    await go(p, "/demo/warehouse/kits?order=%231006");
+    let t = await kitCheckText(p);
+    // OT-FK-S має габарити 280×140×60 мм: найменша коробка, що вміщує й витримує, — Коробка M.
+    ck(/Коробка M \(box_m\)/.test(t) && /Підібрано за габаритами й вагою/.test(t), `#1006: Коробка M chosen by dimensions and weight (${t.match(/Коробка [^.]{0,80}\./)?.[0]})`);
+    ck(/Одиниць: 1, з габаритами: 1, вага: 340/.test(t), "#1006: 1 unit with dimensions, 340 g");
+    ck(t.includes("Крило Model S: скотч для кронштейна"), "#1006 (Model S, collection «Крила та захист»): the seeded collection kit with a Model S filter applies");
+    await go(p, "/demo/warehouse/kits?order=%231005");
+    t = await kitCheckText(p);
+    ck(/Неточно: частина товарів без габаритів/.test(t), "#1005: box marked as approximate (some items without dimensions)");
+    ck(/Одиниць: 3, з габаритами: 2/.test(t), "#1005: 3 units, 2 with dimensions");
+    await go(p, "/demo/warehouse/kits?order=%231002");
+    t = await kitCheckText(p);
+    ck(/Результат|#1002/.test(t) && !t.includes("Крило Model S: скотч для кронштейна"), "#1002 (Model X, same collection): the Model S kit does not apply");
+  });
+
   // ---------------- Підготовка замовлень ----------------
   await step("orders: bulk create test waybills (sandbox carrier)", D, p, async (ck) => {
     await go(p, "/demo/orders");
@@ -742,6 +1014,13 @@ try {
     await submitPost(p, p.getByRole("button", { name: /Створити тестові накладні/ }).first(), { confirm: true });
     const txt = await bannerText(p);
     ck(/накладн/i.test(txt), `bulk waybill result (${txt.slice(0, 200)})`);
+    // Демо-історія продажів (#0978–#0995, доставлені) — замовлень 34, список на 2 сторінки по 25.
+    await go(p, "/demo/orders");
+    const ol = await mainText(p);
+    ck(/Показано 1–25 з 34/.test(ol) && /Сторінка 1 з 2/.test(ol), `orders list: 34 orders on 2 pages (${ol.match(/Показано [^ ]+ з \d+/)?.[0]})`);
+    await go(p, "/demo/orders?status=delivered");
+    const dl = await mainText(p);
+    ck(dl.includes("#0978") && dl.includes("#0995") && /з 19\b/.test(dl), "delivered: 18 demo history orders + #0997");
     await go(p, "/demo/picking");
     const q = await mainText(p);
     ck(["#0998", "#1001", "#1002", "#1007"].every((n) => q.includes(n)), "packing queue has the 4 orders with a waybill");
@@ -778,6 +1057,30 @@ try {
     ck(first.includes("#1007") && first.includes("Терміновий"), `#1007 urgent and first (${first.slice(0, 80)})`);
   });
 
+  await step("picking: pick list for selected orders (unit totals, materials)", D, p, async (ck) => {
+    await go(p, "/demo/picking");
+    for (const n of ["#1001", "#1002", "#1007"]) await p.getByRole("checkbox", { name: `Вибрати ${n}` }).check();
+    const btn = p.getByRole("button", { name: "Лист комплектації (3)" });
+    ck((await btn.count()) === 1 && (await btn.isEnabled()), "«Лист комплектації (3)» enabled for 3 orders to pick");
+    await btn.click();
+    await arrive(p, /\/picking\/pick-list\?/, "main .ot-pick__list");
+    const u = new URL(p.url());
+    state.pickListUrl = u.pathname + u.search;
+    ck(u.searchParams.getAll("ids").length === 3, `URL carries the 3 selected orders (${u.search.slice(0, 80)}…)`);
+    const t = await mainText(p);
+    ck(/Лист комплектації: замовлень 3/.test(t) && /Усього одиниць 4/.test(t), "title: 3 orders, 4 units in total");
+    const rows = await pickRows(p);
+    const grips = rows.find((r) => r.text.includes("OT-GR-BLK"));
+    ck(rows.length === 3 && rows.reduce((a, r) => a + r.qty, 0) === 4, `3 lines adding up to 4 units (${rows.map((r) => `${r.qty}×${r.text.slice(0, 30)}`).join(" | ")})`);
+    ck(grips?.qty === 2 && /#1001 × 1/.test(grips.text) && /#1007 × 1/.test(grips.text), `grips OT-GR-BLK: 2 = #1001 × 1 + #1007 × 1 (${grips?.text.slice(0, 120)})`);
+    ck(/На полиці: \d+/.test(grips?.text ?? ""), "on-shelf stock shown per line");
+    const materials = (await p.locator("main .ot-invoice__declaration li").allInnerTexts()).map((x) => x.replace(/\s+/g, " ").trim());
+    ck(/Пакувальні матеріали/i.test(t) && materials.some((m) => /Наклейка з логотипом × 3/.test(m)) && materials.some((m) => /Болти M5 \(комплект\) × 1/.test(m)), `packaging materials summed (${materials.join(" | ")})`);
+    // Лист лише для друку — черга не змінюється.
+    await go(p, "/demo/picking?tab=awaiting_picking");
+    ck((await p.locator("main table tbody tr").count()) === 0, "pick list does not start packing");
+  });
+
   await step("packing #1002: start, scan wrong/unknown/right, box, weight/dims, confirm", D, p, async (ck) => {
     await go(p, "/demo/picking");
     await p.getByRole("link", { name: /#1002/ }).first().click();
@@ -800,8 +1103,9 @@ try {
     const opts = await box.locator("option").allInnerTexts();
     const suggested = opts.find((o) => o.includes("★"));
     ck(Boolean(suggested), `a recommended box is marked (${suggested ?? opts.join(" / ")})`);
-    // Підбір лише за вагою (у демо-товарів немає габаритів) — ★ лише рекомендація, коробку обирає пакувальник
-    // (задокументовано в packing.server.ts defaultBoxFor). Обираємо рекомендовану.
+    // OT-FK-X без габаритів (у демо габарити мають лише OT-PH-WHT, OT-FK-S, OT-GR-GRY) — підбір лише за вагою;
+    // ★ лише рекомендація, коробку обирає пакувальник (packing.server.ts defaultBoxFor). Підбір за габаритами —
+    // крок «automatic box by dimensions (#1006)». Обираємо рекомендовану.
     const preselected = await box.evaluate((s) => s.options[s.selectedIndex]?.text ?? "");
     ck(/Рекомендовано ★/.test(await mainText(p)), `recommendation explained in help text (preselected: ${preselected})`);
     if (suggested) await box.selectOption({ label: suggested });
@@ -840,6 +1144,71 @@ try {
     state.materials2 = m;
   });
 
+  await step("picking: carrier handover list after «Запаковано» #1002 (row, signatures)", D, p, async (ck) => {
+    await go(p, "/demo/picking");
+    const open = p.getByRole("link", { name: "Список передачі перевізнику (1)" });
+    ck((await open.count()) === 1, "queue offers the handover list for 1 packed parcel");
+    await open.click();
+    await arrive(p, /\/picking\/handover/, "main .ot-handover__sheet");
+    let t = await mainText(p);
+    ck(/Список передачі перевізнику: посилок 1/.test(t), "title: 1 parcel");
+    const rows = (await p.locator("main .ot-handover__sheet tbody tr").allInnerTexts()).map((r) => r.replace(/\s+/g, " "));
+    ck(rows.length === 1 && rows[0].includes("#1002") && /TEST\d+/.test(rows[0]), `row: #1002 with its test waybill (${rows[0]?.slice(0, 120)})`);
+    ck(rows[0]?.includes("Demo Owner") && /PL/.test(rows[0] ?? ""), "row: packed by Demo Owner, destination PL");
+    // Підписи — підзаголовки .ot-invoice__label (великі літери в CSS): порівнюємо без регістру.
+    ck(["Передав (склад): ПІБ, підпис", "Прийняв (перевізник): ПІБ, підпис", "Дата й час передачі"].every((x) => t.toLowerCase().includes(x.toLowerCase())), "signature lines (handed over / received / date and time)");
+    ck(/Тестові накладні \(демо\)/.test(t), "demo warning: test waybills are not handed to a real carrier");
+    // Лінії для підписів — на одному рівні, навіть коли довший підпис переноситься.
+    const lines = await p.locator("main .ot-handover__line").evaluateAll((els) => els.map((e) => Math.round(e.getBoundingClientRect().bottom)));
+    ck(lines.length === 3 && Math.max(...lines) - Math.min(...lines) <= 1, `signature lines aligned (${lines.join(", ")})`);
+    // Список лише для друку: замовлення не передано.
+    await go(p, `/demo/orders/${packingOrderId()}`);
+    ck((await p.getByRole("button", { name: "Передано перевізнику" }).count()) > 0, "printing the list does not hand the order over");
+    // З вибраних у черзі: лише запаковані.
+    await go(p, "/demo/picking");
+    for (const n of ["#1001", "#1002"]) await p.getByRole("checkbox", { name: `Вибрати ${n}` }).check();
+    await p.getByRole("button", { name: "Список передачі (1)" }).click();
+    await arrive(p, /\/picking\/handover\?ids=/, "main .ot-handover__sheet");
+    t = await mainText(p);
+    const sel = (await p.locator("main .ot-handover__sheet tbody tr").allInnerTexts()).map((r) => r.replace(/\s+/g, " "));
+    ck(/лише вибрані запаковані посилки/.test(t) && sel.length === 1 && sel[0].includes("#1002"), `selection: only the packed #1002 is on the sheet (${sel.length})`);
+    ck(/Не включено вибраних: 1/.test(t) && /#1001[^#]*ще не запаковано/.test(t), "not-packed #1001 reported as skipped with a reason");
+  });
+
+  await step("packaging: kit template on a collection with a model filter applies to matching orders only", D, p, async (ck) => {
+    await go(p, "/demo/warehouse/kits?edit=new");
+    const form = p.locator("form:has(input[name=intent][value=createKit])");
+    await form.locator("input[name=name]").fill("E2E Model X fenders");
+    await form.locator("input[name=priority]").fill("3");
+    await form.locator("select[name=appliesTo]").selectOption("collections");
+    await p.getByRole("checkbox", { name: /Крила та захист/ }).check();
+    await form.locator("select[name=lineMaterialId]").first().selectOption({ label: "Наклейка з логотипом (sticker_logo)" });
+    await form.locator("input[name=lineQuantity]").first().fill("2");
+    await form.locator("select[name=linePer]").first().selectOption("order");
+    await openDetails(p, "Лише для певних моделей");
+    await form.getByRole("checkbox", { name: "Model X", exact: true }).check();
+    await submitPost(p, form.locator("button[type=submit]"));
+    const list = async () => (await p.locator("main table tbody").first().innerText()).replace(/\s+/g, " ");
+    let t = await list();
+    ck(t.includes("E2E Model X fenders") && /Колекцій: 1/.test(t) && /Лише: Model X/.test(t), `kit listed: 1 collection, only Model X (${await bannerText(p)})`);
+    // Замовлення з Model X у колекції — так; Model S тієї ж колекції — ні.
+    await go(p, "/demo/warehouse/kits?order=%231012");
+    t = await kitCheckText(p);
+    ck(/Наклейка з логотипом — 3 шт\./.test(t) && t.includes("E2E Model X fenders"), `#1012 (Model X): the kit adds 2 stickers to the standard 1 (${t.match(/Наклейка з логотипом — [^А-Я]*/)?.[0]})`);
+    await go(p, "/demo/warehouse/kits?order=%231006");
+    t = await kitCheckText(p);
+    ck(!t.includes("E2E Model X fenders") && /Наклейка з логотипом — 1 шт\./.test(t), "#1006 (Model S, same collection): the kit does not apply");
+    // Фільтр списку шаблонів за моделлю.
+    await go(p, "/demo/warehouse/kits");
+    await p.locator("form[role=search] select[name=model]").first().selectOption({ label: "Model X" });
+    await submitGet(p, p.locator("form[role=search] button[type=submit]").first());
+    t = await list();
+    ck(t.includes("E2E Model X fenders") && !t.includes("Крило Model S: скотч для кронштейна"), "list filter model=Model X: our kit, not the Model S kit");
+    await go(p, "/demo/warehouse/kits?model=Model%20S");
+    t = await list();
+    ck(!t.includes("E2E Model X fenders") && t.includes("Крило Model S: скотч для кронштейна"), "list filter model=Model S: the Model S kit, not ours");
+  });
+
   await step("picking: bulk start, bulk print documents, carrier labels", D, p, async (ck) => {
     await go(p, "/demo/picking");
     await p.getByRole("checkbox", { name: "Вибрати #1001" }).check();
@@ -861,13 +1230,81 @@ try {
     await shot(p, "owner-print-batch");
     await go(p, "/demo/picking");
     for (const n of ["#1001", "#1002"]) await p.getByRole("checkbox", { name: `Вибрати ${n}` }).check();
-    // Тестовий перевізник етикеток не має: маршрут відповідає 409 з поясненням (очікувано).
-    await expecting(p, [409], async () => {
-      await p.getByRole("button", { name: /Етикетки перевізника/ }).click();
-      await p.locator(".ot-banner", { hasText: /Етикетк/ }).first().waitFor({ timeout: ACTION_TIMEOUT }).catch(() => {});
-    });
+    // Тестовий перевізник демо дає зразковий PDF етикетки (test-carrier.ts): об'єднаний PDF відкривається в новій вкладці.
+    const labelsResp = p.waitForResponse((r) => r.url().includes("/picking/labels"), { timeout: ACTION_TIMEOUT }).catch(() => null);
+    const popup = p.context().waitForEvent("page", { timeout: ACTION_TIMEOUT }).catch(() => null);
+    await p.getByRole("button", { name: "Етикетки перевізника (PDF, 2)" }).click();
+    const lr = await labelsResp;
+    const type = lr?.headers()["content-type"] ?? "";
+    const pdf = lr ? await lr.body().catch(() => Buffer.alloc(0)) : Buffer.alloc(0);
+    ck(lr?.status() === 200 && type.startsWith("application/pdf") && pdf.subarray(0, 5).toString() === "%PDF-", `labels: 200 application/pdf (${lr?.status()} ${type}, ${pdf.length} bytes)`);
+    ck(lr?.headers()["x-ot-labels-included"] === "2", `labels: 2 included (${lr?.headers()["x-ot-labels-included"]})`);
+    await p.locator(".ot-banner", { hasText: /Відкрито PDF з етикетками/ }).first().waitFor({ timeout: ACTION_TIMEOUT }).catch(() => {});
     const lb = await bannerText(p);
-    ck(/етикет/i.test(lb), `labels: understandable result in demo (${lb.slice(0, 200)})`);
+    ck(/Відкрито PDF з етикетками: 2\. Пропущено: 0\./.test(lb), `labels: success banner (${lb.slice(0, 200)})`);
+    const tab = await popup;
+    ck(Boolean(tab), "labels PDF opened in a new tab");
+    await tab?.close().catch(() => {});
+  });
+
+  await step("packing #1007: manual ±1 needs a reason (server too)", D, p, async (ck) => {
+    await go(p, state.packing1007 ?? "/demo/picking");
+    await p.locator("#packing-scan-code").waitFor();
+    const plus = p.getByRole("button", { name: /^Додати одну одиницю: Грипси силіконові/ });
+    const minus = p.getByRole("button", { name: /^Зняти одну одиницю: Грипси силіконові/ });
+    const line = p.locator("main li").filter({ has: plus });
+    const badge = async () => (await line.locator(".ot-badge").first().innerText()).trim();
+    const waitBadge = async (want) => {
+      for (let i = 0; i < 25 && (await badge()) !== want; i++) await p.waitForTimeout(200);
+      return badge();
+    };
+    ck((await badge()) === "0 / 1", `grips line starts at 0 / 1 (${await badge()})`);
+    ck((await plus.isDisabled()) && (await minus.isDisabled()), "+1 / −1 disabled until a reason is chosen");
+    // Обхід інтерфейсу без причини — відмова сервера, чекліст не змінюється.
+    const lineId = await line.locator("input[name=lineId]").first().inputValue();
+    const raw = await p.request.post(`${BASE}${state.packing1007}`, { form: { intent: "adjust", lineId, delta: "1", reason: "" }, headers: { Origin: ORIGIN } });
+    ck(raw.status() < 500, `adjust without a reason answered (${raw.status()})`);
+    await go(p, state.packing1007);
+    ck((await badge()) === "0 / 1", "server rejected ±1 without a reason (still 0 / 1)");
+    await p.locator("#packing-adjust-reason").selectOption("barcode_unreadable");
+    const post = () => p.waitForResponse((r) => r.request().method() === "POST", { timeout: ACTION_TIMEOUT }).catch(() => null);
+    let resp = post();
+    await plus.click();
+    await resp;
+    ck((await waitBadge("1 / 1")) === "1 / 1" && (await plus.isDisabled()), "+1 with a reason → 1 / 1 (+1 then disabled)");
+    resp = post();
+    await minus.click();
+    await resp;
+    ck((await waitBadge("0 / 1")) === "0 / 1", "−1 with a reason → 0 / 1");
+  });
+
+  await step("packing #1007: weight < 90 % of goods — warning; staff cannot confirm, owner confirms", D, p, async (ck) => {
+    await go(p, state.packing1007 ?? "/demo/picking");
+    await p.locator("#packing-weight").fill("50");
+    await submitPost(p, p.getByRole("button", { name: "Зберегти посилку" }));
+    const b = await bannerText(p);
+    ck(/Параметри посилки збережено|Зважена вага менша за 90 %/.test(b), `parcel saved with a low weight (${b.slice(0, 200)})`);
+    let t = await mainText(p);
+    ck(/Зважену вагу не буде використано для накладної/.test(t) && /менша за 90 % ваги товарів/.test(t), "warning: 50 g is below 90 % of the goods weight (90 g)");
+    const confirmForm = (pg) => pg.locator("form:has(input[name=intent][value=confirmWeight])");
+    ck((await confirmForm(p).count()) === 1 && /Вагу .*50.* перевірено/.test(await confirmForm(p).innerText()), "owner sees «Вагу 50 г перевірено»");
+    // Працівник (окрема сесія): бачить попередження без кнопки; сервер відхиляє підтвердження.
+    const { ctx: sctx, page: sp } = await rolePage("staff");
+    await go(sp, state.packing1007);
+    const st = await mainText(sp);
+    ck(/Зважену вагу не буде використано/.test(st) && /попросіть власника підтвердити/.test(st), "staff: warning + «ask the owner»");
+    ck((await confirmForm(sp).count()) === 0, "staff: no confirm button");
+    const r = await expecting(sp, [403], () => sp.request.post(`${BASE}${state.packing1007}`, { form: { intent: "confirmWeight", weightGrams: "50" }, headers: { Origin: ORIGIN } }));
+    const rt = await r.text();
+    ck(r.status() === 403 || rt.includes("може лише власник") || rt.includes("Недостатньо прав"), `staff confirmation rejected on the server (${r.status()})`);
+    await go(sp, state.packing1007);
+    ck(!/Власник підтвердив зважену вагу/.test(await mainText(sp)), "still not confirmed after the staff attempt");
+    await sctx.close();
+    await go(p, state.packing1007);
+    await submitPost(p, confirmForm(p).locator("button[aria-haspopup=dialog]"), { confirm: true });
+    ck(/Вагу підтверджено/.test(await bannerText(p)), `owner confirmed (${(await bannerText(p)).slice(0, 160)})`);
+    t = await mainText(p);
+    ck(/Власник підтвердив зважену вагу/.test(t) && (await confirmForm(p).count()) === 0, "verified note shown, no confirm button any more");
   });
 
   await step("handover #1002 → sale consumption in movements history", D, p, async (ck) => {
@@ -898,6 +1335,41 @@ try {
     await go(p, state.index["OT-FK-X"].href);
     const again = await itemBalances(p);
     ck(JSON.stringify(again) === JSON.stringify(after), "replayed handover did not write off twice");
+  });
+
+  await step("movements: filter by model / colour", D, p, async (ck) => {
+    const rows = async () => (await p.locator("main table tbody tr").allInnerTexts()).map((r) => r.replace(/\s+/g, " "));
+    await go(p, "/demo/warehouse/movements");
+    const f = p.locator("form[role=search]").first();
+    await f.locator("select[name=model]").selectOption({ label: "Model X" });
+    await submitGet(p, f.locator("button[type=submit]"));
+    ck(/[?&]model=Model(\+|%20)X/.test(p.url()), `URL keeps model=Model X (${p.url().replace(BASE, "")})`);
+    let r = await rows();
+    ck(r.length > 0 && r.every((x) => x.includes("Model X")) && r.some((x) => x.includes("Списання (передано перевізнику)")), `model=Model X → only OT-FK-X movements, incl. the #1002 sale (${r.length})`);
+    ck(r.every((x) => !/Тримач|Грипси|Наклейка|Коробка/.test(x)), "no other products or materials");
+    await go(p, "/demo/warehouse/movements");
+    await f.locator("select[name=color]").selectOption({ label: "Білий" });
+    await submitGet(p, f.locator("button[type=submit]"));
+    r = await rows();
+    ck(r.length > 0 && r.every((x) => x.includes("Тримач телефону Pro") && x.includes("Білий")), `colour=Білий → only OT-PH-WHT movements (${r.length})`);
+    await go(p, "/demo/warehouse/movements?model=Model%20X&color=%D0%91%D1%96%D0%BB%D0%B8%D0%B9");
+    ck((await p.locator("main table tbody tr").count()) === 0, "model AND colour of one variant: Model X + Білий → nothing");
+  });
+
+  await step("material card: «Витрачено за 30 днів» and days of stock", D, p, async (ck) => {
+    await go(p, "/demo/warehouse/movements?kind=material&type=material_consume");
+    const link = p.locator('main a[href*="/warehouse/items/"]', { hasText: "Болти M5" }).first();
+    ck((await link.count()) === 1, "packaging consumption of bolts M5 is in the movement history");
+    state.materialHref = await link.getAttribute("href");
+    await go(p, state.materialHref);
+    const t = await mainText(p);
+    const used = num(t.match(/([\d\s]+) Витрачено за 30 днів/)?.[1] ?? t.match(/Витрачено за 30 днів ([\d\s]+)/)?.[1]);
+    ck(used === 1, `bolts used in the last 30 days = 1 (#1002) (${used}; ${t.match(/.{0,30}Витрачено за 30 днів.{0,30}/)?.[0]})`);
+    ck(/Вистачить на, днів/.test(t) && !/Витрат не було — прогнозу немає/.test(t), "days-of-stock forecast shown (usage exists)");
+    ck(!/Доступно для продажу/.test(t) && !/Зарезервовано/.test(t), "material card without product-only figures (available / reserved)");
+    await go(p, "/demo/warehouse/materials");
+    const mt = (await p.locator("main table tbody tr", { hasText: "Болти M5" }).first().innerText()).replace(/\s+/g, " ");
+    ck(/Вистачить на \d+/.test(mt) || /\b1 шт\./.test(mt), `materials list: usage / forecast column for bolts (${mt.slice(0, 160)})`);
   });
 
   await step("packing #1001: unpack and re-pack does not consume materials twice", D, p, async (ck) => {
@@ -952,11 +1424,16 @@ try {
   await step("CSV export (owner: with cost columns)", D, p, async (ck) => {
     p.__role = "owner";
     await go(p, "/demo/warehouse/analytics");
-    for (const label of ["Залишки", "Рух за період", "Продажі за варіантами"]) {
+    for (const label of ["Залишки", "Рух за період", "Продажі за варіантами", "Партії виробництва"]) {
       const { file, head } = await csvDownload(p, label);
       ck(head.length > 0, `${label}: file ${path.basename(file)} header: ${head.slice(0, 120)}`);
       if (label === "Залишки") ck(head.includes("unit_cost"), "owner stock CSV has unit_cost");
       if (label === "Рух за період") ck(/unit_cost/.test(head), "owner movements CSV has unit_cost");
+      if (label === "Партії виробництва") {
+        ck(head.includes("batch_number") && head.includes("batch_cost_per_good_unit"), "production CSV: batch_number, batch_cost_per_good_unit");
+        const body = fs.readFileSync(file, "utf8");
+        ck(/PB-\d{4}-\d{4}/.test(body) && body.includes("OT-FK-X"), "production CSV has batch lines (E2E batch with OT-FK-X)");
+      }
     }
     const raw = await expecting(p, [400], () => p.request.get(`${BASE}/demo/warehouse/export`));
     const body = await raw.text();
@@ -1015,6 +1492,14 @@ try {
     await go(s, "/demo/warehouse/analytics");
     t = await mainText(s);
     ck(!/собіварт(?!ості доступні лише власнику)/i.test(t.replace("Колонки собівартості доступні лише власнику.", "")), "analytics without cost values");
+    ck(!/Вартість запасу/.test(t), "analytics: no inventory value KPI for staff");
+    await go(s, "/demo/production");
+    t = await mainText(s);
+    ck(/Статистика виробництва/.test(t) && !/Собівартість отриманого/.test(t), "production statistics without the cost of units received");
+    // Головна: блок «Нові партії» (рекомендації) — для тих, хто керує виробництвом.
+    await go(s, "/demo");
+    t = await mainText(s);
+    ck(!/Потребують нової партії|Рекомендовано виготовити/.test(t) && !COST_RE.test(t), "dashboard: no production recommendations block and no costs for staff");
   });
 
   await step("staff: CSV export without cost columns", S, s, async (ck) => {
@@ -1026,6 +1511,10 @@ try {
     const r = await s.request.get(`${BASE}/demo/warehouse/export?dataset=movements`);
     const head = (await r.text()).split(/\r?\n/)[0];
     ck(!/unit_cost/.test(head), "direct export URL also hides costs");
+    ck((await s.getByRole("button", { name: "Партії виробництва", exact: true }).count()) === 0, "no «Партії виробництва» (owner-only dataset) for staff");
+    const prod = await expecting(s, [403], () => s.request.get(`${BASE}/demo/warehouse/export?dataset=production`));
+    const prodBody = await prod.text();
+    ck(prod.status() === 403 && !prodBody.includes("batch_cost_per_good_unit"), `production dataset → 403 for staff (${prod.status()})`);
   });
 
   await step("staff: owner-only pages are 403 or hidden", S, s, async (ck) => {
@@ -1057,6 +1546,8 @@ try {
     ck((await r.text()).includes("Недостатньо прав"), "initialize inventory → forbidden");
     r = await expecting(s, [403], () => post("/demo/production/new", { intent: "create", title: "x" }));
     ck(r.status() === 403 || (await r.text()).includes("Недостатньо прав"), `create batch → forbidden (${r.status()})`);
+    r = await post(item.href, { intent: "writeOff", operationId: crypto.randomUUID(), quantity: "1", reason: "disposed" });
+    ck((await r.text()).includes("Недостатньо прав"), "write off defects → forbidden");
     r = await post(state.batchUrl, { intent: "cancel", version: "1" });
     ck((await r.text()).includes("Недостатньо прав"), "cancel batch → forbidden");
     r = await post("/demo/warehouse/kits", { intent: "createKit", name: "staff kit", appliesTo: "all", priority: "0", active: "on" });
@@ -1117,6 +1608,25 @@ try {
     ck(!COST_RE.test(t), "packing page without costs");
   });
 
+  await step("staff: pick list and carrier handover list", S, s, async (ck) => {
+    await go(s, "/demo/picking");
+    for (const n of ["#0998", "#1007"]) await s.getByRole("checkbox", { name: `Вибрати ${n}` }).check();
+    await s.getByRole("button", { name: "Список передачі (1)" }).click();
+    await arrive(s, /\/picking\/handover\?ids=/, "main .ot-handover__sheet");
+    let t = await mainText(s);
+    const rows = (await s.locator("main .ot-handover__sheet tbody tr").allInnerTexts()).map((r) => r.replace(/\s+/g, " "));
+    ck(rows.length === 1 && rows[0].includes("#0998") && rows[0].includes("Demo Staff"), `handover: #0998 packed by Demo Staff (${rows[0]?.slice(0, 120)})`);
+    ck(t.toLowerCase().includes("прийняв (перевізник): піб, підпис") && !COST_RE.test(t), "signature lines, no costs");
+    await go(s, "/demo/picking");
+    await s.getByRole("checkbox", { name: "Вибрати #1007" }).check();
+    await s.getByRole("button", { name: "Лист комплектації (1)" }).click();
+    await arrive(s, /\/picking\/pick-list\?ids=/, "main .ot-pick__list");
+    t = await mainText(s);
+    const picks = await pickRows(s);
+    ck(/Лист комплектації: замовлень 1/.test(t) && picks.length === 1 && picks[0].qty === 1 && picks[0].text.includes("OT-GR-BLK"), `pick list: #1007 → 1 × OT-GR-BLK (${picks.map((x) => x.text.slice(0, 60)).join(" | ")})`);
+    ck(/Пакувальні матеріали/i.test(t) && !COST_RE.test(t), "materials section, no costs");
+  });
+
   await staffCtx.close();
 
   // ======================= ТЕЛЕФОНИ =======================
@@ -1126,6 +1636,7 @@ try {
     { w: 390, h: 844 },
   ];
   const mobileScreens = (role) => [
+    ["dashboard", "/demo"],
     ["warehouse", "/demo/warehouse"],
     ["warehouse-item", itemHref("OT-PH-BLK")],
     ["movements", "/demo/warehouse/movements"],
@@ -1137,12 +1648,16 @@ try {
     ["packing-order", packingUrl()],
     ["packing-in-progress", state.packing1007 ?? "/demo/picking"],
     ["print", state.printUrl ?? "/demo/picking"],
+    ["pick-list", state.pickListUrl ?? "/demo/picking/pick-list"],
+    ["handover", "/demo/picking/handover"],
     ["materials", "/demo/warehouse/materials"],
+    ["material-item", state.materialHref ?? "/demo/warehouse/materials"],
     ["kits", "/demo/warehouse/kits?order=%231002"],
     ["analytics", "/demo/warehouse/analytics"],
     ["inventory-sync", "/demo/warehouse/shopify"],
+    ["problems", "/demo/problems"],
   ];
-  for (const role of ["owner", "staff"]) {
+  for (const role of process.env.E2E_SKIP_PHONES ? [] : ["owner", "staff"]) {
     for (const ph of phones) {
       const M = { role, viewport: `${ph.w}x${ph.h}` };
       const ctx = await browser.newContext({ viewport: { width: ph.w, height: ph.h }, isMobile: true, hasTouch: true, deviceScaleFactor: 2, locale: "uk-UA" });
@@ -1172,6 +1687,40 @@ try {
           await submitGet(m, m.locator("form[role=search] button[type=submit]"));
           const rows = await m.locator("main table tbody tr").allInnerTexts();
           ck(rows.length === 1 && rows[0].includes("OT-FK-X"), `filter applied on phone (${rows.length})`);
+        });
+      }
+      if ((ph.w === 390 && role === "owner") || (ph.w === 320 && role === "staff")) {
+        await step("mobile: picking bulk actions collapsed; open «Масові дії» → pick list", M, m, async (ck) => {
+          await go(m, "/demo/picking");
+          const details = m.locator("#packing-bulk-form details").first();
+          const summary = details.locator("summary").first();
+          ck((await details.count()) === 1 && !(await details.evaluate((d) => d.open)), "bulk actions collapsed on phone");
+          ck(!(await m.getByRole("button", { name: /^Лист комплектації/ }).isVisible()), "bulk buttons hidden until opened");
+          await m.getByRole("checkbox", { name: "Вибрати #1007" }).check();
+          ck(/Масові дії · вибрано: 1/.test(await summary.innerText()), `summary shows the selection (${(await summary.innerText()).trim()})`);
+          ck((await m.locator("#packing-bulk-form [aria-live=polite]").innerText()).includes("Вибрано: 1"), "selection announced in the live region");
+          await summary.click();
+          const pick = m.getByRole("button", { name: "Лист комплектації (1)" });
+          ck(await pick.isVisible(), "bulk buttons visible after opening «Масові дії»");
+          const h = await noHScroll(m);
+          ck(h.ok, `opened bulk actions fit (${h.scrollWidth}/${h.innerWidth}${h.widest ? ` widest: ${JSON.stringify(h.widest)}` : ""})`);
+          const small = await smallTapTargets(m);
+          if (small.length) tapFindings.push({ role, viewport: M.viewport, screen: "picking-bulk-open", count: small.length, sample: small.slice(0, 6) });
+          await m.screenshot({ path: path.join(OUT, `m-${role}-${ph.w}-picking-bulk-open.png`), fullPage: true }).catch(() => {});
+          await pick.click();
+          await arrive(m, /\/picking\/pick-list\?ids=/, "main .ot-pick__list");
+          ck(/Лист комплектації: замовлень 1/.test(await mainText(m)), "pick list opened from the phone");
+          const h2 = await noHScroll(m);
+          ck(h2.ok, `pick list fits the phone (${h2.scrollWidth}/${h2.innerWidth})`);
+          // Деталі позиції (SKU, штрихкод, розклад) — на всю ширину рядка, а не у вузькій колонці між фото й кількістю.
+          const geo = await m.evaluate(() => {
+            const row = document.querySelector("main .ot-pick__row")?.getBoundingClientRect();
+            const meta = document.querySelector("main .ot-pick__meta")?.getBoundingClientRect();
+            const ul = document.querySelector("main .ot-pick__materials");
+            return { row: row?.width ?? 0, meta: meta?.width ?? 0, bullets: ul ? getComputedStyle(ul).listStyleType : "missing" };
+          });
+          ck(geo.meta >= geo.row * 0.8, `pick row details use the row width (${Math.round(geo.meta)}/${Math.round(geo.row)} px)`);
+          ck(geo.bullets === "none", `materials: checkboxes without list bullets (${geo.bullets})`);
         });
       }
       if (ph.w === 375 && role === "staff") {
@@ -1226,6 +1775,7 @@ try {
     "ONE TUNNE (демо)", "вул. Демонстраційна, 1", "Київ", "Склад Київ (демо)", "Тестове відділення №1",
   ].sort((a, b) => b.length - a.length);
   const enScreens = [
+    ["dashboard", "/demo"],
     ["warehouse", "/demo/warehouse"],
     ["warehouse-item", itemHref("OT-PH-BLK")],
     ["material-item", null],
@@ -1239,15 +1789,19 @@ try {
     ["packing-in-progress", state.packing1007 ?? "/demo/picking"],
     ["settings-warehouse", "/demo/settings"],
     ["print", null],
+    ["pick-list", state.pickListUrl ?? "/demo/picking/pick-list"],
+    ["handover", "/demo/picking/handover"],
     ["materials", "/demo/warehouse/materials"],
+    ["material-item-usage", state.materialHref ?? null],
     ["materials-edit", "/demo/warehouse/materials?edit=new"],
     ["kits", "/demo/warehouse/kits?order=%231002"],
     ["kits-edit", "/demo/warehouse/kits?edit=new"],
     ["analytics", "/demo/warehouse/analytics"],
     ["inventory-sync", "/demo/warehouse/shopify"],
     ["order-detail", `/demo/orders/${packingOrderId()}`],
+    ["problems", "/demo/problems"],
   ];
-  await step("English locale: stage-5 pages have no untranslated Ukrainian / raw keys", E, null, async (ck) => {
+  if (!process.env.E2E_SKIP_EN) await step("English locale: stage-5 pages have no untranslated Ukrainian / raw keys", E, null, async (ck) => {
     await go(e, "/demo/warehouse/movements?kind=material");
     const matHref = await e.locator('main a[href*="/warehouse/items/"]').first().getAttribute("href");
     await go(e, "/demo/picking");
@@ -1257,7 +1811,7 @@ try {
     const printUrl = new URL(e.url()).pathname + new URL(e.url()).search;
     for (const entry of enScreens) {
       const [name] = entry;
-      const url = entry[1] ?? (name === "material-item" ? matHref : printUrl);
+      const url = entry[1] ?? (name === "material-item" ? matHref : name === "print" ? printUrl : null);
       if (!url) continue;
       await go(e, url);
       const found = await e.evaluate((DATA) => {
@@ -1295,6 +1849,40 @@ try {
     }
   });
   await enCtx.close();
+
+  // ======================= ВЛАСНИК: «Проблеми» → «Склад» =======================
+  // Наприкінці (змінює стан #1001): скасування вже запакованого замовлення відкриває складське попередження.
+  const { ctx: finalCtx, page: f } = await rolePage("owner");
+  await step("Problems: «Склад» category after cancelling a packed order; «Повернуто на склад» resolves it", D, f, async (ck) => {
+    await go(f, state.packing1001 ?? "/demo/picking");
+    ck(/Запаковано/.test(await mainText(f)), "#1001 is packed");
+    await go(f, "/demo/orders?q=1001");
+    const orderHref = await f.getByRole("link", { name: "#1001" }).first().getAttribute("href");
+    await go(f, orderHref);
+    await submitPost(f, f.locator("form:has(input[name=intent][value=cancelOrder]) button[aria-haspopup=dialog]").first(), { confirm: true });
+    ck((await bannerText(f)).includes("Замовлення скасовано"), `packed #1001 cancelled (${(await bannerText(f)).slice(0, 120)})`);
+    await go(f, "/demo/problems");
+    const chip = f.locator("main a", { hasText: /^Склад · \d+$/ });
+    ck((await chip.count()) === 1 && /Склад · 1/.test(await chip.innerText()), `category chip «Склад · 1» (${await chip.innerText().catch(() => "—")})`);
+    await chip.click();
+    await f.waitForURL(/category=warehouse/);
+    await settle(f);
+    await f.waitForTimeout(250);
+    let t = await mainText(f);
+    ck(t.includes("#1001") && /скасовано після пакування/i.test(t), `«Склад»: #1001 cancelled after packing (${t.match(/#1001.{0,120}/)?.[0]})`);
+    await go(f, "/demo/problems?source=warehouse");
+    ck((await mainText(f)).includes("#1001"), "source «Склад (пакування)» lists #1001");
+    await go(f, state.packing1001);
+    t = await mainText(f);
+    ck(/Замовлення скасовано після пакування/.test(t), "packing screen: unpack and return to shelf warning");
+    await submitPost(f, f.locator("form:has(input[name=intent][value=returned]) button[aria-haspopup=dialog]"), { confirm: true });
+    ck(/Позначено: товар повернуто на склад/.test(await bannerText(f)), `«Повернуто на склад» recorded (${(await bannerText(f)).slice(0, 120)})`);
+    await go(f, "/demo/problems?category=warehouse");
+    ck(!(await mainText(f)).includes("#1001"), "warning closed: no open «Склад» problem for #1001");
+    await go(f, "/demo/problems?tab=resolved&category=warehouse");
+    ck((await mainText(f)).includes("#1001"), "resolved tab lists #1001");
+  });
+  await finalCtx.close();
 } finally {
   await browser.close();
 }

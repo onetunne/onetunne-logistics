@@ -620,8 +620,11 @@ const reissueWaybillTool = defineTool({
  * Етап 5: команди складу (modules/warehouse/commands.server.ts) як інструменти асистента — `warehouse_<команда>`.
  * Ті самі схеми, дозволи й обробники, що й для майбутнього Telegram-бота; правила виконавця нижче (дозволи,
  * підтвердження за режимом, глобальна пауза, журнал) діють так само, як для інструментів замовлень. Зміни
- * (receive_stock, mark_defective) позначено requiresConfirmation і мають попередній перегляд; ідемпотентність —
- * operationId від викликача (manual:<operationId>). Собівартості й даних покупців у результатах немає.
+ * (receive_stock, mark_defective, start_packing, receive_production, material_receive) позначено requiresConfirmation
+ * і мають попередній перегляд; ідемпотентність — operationId від викликача (manual:<operationId>, для надходження з
+ * виробництва — production_receipts.idempotency_key). Незворотна операція (assistantRisk: "critical" —
+ * receive_production: надходження з партії не скасовується) потребує підтвердження людиною в будь-якому режимі,
+ * навіть auto. Собівартості й даних покупців у результатах немає.
  */
 const WAREHOUSE_TOOLS: AnyAssistantTool[] = [...WAREHOUSE_COMMANDS.values()].map((command) =>
   defineTool({
@@ -629,7 +632,7 @@ const WAREHOUSE_TOOLS: AnyAssistantTool[] = [...WAREHOUSE_COMMANDS.values()].map
     description: command.description,
     input: command.input,
     requiredPermission: command.permission,
-    risk: command.risk,
+    risk: command.assistantRisk ?? command.risk,
     requiresConfirmation: command.requiresConfirmation,
     ...(command.orderNumberOf ? { orderNumberOf: (input: unknown) => command.orderNumberOf!(input) } : {}),
     ...(command.preview ? { preview: (ctx: ServiceContext, input: unknown) => command.preview!(ctx, input) } : {}),

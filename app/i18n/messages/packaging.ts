@@ -115,8 +115,8 @@ const messages: MessageModule = {
     "packaging.stock.result.applied": "Застосовано позицій: {applied}.",
     "packaging.stock.result.nothing": "Залишок не змінився.",
     "packaging.stock.result.duplicates": "Уже застосовані раніше (повтор форми): {duplicates}.",
-    // Комплектація
-    "packaging.kits.title": "Комплектація",
+    // Шаблони комплектації
+    "packaging.kits.title": "Шаблони комплектації",
     "packaging.kits.subtitle": "Шаблони: що додається до замовлення або до кожної одиниці товару — для всіх товарів, вибраних товарів чи колекцій",
     "packaging.kits.add": "Новий шаблон",
     "packaging.kits.editTitle": "Шаблон: {name}",
@@ -366,7 +366,7 @@ const messages: MessageModule = {
     "packaging.stock.result.applied": "Lines applied: {applied}.",
     "packaging.stock.result.nothing": "Stock did not change.",
     "packaging.stock.result.duplicates": "Already applied earlier (form resubmitted): {duplicates}.",
-    "packaging.kits.title": "Kits",
+    "packaging.kits.title": "Kit templates",
     "packaging.kits.subtitle": "Templates: what is added to an order or to every unit — for all products, selected products or collections",
     "packaging.kits.add": "New template",
     "packaging.kits.editTitle": "Template: {name}",

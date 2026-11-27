@@ -1,13 +1,31 @@
 /**
  * Параметри рядка запиту аналітики складу й експорту (чисті функції; спільні для сторінки й ресурсного маршруту).
  * ?period=7|30|90|custom&from=YYYY-MM-DD&to=YYYY-MM-DD&model=…&color=…&product=<uuid>
- * Експорт додатково: &dataset=stock|movements|sales&sep=semicolon|comma.
+ * Експорт додатково: &dataset=stock|movements|sales|production&sep=semicolon|comma.
  */
+import type { Permission } from "~/domain/permissions";
 import { isPeriodKey, DEFAULT_PERIOD, type PeriodKey } from "./calc";
 import { isCsvSeparatorKey, DEFAULT_CSV_SEPARATOR, type CsvSeparatorKey } from "./csv";
 
-export const EXPORT_DATASETS = ["stock", "movements", "sales"] as const;
+export const EXPORT_DATASETS = ["stock", "movements", "sales", "production"] as const;
 export type ExportDataset = (typeof EXPORT_DATASETS)[number];
+
+/**
+ * Дозвіл на набір: stock/movements/sales — warehouse.view (колонки собівартості в них — лише з finance.view);
+ * production (партії виробництва із собівартістю) — увесь набір лише finance.view (власник). Сервер перевіряє сам
+ * (export.server.ts, маршрут warehouse/export); сторінка лише ховає недоступні кнопки.
+ */
+export const EXPORT_DATASET_PERMISSIONS: Readonly<Record<ExportDataset, Permission>> = {
+  stock: "warehouse.view",
+  movements: "warehouse.view",
+  sales: "warehouse.view",
+  production: "finance.view",
+};
+
+/** Набори, доступні актору (для кнопок сторінки). */
+export function exportDatasetsFor(can: (permission: Permission) => boolean): ExportDataset[] {
+  return EXPORT_DATASETS.filter((d) => can(EXPORT_DATASET_PERMISSIONS[d]));
+}
 
 export function isExportDataset(value: unknown): value is ExportDataset {
   return typeof value === "string" && (EXPORT_DATASETS as readonly string[]).includes(value);

@@ -461,3 +461,60 @@ describe("order page: packing card and priority intent", () => {
     expect(o!.priority).toBe(2);
   });
 });
+
+describe("packing queue page: bulk actions on narrow screens (S5-MOBILE)", () => {
+  /** Форма масових дій черги (id="packing-bulk-form"). */
+  const bulkForm = (html: string) => /<form[^>]*id="packing-bulk-form"[^>]*>([\s\S]*?)<\/form>/.exec(html)?.[1] ?? "";
+
+  it("bulk actions are in a <details> collapsed on phones (like the filters); the summary shows the selection", async () => {
+    setContext(OWNER);
+    const form = bulkForm(await render(picking, "picking", "picking"));
+    expect(form).not.toBe("");
+    // Розкривний блок «згорнуто на телефоні» (той самий, що й фільтри) з заголовком «Масові дії».
+    const details = /<details class="ot-disclosure ot-disclosure--collapse-mobile"[^>]*>([\s\S]*)<\/details>/.exec(form);
+    expect(details).not.toBeNull();
+    expect(details![1]).toMatch(new RegExp(`<summary class="ot-disclosure__summary">[\\s\\S]*?${uk("packing.bulk.summary")}[\\s\\S]*?</summary>`));
+    // Усі кнопки й вибір пріоритету — всередині блоку (не займають екран над списком на телефоні).
+    for (const marker of ['value="bulkStart"', 'value="bulkPriority"', 'name="priority"', uk("packing.bulk.print"), uk("packing.bulk.pickList").split(" (")[0]!]) {
+      expect(details![1], marker).toContain(marker);
+    }
+    expect(form.split("<details")[0]).not.toContain("<button");
+    // Кількість вибраних оголошується завжди (живий регіон поза блоком, лише для екранних читачів).
+    expect(form.split("<details")[0]).toMatch(
+      new RegExp(`<div aria-live="polite" aria-atomic="true"><span class="ot-visually-hidden">[\\s\\S]*?${uk("common.selected").replace("{count}", "0")}[\\s\\S]*?</span></div>`),
+    );
+  });
+
+  it("screen readers hear the selection once: the live region carries the count and the hint/preview, the visible copy is aria-hidden", async () => {
+    setContext(OWNER);
+    const form = bulkForm(await render(picking, "picking", "picking"));
+    const selected = uk("common.selected").replace("{count}", "0");
+    const hint = uk("packing.bulk.hint");
+    // Один живий регіон (поза згорнутим блоком): і кількість, і підказка / попередній підсумок (як до згортання).
+    expect(form.match(/aria-live=/g)).toHaveLength(1);
+    const live = /<div aria-live="polite" aria-atomic="true">([\s\S]*?)<\/div>/.exec(form.split("<details")[0]!)?.[1] ?? "";
+    expect(live).toContain(selected);
+    expect(live).toContain(hint);
+    // Видимий текст у блоці — та сама інформація, прихована від екранних читачів (інакше її прочитано б двічі).
+    const details = /<details[^>]*>([\s\S]*)<\/details>/.exec(form)?.[1] ?? "";
+    const hidden = /<div aria-hidden="true">([\s\S]*?)<\/div>/.exec(details)?.[1] ?? "";
+    expect(hidden).toContain(selected);
+    expect(hidden).toContain(hint);
+    const readable = details.replace(/<div aria-hidden="true">[\s\S]*?<\/div>/, "");
+    expect(readable).not.toContain(selected);
+    expect(readable).not.toContain(hint);
+  });
+
+  it("the same on the first paint for staff (no priority without orders.edit) and in English", async () => {
+    setContext(NO_EDIT);
+    const form = bulkForm(await render(picking, "picking", "picking"));
+    expect(form).toContain("ot-disclosure--collapse-mobile");
+    expect(form).not.toContain('value="bulkPriority"');
+    for (const l of ["uk", "en"] as const) {
+      expect(DICTIONARIES[l]["packing.bulk.summary"]).toBeTruthy();
+      expect(DICTIONARIES[l]["packing.bulk.summarySelected"]).toContain("{count}");
+    }
+    expect(DICTIONARIES.en["packing.bulk.summarySelected"]!.replace("{count}", "2")).toBe("Bulk actions · selected: 2");
+    expect(DICTIONARIES.uk["packing.bulk.summarySelected"]!.replace("{count}", "2")).toBe("Масові дії · вибрано: 2");
+  });
+});

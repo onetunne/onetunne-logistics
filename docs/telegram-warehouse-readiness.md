@@ -44,9 +44,22 @@ Telegram у коді немає; бот не підключено; платни�
 | `stock` | Залишки на зараз: варіанти активних товарів + пакувальні матеріали | `snapshot_date, warehouse, kind, sku, barcode, product, variant, model, color, unit, on_hand, reserved, available, defective, in_production, low_stock_threshold, status, tracking, shopify_available` |
 | `movements` | Історія руху за період, старіші спершу (до 50 000 рядків; більше — файл обрізано, `X-Export-Truncated: 1`, і сторінка показує попередження «Файл неповний — зменште період») | `movement_id, created_at (UTC ISO), date (Київ), type, reason, kind, sku, product, variant, on_hand_delta, reserved_delta, defective_delta, in_production_delta, order_number, batch_number, actor_id, shopify_sync_state` |
 | `sales` | Продажі за варіантами за період + прогноз | `period_from, period_to, sku, barcode, product, variant, model, color, active, units, orders, previous_units, trend_percent, units_30d, units_90d, velocity_30d, velocity_90d, velocity_weighted, on_hand, reserved, available, in_production, planned, days_of_cover, stockout_date, risk, recommended_qty` |
+| `production` (**лише власник**, `finance.view`) | Партії виробництва із собівартістю: рядок — позиція партії, усі стани (зокрема закриті й скасовані); фільтри товар/модель/колір — за позиціями, період не застосовується; до 50 000 рядків (`X-Export-Truncated: 1`) | `batch_number, batch_title, status, created_date, planned_ready_date, started_date, first_received_date, last_received_date, closed_date, sku, barcode, product, variant, model, color, ordered, received_good, received_defective, remaining, billed_qty, cost_currency, unit_cost, line_total, extra_cost_share, landed_unit_cost, cost_per_good_unit, batch_extra_cost, batch_total_cost, batch_produced_cost, batch_good_received, batch_cost_per_good_unit, batch_cost_complete` |
 
 - **Собівартість — лише власник** (`finance.view`): додаються `unit_cost, cost_currency` (+ `stock_value, cost_source`
   у залишках). Без `finance.view` цих колонок у файлі немає взагалі. Права перевіряє сервер.
+- **Набір `production` — повністю лише власник**: працівник не бачить кнопки «Партії виробництва», а маршрут відповідає
+  403 (`EXPORT_DATASET_PERMISSIONS` у `params.ts`; повторно — `exportProductionCsv` у `export.server.ts`). Значення —
+  `batchCostSummary` (`app/modules/production/calc.ts`) за **всіма** позиціями партії (частка додаткових витрат залежить
+  від усіх), навіть коли фільтр лишив частину позицій. Колонки `batch_*` однакові в усіх рядках партії — **не сумуйте їх
+  по рядках** (суми партії — з одного рядка; суми позицій — `line_total`, `extra_cost_share`). `billed_qty` — кількість
+  до оплати (відкрита партія — max(замовлено, виготовлено), закрита/скасована — виготовлено); `landed_unit_cost` —
+  планова собівартість одиниці виготовленого (як `unit_cost` рухів запуску/надходження); `cost_per_good_unit` /
+  `batch_cost_per_good_unit` — собівартість **якісної** одиниці (брак «оплачують» якісні; партії — лише коли ціни повні,
+  `batch_cost_complete = true`). Дати — за Києвом: `started_date` — перший рух `production_start`, `first/last_received_date`
+  — надходження (`production_receipts`), `closed_date` — закриття **або скасування** (журнал `production.batch_closed` /
+  `production.batch_cancelled`; стан — у `status`). Виробник, примітки, причини браку й імена працівників не експортуються.
+
 - Формат: UTF-8 з BOM, рядки CRLF; заголовки — стабільні англійські `snake_case`; дати — ISO; групування розрядів
   немає. Профіль задає роздільник **і десятковий знак**:
 
@@ -67,6 +80,43 @@ Telegram у коді немає; бот не підключено; платни�
 - Кожен експорт записується в журнал (`audit_log`, дія `warehouse.exported`: набір, кількість рядків, чи з собівартістю).
 - У вбудованому застосунку файл завантажується через `fetch` (App Bridge додає токен сесії), не звичайним посиланням.
 
+#### Як етап 6 (фінанси) виводитиме собівартість проданого (COGS) — **заплановано, не реалізовано**
+Рухи продажу `consume_sale` і витрати матеріалів `material_consume` **не мають** `unit_cost` (у момент списання
+собівартість не фіксується). Правило для фінансового модуля:
+1. **Джерело вартості товару — надходження з виробництва.** Для кожного руху `receipt_production` (набір `movements`):
+   вартість = `unit_cost × (on_hand_delta + defective_delta)` (вартість виготовлених одиниць, разом із браком),
+   якісні одиниці = `on_hand_delta`. Остаточна собівартість партії — з набору `production`
+   (`batch_cost_per_good_unit` / `cost_per_good_unit`): `unit_cost` рухів — планова й **не перераховується**, якщо власник
+   змінив ціни партії пізніше (журнал лише доповнюється), тож для закритої партії перевага — у значення з `production`.
+2. **Метод — ковзна середньозважена за варіантом і валютою** (у хронологічному порядку рухів): після кожного
+   надходження `нова середня = (залишок якісних × середня + вартість надходження) / (залишок якісних + якісні
+   надходження)`; кожен `consume_sale` оцінюється як `|on_hand_delta| × середня` на момент руху (`created_at`) і
+   зменшує залишок якісних. Різні валюти не сумуються (окремий облік за `cost_currency`).
+3. **Без відомої вартості** (надходження без партії `receipt_manual` без `unit_cost`, крім повернень покупця — крок 4;
+   відкриття обліку `opening`, позиції без ціни, `batch_cost_complete = false`) — одиниці позначаються «собівартість
+   невідома», а не нулем.
+4. **Брак і повернення — кожна одиниця витрачається рівно один раз.** Вартість ведеться лише для якісних одиниць
+   (on hand); одиниці в браку (defective) мають нульову вартість:
+   - брак із виробництва (`defective_delta` руху `receipt_production`) окремим збитком **не** рахується — його вартість
+     уже в середній якісних (крок 1);
+   - `defect_mark` (якісні → брак): збиток = `кількість × середня` на момент руху, залишок якісних зменшується;
+   - `defect_writeoff` (утилізація браку) — **без нової вартості**: одиниці вже витрачено на `defect_mark` або включено
+     в собівартість якісних при `receipt_production`;
+   - `defect_repair` (брак → якісні) повертає одиниці в залишок якісних **за нульовою вартістю** (середня знижується;
+     збиток `defect_mark` не сторнується);
+   - придатне повернення покупця (`receipt_manual`, причина `customer_return`, `on_hand_delta`) повертається за поточною
+     середньою (зменшує COGS); пошкоджені одиниці повернення (`defective_delta`) — нульова вартість (їх COGS уже визнано
+     при продажу). Якщо Shopify поповнив і пошкоджені, їх рух `defect_mark` (ключ `manual:<uuid>:return_defect`) — за
+     загальним правилом: збиток за середньою дорівнює вартості, щойно поверненій надходженням (разом — нуль);
+   - `adjustment` / `shopify_external`: «−» on hand — нестача, збиток за середньою; «+» — надлишок за поточною середньою
+     (окремий рядок, не зменшує COGS); зміна браку — без вартості.
+   Перевірка: партія 9 якісних + 1 брак по 100 → середня 1000 / 9 = 111,11; утилізація браку — 0; продаж 9 → COGS 1000
+   (разом 1000 — рівно вартість партії). Склад: 10 по 100, `defect_mark` 1 → збиток 100, `defect_writeoff` 1 → 0,
+   продаж 9 → 900 (разом 1000); якщо замість утилізації `defect_repair` 1 → 10 по 90, продаж 10 → 900 (разом 1000).
+5. **Матеріали упаковки:** `material_consume` × середня ціна матеріалу з його надходжень (`receipt_manual` з `unit_cost`,
+   лише власник) або, якщо їх немає, `packaging_materials.unit_cost`.
+Розрахунок — лише для власника (`finance.view`); працівник фінансів не бачить і через ШІ.
+
 ### 1.3 Сервісний шар команд складу (`app/modules/warehouse/commands.server.ts`)
 Типізовані команди (zod), дозвіл на кожну, рівень ризику, ознака підтвердження; виконання **від імені працівника**
 (`ServiceContext.actor`) — команда не має більших прав, ніж людина. Результати — короткі структури + текст для бота
@@ -85,10 +135,33 @@ uk «1 234», «0,78», «11.12.2026»; en «1,234», «0.78», «11/12/2026»),
 | `receive_stock` | `warehouse.receive` | write | **так** | Надходження без партії (якісні + брак) |
 | `mark_defective` | `warehouse.receive` | write | **так** | Позначити брак (на складі → брак) |
 | `start_packing` | `packing.perform` | write | **так** | Почати пакування замовлення з накладною (модуль пакування) |
+| `receive_production` | `warehouse.receive` | write (асистент — **critical**) | **так** | Надходження з виробничої партії за номером `PB-РРРР-NNNN`: `lines: "remaining"` (уся незавершена решта як якісні) або позиції за точним SKU/штрихкодом товару партії з якісними/браком (+ причина браку); більше за залишок — лише з `allowOverReceipt`. Через `receiveProduction` (`modules/production/batches.server.ts`) |
+| `material_receive` | `warehouse.receive` | write | **так** | Надходження пакувальних матеріалів за точним кодом матеріалу (без собівартості). Через `applyMaterialStock` (`modules/packaging/materials.server.ts`) |
 
+- `receive_production`: попередній перегляд — позиції («лишалося у виробництві», якісні, брак, надлишок), стан партії
+  «було → стане» і `blockedReason` (`status` — партія не в стані для надходження, `nothing_remaining` — у виробництві
+  нічого не лишилося, `over_receipt` — більше за залишок без дозволу): підтвердження в цих випадках відхиляється сервісом
+  (`production.error.invalidStatus` / `emptyReceipt` / `overReceipt`). `operationId` — ключ надходження
+  (`production_receipts.idempotency_key`): повтор (зокрема паралельний) не записує другого надходження (`result: "replay"`);
+  той самий UUID для іншої партії або інших позицій/кількостей — `warehouse.error.operationReused`. Надходження не
+  скасовується — тож ШІ-асистент реєструє його як `critical` (підтвердження людиною навіть у режимі auto).
+- `material_receive`: ключ руху — `manual:<operationId>:<матеріал>`; повтор — `replay`; інший матеріал або кількість із
+  тим самим UUID — `operationReused`. Собівартість матеріалів через команди не вводиться (лише на сторінці «Матеріали»
+  власником).
+- **Один `operationId` — одна операція** для всіх write-команд: UUID, уже використаний іншою командою (`receive_stock` /
+  `mark_defective` — `manual:<uuid>`, `material_receive` — `manual:<uuid>:<матеріал>`, `receive_production` —
+  надходження з виробництва), відхиляється вже на етапі перегляду (`warehouse.error.operationReused`).
+  Під час виконання перевірка й запис сервісу — в **одній транзакції під `pg_advisory_xact_lock` за `operationId`**
+  (`withOperationLock`; транзакція сервісу — точка збереження в ній): паралельні виклики з тим самим UUID (повтор бота,
+  дві різні команди, інші позиції партії чи інший матеріал) виконуються по черзі — записується лише одна операція, інший
+  намір отримує `operationReused`, а повтор переможця — `replay`. Якщо запис із тим самим ключем зробив не командний
+  викликач (сторінка, без цього блокування) між перевіркою й сервісом, команда порівнює записане зі своїм наміром:
+  `replay` — лише для тих самих позицій і кількостей, інакше `operationReused`.
 - Виконавець: `runWarehouseCommand(ctx, name, input, { confirmed?, via?: "telegram" | "command" })` →
   `ok` / `confirmation_required` (з `preview`: «було → стане», нічого не змінено) / `refused` (`unknown_command`,
-  `forbidden`, `invalid_input`) / `error` (код i18n).
+  `forbidden`, `invalid_input`) / `error` (код i18n). Невідомий номер партії чи замовлення — код `error.notFound` з
+  `params.entity` (`productionBatch` / `order`); текст бота — «партію / замовлення з таким номером не знайдено —
+  перевірте номер» (`warehouseCommands.error.batchNotFound` / `orderNotFound`), а не текст сторінок «Сторінку не знайдено».
 - **Зміни завжди потребують підтвердження** (`confirmed: true` — лише після натискання людиною «Підтвердити»).
 - **Ідемпотентність**: write-команда отримує `operationId` (UUID) від викликача. Бот генерує його один раз на намір
   (`newCommandOperationId()`) і передає той самий при повторі/підтвердженні. Ключ руху — `manual:<operationId>`:
@@ -103,7 +176,8 @@ uk «1 234», «0,78», «11.12.2026»; en «1,234», «0.78», «11/12/2026»),
 Кожна команда зареєстрована в `app/modules/assistant/tools.server.ts` як `warehouse_<команда>` (ті самі схеми, дозволи
 й обробники). Діють правила виконавця етапу 4: дозвіл актора, режим (manual — підтвердження завжди; semi — для
 позначених `requiresConfirmation`; auto — без підтвердження для write), глобальна пауза автоматизації, пауза
-замовлення (`start_packing`), журнал `assistant.*`. Мовна модель не підключена.
+замовлення (`start_packing`), журнал `assistant.*`. Незворотні команди мають `assistantRisk: "critical"`
+(`warehouse_receive_production`) — підтвердження людиною в будь-якому режимі, навіть auto. Мовна модель не підключена.
 
 ## 2. Що заплановано (НЕ реалізовано)
 - Сам Telegram-бот, маршрут webhook, будь-які мережеві запити до Telegram.

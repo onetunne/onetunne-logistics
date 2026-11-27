@@ -30,6 +30,7 @@ import { countPackingQueue } from "~/modules/packing/queue.server";
 import { countProductionDue } from "~/modules/production/queries.server";
 import { businessDate } from "~/modules/warehouse/dates";
 import { loadAlertSummary } from "~/modules/warehouse/stock.server";
+import { loadRecommendationSummary } from "~/modules/warehouse-analytics/queries.server";
 import { displayVariantTitle } from "~/modules/warehouse/constants";
 import { getSetting, loadSettings, updateSetting } from "~/modules/settings/settings.server";
 import { processPaidOrder } from "~/modules/shipments/waybill.server";
@@ -72,16 +73,21 @@ export async function loader({ request }: LoaderFunctionArgs) {
   // Етап 5 на головній — лише за дозволами: склад/виробництво — warehouse.view, черга пакування — packing.perform.
   const canViewWarehouse = can(ctx.actor, "warehouse.view");
   const canPack = can(ctx.actor, "packing.perform");
+  // Ризики закінчення й рекомендації нових партій — для того, хто планує виробництво (production.manage), з переглядом
+  // складу (посилання веде на «Аналітику складу»). Лише кількості позицій і одиниць, без собівартості.
+  const canPlanBatches = canViewWarehouse && can(ctx.actor, "production.manage");
+  const today = businessDate(ctx.now());
 
-  const [counts, problemCounts, issueRows, shipmentRows, automation, stockAlerts, production, packingQueue] = await Promise.all([
+  const [counts, problemCounts, issueRows, shipmentRows, automation, stockAlerts, production, packingQueue, recommendations] = await Promise.all([
     canViewOrders || canBulk ? countOrdersByStatus(ctx.db) : null,
     canViewProblems ? countOpenIssues(ctx.db) : null,
     canViewProblems ? listIssues(ctx.db, { status: "open", limit: 5 }) : null,
     canViewOrders ? listShipments(ctx.db, { limit: 5 }) : null,
     getSetting(ctx.db, "automation"),
     canViewWarehouse ? loadAlertSummary(ctx.db, 3) : null,
-    canViewWarehouse ? countProductionDue(ctx.db, businessDate(ctx.now()), PRODUCTION_DUE_SOON_DAYS) : null,
+    canViewWarehouse ? countProductionDue(ctx.db, today, PRODUCTION_DUE_SOON_DAYS) : null,
     canPack ? countPackingQueue(ctx.db) : null,
+    canPlanBatches ? loadRecommendationSummary(ctx.db, today) : null,
   ]);
   const carrier = ctx.carriers.getDefault();
 
@@ -115,7 +121,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       })) ?? null,
     automation: { mode: automation.mode, globalPause: automation.globalPause },
     warehouse:
-      stockAlerts || production || packingQueue !== null
+      stockAlerts || production || packingQueue !== null || recommendations
         ? {
             alerts: stockAlerts
               ? {
@@ -134,6 +140,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
               : null,
             production,
             packingQueue,
+            recommendations,
           }
         : null,
     carrier: carrier
@@ -270,19 +277,23 @@ async function setGlobalPause(ctx: RequestContext, value: string): Promise<Actio
 type LoaderData = Awaited<ReturnType<typeof loader>>;
 type WarehouseData = NonNullable<LoaderData["warehouse"]>;
 
-/** Сигнали етапу 5: попередження складу, черга пакування, партії до готовності (кожен блок — за дозволом). */
+/**
+ * Сигнали етапу 5: попередження складу, черга пакування, партії до готовності, ризики закінчення й рекомендації нових
+ * партій (кожен блок — за дозволом).
+ */
 function WarehouseSignals({ data }: { data: WarehouseData }) {
   const t = useT();
   const locale = useLocale();
   const href = useHref();
   const n = (v: number) => formatNumber(v, locale);
-  const { alerts, production, packingQueue } = data;
+  const { alerts, production, packingQueue, recommendations } = data;
+  const cards = [alerts, packingQueue !== null, production, recommendations].filter(Boolean).length;
   return (
     <Stack gap={3} as="section">
       <Text as="h2" variant="heading-md">
         {t("dashboard.stage5.title")}
       </Text>
-      <Grid columns={{ xs: 1, md: 3 }} gap={3}>
+      <Grid columns={{ xs: 1, md: cards >= 4 ? 2 : Math.max(1, cards), lg: Math.max(1, cards) }} gap={3}>
         {alerts ? (
           <Card
             title={t("dashboard.stage5.alerts.title")}
@@ -381,10 +392,58 @@ function WarehouseSignals({ data }: { data: WarehouseData }) {
             </Stack>
           </Card>
         ) : null}
+        {recommendations ? <RecommendationsCard data={recommendations} /> : null}
       </Grid>
     </Stack>
   );
 }
+
+/** Ризики закінчення й рекомендації нових партій (production.manage) — посилання на «Аналітику складу». */
+function RecommendationsCard({ data }: { data: NonNullable<WarehouseData["recommendations"]> }) {
+  const t = useT();
+  const locale = useLocale();
+  const href = useHref();
+  const n = (v: number) => formatNumber(v, locale);
+  const nothing = data.atRisk === 0 && data.recommendations === 0;
+  return (
+    <Card
+      title={t("dashboard.stage5.recommendations.title")}
+      titleAs="h3"
+      description={t("dashboard.stage5.recommendations.hint")}
+      actions={
+        <Button to={href("warehouse/analytics")} variant="plain" size="sm">
+          {t("dashboard.stage5.recommendations.open")}
+        </Button>
+      }
+    >
+      {nothing ? (
+        <Text variant="body-sm" tone="subdued">
+          {t("dashboard.stage5.recommendations.none")}
+        </Text>
+      ) : (
+        <Stack gap={2}>
+          <KeyValueList
+            items={[
+              { key: "atRisk", label: t("dashboard.stage5.recommendations.atRisk"), value: n(data.atRisk) },
+              { key: "needBatch", label: t("dashboard.stage5.recommendations.needBatch"), value: n(data.recommendations) },
+            ]}
+          />
+          {data.outOfStock > 0 ? (
+            <Text variant="body-sm" tone="critical" weight="semibold">
+              {t("dashboard.stage5.recommendations.outOfStock", { count: n(data.outOfStock) })}
+            </Text>
+          ) : null}
+          {data.recommendedUnits > 0 ? (
+            <Text variant="body-sm" tone="subdued">
+              {t("dashboard.stage5.recommendations.units", { units: n(data.recommendedUnits) })}
+            </Text>
+          ) : null}
+        </Stack>
+      )}
+    </Card>
+  );
+}
+
 type IssueItem = NonNullable<LoaderData["issues"]>[number];
 type ShipmentItem = NonNullable<LoaderData["shipments"]>[number];
 

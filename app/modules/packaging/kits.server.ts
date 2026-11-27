@@ -31,7 +31,7 @@ import { requirePermission } from "~/domain/permissions";
 import { ConflictError, NotFoundError } from "~/lib/errors";
 import { writeAudit } from "~/modules/audit/audit.server";
 import type { ServiceContext } from "~/server/types";
-import type { KitProductSearchFields } from "./kit-options";
+import type { KitProductSearchFields, KitVariantAttributes } from "./kit-options";
 import { computeKitMaterials, type KitMaterialRequirement, type KitTemplateForResolution } from "./kit-resolution";
 import { kitTemplateInputSchema, type KitTemplateInput, type ParsedKitTemplateInput } from "./schemas";
 import { matchesVersion, touchedAt, versionToken } from "./version";
@@ -326,9 +326,17 @@ export async function listKitCollectionOptions(
 
 export const MAX_KIT_ATTRIBUTE_OPTIONS = 500;
 
-/** Моделі й кольори варіантів каталогу (без видалених товарів) — для фільтра шаблону. */
+/**
+ * Наявний варіант каталогу: товар не видалено в Shopify і варіант не зник із переліку варіантів товару
+ * (product_variants.removed_at, як catalogVariantLive у packing.server.ts). Фільтр списку шаблонів за моделлю/кольором
+ * і варіанти полів «Модель»/«Колір» беруть лише такі варіанти: інакше шаблон «підходив» би кольору, який мають лише
+ * видалені варіанти цілі (R6F-4).
+ */
+const liveCatalogVariant = () => and(or(isNull(products.status), ne(products.status, "DELETED")), isNull(productVariants.removedAt));
+
+/** Моделі й кольори наявних варіантів каталогу (без видалених товарів і варіантів) — для фільтра шаблону. */
 export async function listKitVariantAttributes(db: DbOrTx): Promise<{ models: string[]; colors: string[] }> {
-  const live = or(isNull(products.status), ne(products.status, "DELETED"));
+  const live = liveCatalogVariant();
   const [models, colors] = await Promise.all([
     db
       .selectDistinct({ v: productVariants.model })
@@ -350,28 +358,30 @@ export async function listKitVariantAttributes(db: DbOrTx): Promise<{ models: st
   return { models: clean(models), colors: clean(colors) };
 }
 
-/** Моделі варіантів кожного товару (для фільтра списку шаблонів за моделлю). */
-export async function productModels(db: DbOrTx, productIds: readonly string[]): Promise<Map<string, string[]>> {
+/** Модель і колір кожного наявного варіанта товарів (для фільтра списку шаблонів за моделлю/кольором). */
+export async function productVariantAttributes(db: DbOrTx, productIds: readonly string[]): Promise<Map<string, KitVariantAttributes[]>> {
   if (productIds.length === 0) return new Map();
   const rows = await db
-    .selectDistinct({ productId: productVariants.productId, model: productVariants.model })
+    .selectDistinct({ productId: productVariants.productId, model: productVariants.model, color: productVariants.color })
     .from(productVariants)
-    .where(and(inArray(productVariants.productId, [...new Set(productIds)]), isNotNull(productVariants.model)));
-  const out = new Map<string, string[]>();
-  for (const r of rows) out.set(r.productId, [...(out.get(r.productId) ?? []), r.model!]);
+    .innerJoin(products, eq(products.id, productVariants.productId))
+    .where(and(inArray(productVariants.productId, [...new Set(productIds)]), liveCatalogVariant()));
+  const out = new Map<string, KitVariantAttributes[]>();
+  for (const r of rows) out.set(r.productId, [...(out.get(r.productId) ?? []), { model: r.model, color: r.color }]);
   return out;
 }
 
-/** Моделі варіантів товарів кожної колекції (для фільтра списку шаблонів за моделлю). */
-export async function collectionModels(db: DbOrTx, collectionIds: readonly string[]): Promise<Map<string, string[]>> {
+/** Модель і колір наявних варіантів товарів кожної колекції (для фільтра списку шаблонів за моделлю/кольором). */
+export async function collectionVariantAttributes(db: DbOrTx, collectionIds: readonly string[]): Promise<Map<string, KitVariantAttributes[]>> {
   if (collectionIds.length === 0) return new Map();
   const rows = await db
-    .selectDistinct({ collectionId: productCollections.collectionId, model: productVariants.model })
+    .selectDistinct({ collectionId: productCollections.collectionId, model: productVariants.model, color: productVariants.color })
     .from(productCollections)
     .innerJoin(productVariants, eq(productVariants.productId, productCollections.productId))
-    .where(and(inArray(productCollections.collectionId, [...collectionIds]), isNotNull(productVariants.model)));
-  const out = new Map<string, string[]>();
-  for (const r of rows) out.set(r.collectionId, [...(out.get(r.collectionId) ?? []), r.model!]);
+    .innerJoin(products, eq(products.id, productVariants.productId))
+    .where(and(inArray(productCollections.collectionId, [...new Set(collectionIds)]), liveCatalogVariant()));
+  const out = new Map<string, KitVariantAttributes[]>();
+  for (const r of rows) out.set(r.collectionId, [...(out.get(r.collectionId) ?? []), { model: r.model, color: r.color }]);
   return out;
 }
 

@@ -16,7 +16,7 @@ import type { Actor } from "~/domain/permissions";
 import { OWNER, STAFF, createTestEnv, type TestEnv } from "../helpers";
 
 /**
- * «Комплектація»: великий каталог (production-6 — призначені товари поза лімітом списку не губляться при збереженні;
+ * «Шаблони комплектації»: великий каталог (production-6 — призначені товари поза лімітом списку не губляться при збереженні;
  * пошук у каталозі), шаблони на колекції й фільтр моделі/кольору у формі (gap-4, production-7), синхронізація колекцій.
  */
 const m = vi.hoisted(() => ({ ctx: null as RequestContext | null }));

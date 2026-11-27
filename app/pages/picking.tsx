@@ -58,6 +58,7 @@ import {
   Text,
   TextField,
   Thumbnail,
+  VisuallyHidden,
   type BadgeTone,
   type DataTableColumn,
   type TabItem,
@@ -270,6 +271,11 @@ export default function PickingPage() {
     toPick: selectedRows.filter((r) => r.status === "waybill_created" || r.status === "awaiting_picking").length,
   };
   const notStartable = preview.total - preview.startable - preview.inProgress - preview.packed;
+  /** Підказка або попередній підсумок вибраних (видимий текст і живий регіон — один рядок). */
+  const bulkStatus =
+    preview.total === 0
+      ? t("packing.bulk.hint")
+      : t("packing.bulk.preview", { startable: preview.startable, inProgress: preview.inProgress, packed: preview.packed, withLabel: preview.withLabel });
   const idsQuery = (limit: number) => selected.slice(0, limit).map((id) => `ids=${encodeURIComponent(id)}`).join("&");
 
   async function onLabels() {
@@ -506,99 +512,107 @@ export default function PickingPage() {
         {rows.length > 0 && !needsWaybill ? (
           <Card>
             <Form id={BULK_FORM_ID} method="post" aria-label={t("packing.bulk.label")}>
-              <Stack gap={3}>
-                <div aria-live="polite" aria-atomic="true">
-                  <Stack gap={1}>
-                    <Text variant="body-sm" weight="semibold">
-                      {t("common.selected", { count: preview.total })}
-                    </Text>
-                    {preview.total === 0 ? (
-                      <Text variant="caption" tone="subdued">
-                        {t("packing.bulk.hint")}
+              {/* Кількість вибраних і що з ними можна зробити оголошуються завжди — і коли масові дії згорнуто (телефон).
+                  Видимий текст усередині блоку — той самий (aria-hidden, щоб екранний читач не читав його двічі). */}
+              <div aria-live="polite" aria-atomic="true">
+                <VisuallyHidden>
+                  <span>{t("common.selected", { count: preview.total })}</span> <span>{bulkStatus}</span>
+                </VisuallyHidden>
+              </div>
+              {/* Телефон: масові дії згорнуто (як фільтри), щоб список замовлень був одразу під фільтрами; заголовок
+                  показує кількість вибраних. Ширші екрани — розгорнуто. <details> працює з клавіатури й без JS. */}
+              <Disclosure
+                collapsedOnMobile
+                summary={preview.total > 0 ? t("packing.bulk.summarySelected", { count: preview.total }) : t("packing.bulk.summary")}
+              >
+                <Stack gap={3}>
+                  <div aria-hidden="true">
+                    <Stack gap={1}>
+                      <Text variant="body-sm" weight="semibold">
+                        {t("common.selected", { count: preview.total })}
                       </Text>
-                    ) : (
                       <Text variant="caption" tone="subdued">
-                        {t("packing.bulk.preview", { startable: preview.startable, inProgress: preview.inProgress, packed: preview.packed, withLabel: preview.withLabel })}
+                        {bulkStatus}
                       </Text>
-                    )}
-                  </Stack>
-                </div>
-                <Stack direction="horizontal" gap={2} wrap>
-                  <ConfirmSubmitButton
-                    name="intent"
-                    value="bulkStart"
-                    variant="primary"
-                    disabled={preview.total === 0 || bulkBusy}
-                    loading={busyIntent === "bulkStart"}
-                    title={t("packing.bulk.start.title")}
-                    confirmLabel={t("packing.bulk.start.confirm")}
-                    cancelLabel={t("common.cancel")}
-                    message={
-                      <Stack gap={2}>
-                        <Text weight="semibold">{t("packing.bulk.start.count", { count: preview.startable })}</Text>
-                        {preview.inProgress > 0 ? <Text>{t("packing.bulk.start.previewInProgress", { count: preview.inProgress })}</Text> : null}
-                        {preview.packed + notStartable > 0 ? (
-                          <Text>{t("packing.bulk.start.previewSkipped", { count: preview.packed + Math.max(0, notStartable) })}</Text>
-                        ) : null}
-                        <Text variant="body-sm" tone="subdued">
-                          {t("packing.bulk.start.note")}
-                        </Text>
-                      </Stack>
-                    }
-                  >
-                    {t("packing.bulk.start.button")}
-                  </ConfirmSubmitButton>
-                  <Button
-                    disabled={preview.total === 0}
-                    onClick={() => navigate(`${href("picking/print")}?${idsQuery(MAX_PRINT_ORDERS)}`)}
-                  >
-                    {t("packing.bulk.print")}
-                  </Button>
-                  <Button disabled={preview.total === 0 || labelsBusy} loading={labelsBusy} onClick={() => void onLabels()}>
-                    {t("packing.bulk.labels", { count: preview.withLabel })}
-                  </Button>
-                  <Button
-                    disabled={preview.toPick === 0}
-                    onClick={() => navigate(`${href("picking/pick-list")}?${idsQuery(MAX_PICK_LIST_ORDERS)}`)}
-                  >
-                    {t("packing.bulk.pickList", { count: preview.toPick })}
-                  </Button>
-                  <Button
-                    disabled={preview.packed === 0}
-                    onClick={() => navigate(`${href("picking/handover")}?${idsQuery(MAX_HANDOVER_ORDERS)}`)}
-                  >
-                    {t("packing.bulk.handover", { count: preview.packed })}
-                  </Button>
-                </Stack>
-                {preview.total > MAX_PRINT_ORDERS || preview.total > MAX_LABEL_ORDERS ? (
-                  <Text variant="caption" tone="subdued">
-                    {t("packing.bulk.limits", { print: MAX_PRINT_ORDERS, labels: MAX_LABEL_ORDERS })}
-                  </Text>
-                ) : null}
-                {canPriority ? (
-                  <Stack direction="horizontal" gap={2} align="end" wrap>
-                    <Select
-                      id="packing-bulk-priority"
-                      name="priority"
-                      label={t("packing.bulk.priority.label")}
-                      options={PRIORITIES.map((p) => ({ value: String(p), label: priorityLabel(p, t) }))}
-                      defaultValue="1"
-                    />
+                    </Stack>
+                  </div>
+                  <Stack direction="horizontal" gap={2} wrap>
                     <ConfirmSubmitButton
                       name="intent"
-                      value="bulkPriority"
+                      value="bulkStart"
+                      variant="primary"
                       disabled={preview.total === 0 || bulkBusy}
-                      loading={busyIntent === "bulkPriority"}
-                      title={t("packing.bulk.priority.title")}
-                      confirmLabel={t("packing.bulk.priority.confirm")}
+                      loading={busyIntent === "bulkStart"}
+                      title={t("packing.bulk.start.title")}
+                      confirmLabel={t("packing.bulk.start.confirm")}
                       cancelLabel={t("common.cancel")}
-                      message={<Text>{t("packing.bulk.priority.count", { count: preview.total })}</Text>}
+                      message={
+                        <Stack gap={2}>
+                          <Text weight="semibold">{t("packing.bulk.start.count", { count: preview.startable })}</Text>
+                          {preview.inProgress > 0 ? <Text>{t("packing.bulk.start.previewInProgress", { count: preview.inProgress })}</Text> : null}
+                          {preview.packed + notStartable > 0 ? (
+                            <Text>{t("packing.bulk.start.previewSkipped", { count: preview.packed + Math.max(0, notStartable) })}</Text>
+                          ) : null}
+                          <Text variant="body-sm" tone="subdued">
+                            {t("packing.bulk.start.note")}
+                          </Text>
+                        </Stack>
+                      }
                     >
-                      {t("packing.bulk.priority.button")}
+                      {t("packing.bulk.start.button")}
                     </ConfirmSubmitButton>
+                    <Button
+                      disabled={preview.total === 0}
+                      onClick={() => navigate(`${href("picking/print")}?${idsQuery(MAX_PRINT_ORDERS)}`)}
+                    >
+                      {t("packing.bulk.print")}
+                    </Button>
+                    <Button disabled={preview.total === 0 || labelsBusy} loading={labelsBusy} onClick={() => void onLabels()}>
+                      {t("packing.bulk.labels", { count: preview.withLabel })}
+                    </Button>
+                    <Button
+                      disabled={preview.toPick === 0}
+                      onClick={() => navigate(`${href("picking/pick-list")}?${idsQuery(MAX_PICK_LIST_ORDERS)}`)}
+                    >
+                      {t("packing.bulk.pickList", { count: preview.toPick })}
+                    </Button>
+                    <Button
+                      disabled={preview.packed === 0}
+                      onClick={() => navigate(`${href("picking/handover")}?${idsQuery(MAX_HANDOVER_ORDERS)}`)}
+                    >
+                      {t("packing.bulk.handover", { count: preview.packed })}
+                    </Button>
                   </Stack>
-                ) : null}
-              </Stack>
+                  {preview.total > MAX_PRINT_ORDERS || preview.total > MAX_LABEL_ORDERS ? (
+                    <Text variant="caption" tone="subdued">
+                      {t("packing.bulk.limits", { print: MAX_PRINT_ORDERS, labels: MAX_LABEL_ORDERS })}
+                    </Text>
+                  ) : null}
+                  {canPriority ? (
+                    <Stack direction="horizontal" gap={2} align="end" wrap>
+                      <Select
+                        id="packing-bulk-priority"
+                        name="priority"
+                        label={t("packing.bulk.priority.label")}
+                        options={PRIORITIES.map((p) => ({ value: String(p), label: priorityLabel(p, t) }))}
+                        defaultValue="1"
+                      />
+                      <ConfirmSubmitButton
+                        name="intent"
+                        value="bulkPriority"
+                        disabled={preview.total === 0 || bulkBusy}
+                        loading={busyIntent === "bulkPriority"}
+                        title={t("packing.bulk.priority.title")}
+                        confirmLabel={t("packing.bulk.priority.confirm")}
+                        cancelLabel={t("common.cancel")}
+                        message={<Text>{t("packing.bulk.priority.count", { count: preview.total })}</Text>}
+                      >
+                        {t("packing.bulk.priority.button")}
+                      </ConfirmSubmitButton>
+                    </Stack>
+                  ) : null}
+                </Stack>
+              </Disclosure>
             </Form>
           </Card>
         ) : null}

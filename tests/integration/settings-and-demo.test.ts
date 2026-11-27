@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { orders, settingsHistory, shipments } from "~/db/schema";
+import { DEMO_SALES_HISTORY } from "~/db/seed/demo-data";
 import { insertSimulatedOrder, resetDemoData } from "~/db/seed/seed.server";
 import { ConflictError } from "~/lib/errors";
 import { listOrders, countOrdersByStatus } from "~/modules/orders/repository.server";
@@ -24,7 +25,9 @@ describe("demo seed", () => {
     const counts = await countOrdersByStatus(env.handle.db);
     expect(counts.paid).toBe(13);
     expect(counts.waybill_created).toBe(1);
-    expect(counts.delivered).toBe(1);
+    // #0997 + вигадана історія продажів для аналітики (без накладних; tests/stage5/seed-sales-history.test.ts).
+    expect(counts.delivered).toBe(1 + DEMO_SALES_HISTORY.length);
+    expect(counts.handed_to_carrier).toBe(0);
     expect(counts.cancelled).toBe(1);
     const cancelled = await env.orderId("#0996");
     const s = await env.handle.db.select().from(shipments).where(eq(shipments.orderId, cancelled));

@@ -858,6 +858,12 @@ export interface MovementFilters {
   stockItemIds?: string[];
   variantIds?: string[];
   materialIds?: string[];
+  /**
+   * Модель / колір варіанта (product_variants.model / color) — точний збіг, ті самі значення, що у фільтрах переліку
+   * залишків (warehouse/stock.server.ts stockFilterOptions). Рухи матеріалів під такий фільтр не підпадають.
+   */
+  models?: string[];
+  colors?: string[];
   kind?: StockItemKind;
   types?: MovementType[];
   orderId?: string;
@@ -915,6 +921,8 @@ export async function movementHistory(
     filters.stockItemIds?.length ? inArray(inventoryMovements.stockItemId, filters.stockItemIds) : undefined,
     filters.variantIds?.length ? inArray(stockItems.variantId, filters.variantIds) : undefined,
     filters.materialIds?.length ? inArray(stockItems.materialId, filters.materialIds) : undefined,
+    filters.models?.length ? inArray(productVariants.model, filters.models) : undefined,
+    filters.colors?.length ? inArray(productVariants.color, filters.colors) : undefined,
     filters.kind ? eq(stockItems.kind, filters.kind) : undefined,
     filters.types?.length ? inArray(inventoryMovements.type, filters.types) : undefined,
     filters.orderId ? eq(inventoryMovements.orderId, filters.orderId) : undefined,
@@ -952,6 +960,8 @@ export async function movementHistory(
       .select({ c: count() })
       .from(inventoryMovements)
       .innerJoin(stockItems, eq(stockItems.id, inventoryMovements.stockItemId))
+      // Той самий join, що й у переліку: фільтри моделі/кольору стосуються варіанта.
+      .leftJoin(productVariants, eq(productVariants.id, stockItems.variantId))
       .where(where),
   ]);
   return {

@@ -77,6 +77,8 @@ describe("registry", () => {
       receive_stock: ["warehouse.receive", "write", true],
       mark_defective: ["warehouse.receive", "write", true],
       start_packing: ["packing.perform", "write", true],
+      receive_production: ["warehouse.receive", "write", true],
+      material_receive: ["warehouse.receive", "write", true],
     });
     for (const c of WAREHOUSE_COMMANDS.values()) {
       if (c.risk === "write") expect(typeof c.preview, c.name).toBe("function");
@@ -87,6 +89,7 @@ describe("registry", () => {
   it("lists the commands an actor may run", () => {
     expect(warehouseCommandsFor(STAFF).map((c) => c.name)).toEqual([...WAREHOUSE_COMMAND_NAMES]);
     expect(warehouseCommandsFor(VIEWER).map((c) => c.name)).toEqual(["stock_summary", "low_stock", "item_stock", "production_status", "recommendations"]);
+    expect(warehouseCommandsFor(STAFF, "en").find((c) => c.name === "receive_production")?.label).toBe("Receive from production");
     expect(warehouseCommandsFor(NO_VIEW).map((c) => c.name)).not.toContain("stock_summary");
     // Локалізована назва для меню бота (ui-8): uk за замовчуванням, en — за мовою.
     expect(warehouseCommandsFor(STAFF).find((c) => c.name === "low_stock")?.label).toBe("Мало на складі");
@@ -401,7 +404,8 @@ describe("assistant tools", () => {
     for (const c of WAREHOUSE_COMMANDS.values()) {
       const tool = ASSISTANT_TOOLS.get(`warehouse_${c.name}`);
       expect(tool, c.name).toBeTruthy();
-      expect(tool).toMatchObject({ requiredPermission: c.permission, risk: c.risk, requiresConfirmation: c.requiresConfirmation });
+      // Незворотні операції (assistantRisk critical — надходження з виробництва) асистент підтверджує завжди.
+      expect(tool).toMatchObject({ requiredPermission: c.permission, risk: c.assistantRisk ?? c.risk, requiresConfirmation: c.requiresConfirmation });
     }
     // Інструменти етапу 4 на місці.
     for (const name of ["find_orders", "get_order", "create_waybill", "reissue_waybill"]) expect(ASSISTANT_TOOLS.has(name)).toBe(true);

@@ -18,11 +18,34 @@
  *   на сторінках власника).
  * start_packing — «Почати пакування» замовлення через модуль пакування (modules/packing/packing.server.ts: дозвіл
  * packing.perform, CAS-перехід статусу «Накладну створено» → «Очікує комплектації», одне активне пакування).
+ * receive_production — надходження з виробничої партії через receiveProduction (modules/production/batches.server.ts:
+ * дозвіл warehouse.receive, блокування рядка партії, operationId = production_receipts.idempotency_key — повтор не
+ * записує друге надходження). material_receive — надходження пакувальних матеріалів через applyMaterialStock
+ * (modules/packaging/materials.server.ts: ключ manual:<operationId>:<materialId>; без собівартості).
+ * Один operationId — одна операція: той самий uuid для іншої команди/позиції/кількостей — warehouse.error.operationReused.
+ * Діє й для паралельних викликів: перевірка й запис write-команди — в одній транзакції під блокуванням за operationId
+ * (withOperationLock), тож дві команди з одним uuid не можуть записати обидві операції.
  */
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { z } from "zod";
-import { inventoryMovements, orderLineItems, orders, productionBatches, productVariants, products, type StockAlertKind } from "~/db/schema";
+import {
+  inventoryBalances,
+  inventoryMovements,
+  orderLineItems,
+  orders,
+  packagingMaterials,
+  productionBatchLines,
+  productionBatches,
+  productionReceiptLines,
+  productionReceipts,
+  productVariants,
+  products,
+  stockItems,
+  type MaterialUnit,
+  type ProductionBatchStatus,
+  type StockAlertKind,
+} from "~/db/schema";
 import { can, ForbiddenError, requirePermission, type Actor, type Permission } from "~/domain/permissions";
 import { hasKey, makeT, type Locale } from "~/i18n";
 import { formatDecimal, formatIsoDate, formatNumber } from "~/lib/format";
@@ -34,7 +57,9 @@ import { ensureStockItemForVariant, type MovementType } from "~/modules/inventor
 import { effectiveLineQuantitySql } from "~/modules/inventory/reservations.server";
 import { STARTABLE_STATUSES } from "~/modules/packing/constants";
 import { startPacking } from "~/modules/packing/packing.server";
-import { kyivDate } from "~/modules/production/calc";
+import { applyMaterialStock, materialStockPermission } from "~/modules/packaging/materials.server";
+import { receiveProduction } from "~/modules/production/batches.server";
+import { LIMITS as PRODUCTION_LIMITS, RECEIVABLE_STATUSES, allocateReceipt, isStatusIn, kyivDate, lineRemaining, statusAfterReceipt } from "~/modules/production/calc";
 import { getBatchDetail, openProductionByVariant } from "~/modules/production/queries.server";
 import { findActiveShipment } from "~/modules/shipments/waybill.server";
 import { resolvePeriod, roundTo } from "~/modules/warehouse-analytics/calc";
@@ -49,7 +74,7 @@ import {
   RECEIPT_REASONS,
   displayVariantTitle,
 } from "./constants";
-import { markDefective, OPERATION_PERMISSIONS, receiveStock, recordedReceiptState, type OperationResult } from "./operations.server";
+import { markDefective, OPERATION_PERMISSIONS, RETURN_DEFECT_KEY_SUFFIX, receiveStock, recordedReceiptState, type OperationResult } from "./operations.server";
 import { listStock, loadAlertSummary, type StockRow } from "./stock.server";
 
 // ---------------------------------------------------------------------------
@@ -65,6 +90,8 @@ export const WAREHOUSE_COMMAND_NAMES = [
   "receive_stock",
   "mark_defective",
   "start_packing",
+  "receive_production",
+  "material_receive",
 ] as const;
 export type WarehouseCommandName = (typeof WAREHOUSE_COMMAND_NAMES)[number];
 export type WarehouseCommandRisk = "read" | "write";
@@ -78,6 +105,11 @@ export interface WarehouseCommand<S extends z.ZodType = z.ZodType> {
   risk: WarehouseCommandRisk;
   /** write — завжди true (перевіряється defineCommand). */
   requiresConfirmation: boolean;
+  /**
+   * Ризик для ШІ-асистента (modules/assistant/tools.server.ts), якщо суворіший за risk: critical — підтвердження людиною
+   * в БУДЬ-ЯКОМУ режимі автоматизації (навіть auto). Для незворотних операцій (надходження з виробництва не скасовується).
+   */
+  assistantRisk?: "critical";
   /** Номер замовлення з параметрів (асистент перевіряє паузу автоматизації цього замовлення). */
   orderNumberOf?(input: z.output<S>): string;
   /** Попередній перегляд наслідків для підтвердження (нічого не змінює). */
@@ -245,6 +277,76 @@ export interface StartPackingPreview {
   alreadyPacked: boolean;
 }
 
+export interface ProductionReceiptPreviewLine {
+  sku: string | null;
+  title: string;
+  variant: string | null;
+  /** Лишалося у виробництві до надходження. */
+  remaining: number;
+  good: number;
+  defective: number;
+  /** Понад залишок (лише з allowOverReceipt — одразу у «Фактично»/«Брак»). */
+  over: number;
+}
+
+export interface ProductionReceiptPreview {
+  kind: "receive_production";
+  operationId: string;
+  batchNumber: string;
+  title: string;
+  status: ProductionBatchStatus;
+  /** Стан партії після підтвердження (null — надходження неможливе або вже записане). */
+  statusAfter: ProductionBatchStatus | null;
+  lines: ProductionReceiptPreviewLine[];
+  good: number;
+  defective: number;
+  overReceived: number;
+  allowOverReceipt: boolean;
+  /**
+   * Чому підтвердження буде відхилено: status — партія не в стані для надходження; nothing_remaining — у партії не
+   * лишилося одиниць у виробництві («remaining»); over_receipt — більше, ніж лишилося, без allowOverReceipt.
+   */
+  blockedReason: "status" | "nothing_remaining" | "over_receipt" | null;
+  /** ЦЕ САМЕ надходження (той самий operationId, партія й позиції) уже записано — підтвердження нічого не змінить. */
+  alreadyApplied: boolean;
+}
+
+export interface ProductionReceiptCommandResult {
+  kind: "receive_production";
+  /** received — записано; replay — це надходження (operationId) уже було записане, нічого не змінено вдруге. */
+  result: "received" | "replay";
+  operationId: string;
+  batchNumber: string;
+  /** Стан партії після надходження. */
+  status: ProductionBatchStatus;
+  lines: number;
+  good: number;
+  defective: number;
+  overReceived: number;
+}
+
+export interface MaterialReceivePreview {
+  kind: "material_receive";
+  operationId: string;
+  material: { code: string; name: string; unit: MaterialUnit };
+  quantity: number;
+  current: { onHand: number };
+  after: { onHand: number };
+  /** ЦЕ САМЕ надходження (operationId, матеріал, кількість) уже записано: «стане» = «зараз». */
+  alreadyApplied: boolean;
+}
+
+export interface MaterialReceiveResult {
+  kind: "material_receive";
+  result: "received" | "replay";
+  operationId: string;
+  code: string;
+  name: string;
+  unit: MaterialUnit;
+  quantity: number;
+  onHand: number;
+}
+
 // ---------------------------------------------------------------------------
 // Спільні схеми й допоміжні функції
 // ---------------------------------------------------------------------------
@@ -358,6 +460,53 @@ function itemLine(r: StockRow): ItemLine {
 }
 
 const today = (ctx: ServiceContext) => kyivDate(ctx.now());
+
+const operationReused = () => new DomainError("warehouse.error.operationReused", 409);
+
+/**
+ * Кому вже належить operationId: manual — рух manual:<id> (receive_stock / mark_defective, разом із
+ * manual:<id>:return_defect); material — рух manual:<id>:<матеріал>; production — надходження з виробництва
+ * (production_receipts.idempotency_key). Той самий uuid для іншого виду операції — помилка (не «повтор»).
+ */
+async function operationIdOwners(ctx: ServiceContext, operationId: string): Promise<Set<"manual" | "material" | "production">> {
+  const manualKey = inventoryKeys.manual(operationId);
+  const returnDefectKey = inventoryKeys.manual(operationId, RETURN_DEFECT_KEY_SUFFIX);
+  const prefix = `${manualKey}:`;
+  const [movements, receipts] = await Promise.all([
+    ctx.db
+      .select({ key: inventoryMovements.idempotencyKey })
+      .from(inventoryMovements)
+      .where(sql`(${inventoryMovements.idempotencyKey} = ${manualKey} or left(${inventoryMovements.idempotencyKey}, ${prefix.length}) = ${prefix})`)
+      .limit(5),
+    ctx.db.select({ id: productionReceipts.id }).from(productionReceipts).where(eq(productionReceipts.idempotencyKey, operationId)).limit(1),
+  ]);
+  const out = new Set<"manual" | "material" | "production">();
+  for (const m of movements) out.add(m.key === manualKey || m.key === returnDefectKey ? "manual" : "material");
+  if (receipts.length > 0) out.add("production");
+  return out;
+}
+
+/** operationId уже використано іншим видом операції, ніж own → operationReused. */
+async function assertOperationIdFor(ctx: ServiceContext, operationId: string, own: "manual" | "material" | "production"): Promise<void> {
+  for (const owner of await operationIdOwners(ctx, operationId)) if (owner !== own) throw operationReused();
+}
+
+/** Клас рекомендаційного блокування operationId write-команд (pg_advisory_xact_lock(клас, hashtext(uuid))). */
+const COMMAND_OPERATION_LOCK_CLASS = 0x57434f50;
+
+/**
+ * Виконання write-команди з operationId: перевірки uuid (assertOperationIdFor, recorded*State) і запис сервісу — в
+ * ОДНІЙ транзакції під блокуванням за operationId. Паралельні виклики з тим самим uuid (повтор бота, дві різні команди
+ * з одним uuid) виконуються по черзі, і другий бачить запис першого: «один operationId — одна операція» діє атомарно,
+ * а не лише як попередня перевірка. Сервіси відкривають власну транзакцію — тут це точка збереження (savepoint) у
+ * зовнішній; помилка сервісу відкочує все. Збіг hashtext різних uuid лише ставить їх у чергу (без хибних помилок).
+ */
+async function withOperationLock<T>(ctx: ServiceContext, operationId: string, fn: (ctx: ServiceContext) => Promise<T>): Promise<T> {
+  return ctx.db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(${COMMAND_OPERATION_LOCK_CLASS}::int, hashtext(${operationId}))`);
+    return fn({ ...ctx, db: tx });
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Команди читання
@@ -598,6 +747,8 @@ async function previewChange(
   input: ItemRef & { operationId: string; quantity: number; defectiveQuantity?: number; reason: string },
   delta: { onHand: number; defective: number },
 ): Promise<StockChangePreview> {
+  // uuid уже належить надходженню з виробництва чи матеріалів — підтвердження однаково відхилено б.
+  await assertOperationIdFor(ctx, input.operationId, "manual");
   const v = await findSingleVariant(ctx, input);
   const row = (await stockRowsFor(ctx, [v.variantId])).get(v.variantId);
   const current = {
@@ -722,17 +873,20 @@ const receiveStockCommand = defineCommand({
   },
   async run(ctx, input): Promise<StockChangeResult> {
     requirePermission(ctx.actor, OPERATION_PERMISSIONS.receiveStock);
-    const v = await findSingleVariant(ctx, input);
-    const stockItemId = await ensureStockItemForVariant(ctx.db, v.variantId);
-    const r = await receiveStock(ctx, {
-      operationId: input.operationId,
-      stockItemId,
-      quantity: input.quantity,
-      defectiveQuantity: input.defectiveQuantity,
-      reason: input.reason,
-      note: input.note ?? null,
+    return withOperationLock(ctx, input.operationId, async (ctx) => {
+      await assertOperationIdFor(ctx, input.operationId, "manual");
+      const v = await findSingleVariant(ctx, input);
+      const stockItemId = await ensureStockItemForVariant(ctx.db, v.variantId);
+      const r = await receiveStock(ctx, {
+        operationId: input.operationId,
+        stockItemId,
+        quantity: input.quantity,
+        defectiveQuantity: input.defectiveQuantity,
+        reason: input.reason,
+        note: input.note ?? null,
+      });
+      return changeResult("receive_stock", v, input.operationId, input.quantity, input.defectiveQuantity, r);
     });
-    return changeResult("receive_stock", v, input.operationId, input.quantity, input.defectiveQuantity, r);
   },
 });
 
@@ -761,16 +915,19 @@ const markDefectiveCommand = defineCommand({
   },
   async run(ctx, input): Promise<StockChangeResult> {
     requirePermission(ctx.actor, OPERATION_PERMISSIONS.markDefective);
-    const v = await findSingleVariant(ctx, input);
-    const stockItemId = await ensureStockItemForVariant(ctx.db, v.variantId);
-    const r = await markDefective(ctx, {
-      operationId: input.operationId,
-      stockItemId,
-      quantity: input.quantity,
-      reason: input.reason,
-      note: input.note ?? null,
+    return withOperationLock(ctx, input.operationId, async (ctx) => {
+      await assertOperationIdFor(ctx, input.operationId, "manual");
+      const v = await findSingleVariant(ctx, input);
+      const stockItemId = await ensureStockItemForVariant(ctx.db, v.variantId);
+      const r = await markDefective(ctx, {
+        operationId: input.operationId,
+        stockItemId,
+        quantity: input.quantity,
+        reason: input.reason,
+        note: input.note ?? null,
+      });
+      return changeResult("mark_defective", v, input.operationId, input.quantity, 0, r);
     });
-    return changeResult("mark_defective", v, input.operationId, input.quantity, 0, r);
   },
 });
 
@@ -835,14 +992,371 @@ const startPackingCommand = defineCommand({
   },
 });
 
+
+// ---------------------------------------------------------------------------
+// Надходження з виробництва й матеріалів
+// ---------------------------------------------------------------------------
+
+const batchNumberSchema = z
+  .string()
+  .trim()
+  .toUpperCase()
+  .regex(/^PB-\d{4}-\d{4,9}$/, "invalid batch number")
+  .describe('Production batch number, e.g. "PB-2026-0001".');
+
+/** Позицій в одному надходженні через команду (бот/асистент; більше — сторінкою партії). */
+const MAX_RECEIPT_LINES = 50;
+
+const receiptLineSchema = z
+  .object({
+    sku: skuSchema.optional(),
+    barcode: barcodeSchema.optional(),
+    good: z.number().int().min(0).max(PRODUCTION_LIMITS.quantity).default(0).describe("Good units received from production."),
+    defective: z.number().int().min(0).max(PRODUCTION_LIMITS.quantity).default(0).describe("Defective units received from production."),
+    defectReason: z.string().trim().min(1).max(PRODUCTION_LIMITS.defectReason).optional().describe("Short defect reason without personal data."),
+  })
+  .strict()
+  .refine(exactlyOneRef, { message: REF_MESSAGE, path: ["sku"] })
+  .refine((l) => l.good + l.defective >= 1, { message: "good + defective must be at least 1", path: ["good"] });
+
+type ReceiptLineRequest = z.output<typeof receiptLineSchema>;
+
+interface BatchForReceipt {
+  id: string;
+  number: string;
+  title: string;
+  status: ProductionBatchStatus;
+}
+
+interface BatchLineForReceipt {
+  id: string;
+  sku: string | null;
+  barcode: string | null;
+  title: string;
+  variant: string | null;
+  ordered: number;
+  received: number;
+  defective: number;
+}
+
+async function findBatchForReceipt(ctx: ServiceContext, batchNumber: string): Promise<BatchForReceipt> {
+  const [batch] = await ctx.db
+    .select({ id: productionBatches.id, number: productionBatches.number, title: productionBatches.title, status: productionBatches.status })
+    .from(productionBatches)
+    .where(eq(productionBatches.number, batchNumber));
+  if (!batch) throw new NotFoundError("productionBatch");
+  return batch;
+}
+
+async function batchLinesForReceipt(ctx: ServiceContext, batchId: string): Promise<BatchLineForReceipt[]> {
+  const rows = await ctx.db
+    .select({
+      id: productionBatchLines.id,
+      sku: productVariants.sku,
+      barcode: productVariants.barcode,
+      title: products.title,
+      variantTitle: productVariants.title,
+      ordered: productionBatchLines.quantityOrdered,
+      received: productionBatchLines.quantityReceived,
+      defective: productionBatchLines.quantityDefective,
+    })
+    .from(productionBatchLines)
+    .innerJoin(productVariants, eq(productVariants.id, productionBatchLines.variantId))
+    .innerJoin(products, eq(products.id, productVariants.productId))
+    .where(eq(productionBatchLines.batchId, batchId))
+    .orderBy(products.title, productVariants.title, productionBatchLines.id);
+  return rows.map((r) => ({ ...r, variant: displayVariantTitle(r.variantTitle) }));
+}
+
+const refLabel = (ref: ItemRef) => ref.sku ?? ref.barcode ?? "—";
+
+/** Позиції запиту → позиції партії за точним SKU (без урахування регістру) або штрихкодом; кожна — щонайбільше раз. */
+function matchReceiptLines(
+  lines: readonly BatchLineForReceipt[],
+  requested: readonly ReceiptLineRequest[],
+): Array<{ line: BatchLineForReceipt; good: number; defective: number; defectReason: string | null }> {
+  const used = new Set<string>();
+  return requested.map((r) => {
+    const found = lines.filter((l) => (r.sku ? (l.sku ?? "").toLowerCase() === r.sku.toLowerCase() : l.barcode === r.barcode));
+    if (found.length === 0) throw new DomainError("warehouseCommands.error.batchLineNotFound", 404, { item: refLabel(r) });
+    if (found.length > 1) throw new DomainError("warehouseCommands.error.batchLineAmbiguous", 409, { item: refLabel(r) });
+    const line = found[0]!;
+    if (used.has(line.id)) throw new DomainError("warehouseCommands.error.batchLineDuplicate", 400, { item: refLabel(r) });
+    used.add(line.id);
+    return { line, good: r.good, defective: r.defective, defectReason: r.defectReason ?? null };
+  });
+}
+
+const lineQty = (l: BatchLineForReceipt) => ({ ordered: l.ordered, received: l.received, defective: l.defective });
+
+/**
+ * Записане надходження з цим operationId: none — немає; same — для ЦІЄЇ партії й (для явних позицій) з тими самими
+ * позиціями й кількостями; other — інша партія або інші позиції/кількості (→ operationReused).
+ * «remaining» — намір «решта партії»: будь-яке записане надходження цієї партії з цим uuid — те саме.
+ */
+async function recordedProductionReceipt(
+  ctx: ServiceContext,
+  operationId: string,
+  batchId: string,
+  planned: Array<{ line: { id: string }; good: number; defective: number }> | "remaining",
+): Promise<"none" | "same" | "other"> {
+  const [receipt] = await ctx.db
+    .select({ id: productionReceipts.id, batchId: productionReceipts.batchId })
+    .from(productionReceipts)
+    .where(eq(productionReceipts.idempotencyKey, operationId));
+  if (!receipt) return "none";
+  if (receipt.batchId !== batchId) return "other";
+  if (planned === "remaining") return "same";
+  const recorded = await ctx.db
+    .select({ batchLineId: productionReceiptLines.batchLineId, good: productionReceiptLines.goodQty, defective: productionReceiptLines.defectiveQty })
+    .from(productionReceiptLines)
+    .where(eq(productionReceiptLines.receiptId, receipt.id));
+  const norm = (rows: Array<{ id: string; good: number; defective: number }>) =>
+    rows
+      .map((r) => `${r.id}:${r.good}:${r.defective}`)
+      .sort()
+      .join("|");
+  const same =
+    norm(recorded.map((r) => ({ id: r.batchLineId, good: r.good, defective: r.defective }))) ===
+    norm(planned.map((p) => ({ id: p.line.id, good: p.good, defective: p.defective })));
+  return same ? "same" : "other";
+}
+
+const receiveProductionCommand = defineCommand({
+  name: "receive_production",
+  description:
+    'Receive units from a production batch by its number (e.g. "PB-2026-0001"): good units go to on hand, defective ' +
+    'units to defective, both leave "in production". lines: "remaining" (the whole unfinished remainder as good units) ' +
+    "or explicit lines by exact SKU or barcode of the batch items with good/defective quantities. More than the " +
+    "remainder only with allowOverReceipt. The batch becomes partially received or received. A receipt cannot be " +
+    "undone. Requires human confirmation; pass the same operationId on retries (it is the receipt's idempotency key). " +
+    "No costs in the result.",
+  input: z
+    .object({
+      batchNumber: batchNumberSchema,
+      lines: z
+        .union([z.literal("remaining"), z.array(receiptLineSchema).min(1).max(MAX_RECEIPT_LINES)])
+        .describe('"remaining" or a list of batch items with good/defective quantities.'),
+      allowOverReceipt: z.boolean().default(false).describe("Allow receiving more than the unfinished remainder (explicit owner decision)."),
+      operationId: operationIdSchema,
+      note: noteSchema,
+    })
+    .strict(),
+  permission: "warehouse.receive",
+  risk: "write",
+  // Надходження не скасовується (партію з надходженнями лише закривають) — асистент завжди питає людину.
+  assistantRisk: "critical",
+  requiresConfirmation: true,
+  async preview(ctx, input): Promise<ProductionReceiptPreview> {
+    requirePermission(ctx.actor, "warehouse.receive");
+    await assertOperationIdFor(ctx, input.operationId, "production");
+    const batch = await findBatchForReceipt(ctx, input.batchNumber);
+    const lines = await batchLinesForReceipt(ctx, batch.id);
+    const planned =
+      input.lines === "remaining"
+        ? lines.filter((l) => lineRemaining(lineQty(l)) > 0).map((l) => ({ line: l, good: lineRemaining(lineQty(l)), defective: 0, defectReason: null }))
+        : matchReceiptLines(lines, input.lines);
+    const recorded = await recordedProductionReceipt(ctx, input.operationId, batch.id, input.lines === "remaining" ? "remaining" : planned);
+    if (recorded === "other") throw operationReused();
+    const alreadyApplied = recorded === "same";
+    const previewLines: ProductionReceiptPreviewLine[] = planned.map((p) => {
+      const remaining = lineRemaining(lineQty(p.line));
+      return {
+        sku: p.line.sku,
+        title: p.line.title,
+        variant: p.line.variant,
+        remaining,
+        good: p.good,
+        defective: p.defective,
+        over: allocateReceipt(remaining, p.good, p.defective).over,
+      };
+    });
+    const overReceived = previewLines.reduce((s, l) => s + l.over, 0);
+    const receivable = isStatusIn(batch.status, RECEIVABLE_STATUSES);
+    const blockedReason: ProductionReceiptPreview["blockedReason"] = alreadyApplied
+      ? null
+      : !receivable
+        ? "status"
+        : planned.length === 0
+          ? "nothing_remaining"
+          : overReceived > 0 && !input.allowOverReceipt
+            ? "over_receipt"
+            : null;
+    const after = new Map(lines.map((l) => [l.id, lineQty(l)]));
+    for (const p of planned) {
+      const a = after.get(p.line.id)!;
+      after.set(p.line.id, { ...a, received: a.received + p.good, defective: a.defective + p.defective });
+    }
+    return {
+      kind: "receive_production",
+      operationId: input.operationId,
+      batchNumber: batch.number,
+      title: batch.title,
+      status: batch.status,
+      statusAfter: alreadyApplied || blockedReason ? null : statusAfterReceipt([...after.values()]),
+      lines: previewLines,
+      good: planned.reduce((s, p) => s + p.good, 0),
+      defective: planned.reduce((s, p) => s + p.defective, 0),
+      overReceived,
+      allowOverReceipt: input.allowOverReceipt,
+      blockedReason,
+      alreadyApplied,
+    };
+  },
+  async run(ctx, input): Promise<ProductionReceiptCommandResult> {
+    requirePermission(ctx.actor, "warehouse.receive");
+    return withOperationLock(ctx, input.operationId, async (ctx) => {
+      await assertOperationIdFor(ctx, input.operationId, "production");
+      const batch = await findBatchForReceipt(ctx, input.batchNumber);
+      const planned = input.lines === "remaining" ? ("remaining" as const) : matchReceiptLines(await batchLinesForReceipt(ctx, batch.id), input.lines);
+      // Той самий uuid для іншої партії або інших позицій — не повтор (receiveProduction повернув би чуже надходження).
+      if ((await recordedProductionReceipt(ctx, input.operationId, batch.id, planned)) === "other") throw operationReused();
+      const r = await receiveProduction(ctx, batch.id, {
+        idempotencyKey: input.operationId,
+        lines:
+          planned === "remaining"
+            ? "remaining"
+            : planned.map((p) => ({ batchLineId: p.line.id, good: p.good, defective: p.defective, defectReason: p.defectReason })),
+        note: input.note ?? null,
+        allowOverReceipt: input.allowOverReceipt,
+      });
+      // Надходження з цим ключем записав інший викликач між перевіркою й сервісом (не команда — без блокування за
+      // operationId): «повтор» лише якщо це ті самі позиції й кількості, інакше — чужий намір, а не наш результат.
+      if (r.duplicate && (await recordedProductionReceipt(ctx, input.operationId, batch.id, planned)) === "other") throw operationReused();
+      return {
+        kind: "receive_production",
+        result: r.duplicate ? "replay" : "received",
+        operationId: input.operationId,
+        batchNumber: batch.number,
+        status: r.status,
+        lines: r.lines,
+        good: r.good,
+        defective: r.defective,
+        overReceived: r.overReceived,
+      };
+    });
+  },
+});
+
+const materialCodeSchema = z.string().trim().min(1).max(64).describe('Exact packaging material code, e.g. "box_s" (case-insensitive).');
+
+async function findMaterial(ctx: ServiceContext, code: string): Promise<{ id: string; code: string; name: string; unit: MaterialUnit }> {
+  const rows = await ctx.db
+    .select({ id: packagingMaterials.id, code: packagingMaterials.code, name: packagingMaterials.name, unit: packagingMaterials.unit })
+    .from(packagingMaterials)
+    .where(sql`lower(${packagingMaterials.code}) = lower(${code})`)
+    .orderBy(packagingMaterials.code)
+    .limit(MAX_MATCHES + 1);
+  if (rows.length === 0) throw new DomainError("warehouseCommands.error.materialNotFound", 404);
+  if (rows.length > 1) throw new DomainError("warehouseCommands.error.materialAmbiguous", 409, { count: rows.length > MAX_MATCHES ? `${MAX_MATCHES}+` : rows.length });
+  return rows[0]!;
+}
+
+async function materialOnHand(ctx: ServiceContext, materialId: string): Promise<number> {
+  const [row] = await ctx.db
+    .select({ onHand: inventoryBalances.onHand })
+    .from(stockItems)
+    .innerJoin(inventoryBalances, eq(inventoryBalances.stockItemId, stockItems.id))
+    .where(eq(stockItems.materialId, materialId));
+  return row?.onHand ?? 0;
+}
+
+const materialReceiveCommand = defineCommand({
+  name: "material_receive",
+  description:
+    "Receive packaging materials (boxes, stickers, instructions, cards, bolts…) by exact material code: adds the " +
+    "quantity to the material's stock. No unit costs through commands (the owner records costs on the materials page). " +
+    "Requires human confirmation; pass the same operationId on retries.",
+  input: z
+    .object({
+      code: materialCodeSchema,
+      quantity: z.number().int().min(1).max(MAX_OPERATION_QUANTITY).describe("Units received (in the material's unit)."),
+      operationId: operationIdSchema,
+      note: noteSchema,
+    })
+    .strict(),
+  permission: materialStockPermission("receive"),
+  risk: "write",
+  requiresConfirmation: true,
+  async preview(ctx, input): Promise<MaterialReceivePreview> {
+    requirePermission(ctx.actor, materialStockPermission("receive"));
+    await assertOperationIdFor(ctx, input.operationId, "material");
+    const m = await findMaterial(ctx, input.code);
+    const alreadyApplied = await materialReceiptState(ctx, input.operationId, m.id, input.quantity);
+    const onHand = await materialOnHand(ctx, m.id);
+    return {
+      kind: "material_receive",
+      operationId: input.operationId,
+      material: { code: m.code, name: m.name, unit: m.unit },
+      quantity: input.quantity,
+      current: { onHand },
+      after: { onHand: alreadyApplied ? onHand : onHand + input.quantity },
+      alreadyApplied,
+    };
+  },
+  async run(ctx, input): Promise<MaterialReceiveResult> {
+    requirePermission(ctx.actor, materialStockPermission("receive"));
+    return withOperationLock(ctx, input.operationId, async (ctx) => {
+      await assertOperationIdFor(ctx, input.operationId, "material");
+      const m = await findMaterial(ctx, input.code);
+      await materialReceiptState(ctx, input.operationId, m.id, input.quantity);
+      const r = await applyMaterialStock(ctx, {
+        operationId: input.operationId,
+        operation: "receive",
+        lines: [{ materialId: m.id, quantity: input.quantity }],
+        note: input.note ?? null,
+      });
+      const line = r.lines[0]!;
+      // Рух із цим ключем записав інший викликач після перевірки: «повтор» лише для тієї самої кількості (інакше throw).
+      if (line.status !== "applied") await materialReceiptState(ctx, input.operationId, m.id, input.quantity);
+      return {
+        kind: "material_receive",
+        result: line.status === "applied" ? "received" : "replay",
+        operationId: input.operationId,
+        code: m.code,
+        name: m.name,
+        unit: m.unit,
+        quantity: input.quantity,
+        onHand: line.after,
+      };
+    });
+  },
+});
+
+/**
+ * Чи записано ЦЕ САМЕ надходження матеріалу (manual:<uuid>:<матеріал>, receipt_manual, +quantity). Інший матеріал або
+ * кількість з тим самим uuid — operationReused (applyMaterialStock інакше записав би рух для другого матеріалу).
+ */
+async function materialReceiptState(ctx: ServiceContext, operationId: string, materialId: string, quantity: number): Promise<boolean> {
+  const prefix = `${inventoryKeys.manual(operationId)}:`;
+  const rows = await ctx.db
+    .select({ key: inventoryMovements.idempotencyKey, type: inventoryMovements.type, onHandDelta: inventoryMovements.onHandDelta })
+    .from(inventoryMovements)
+    .where(sql`left(${inventoryMovements.idempotencyKey}, ${prefix.length}) = ${prefix}`)
+    .limit(5);
+  if (rows.length === 0) return false;
+  const own = inventoryKeys.manual(operationId, materialId);
+  if (rows.length === 1 && rows[0]!.key === own && rows[0]!.type === "receipt_manual" && rows[0]!.onHandDelta === quantity) return true;
+  throw operationReused();
+}
+
 // ---------------------------------------------------------------------------
 // Реєстр і виконавець
 // ---------------------------------------------------------------------------
 
 export const WAREHOUSE_COMMANDS: ReadonlyMap<WarehouseCommandName, AnyWarehouseCommand> = new Map(
-  [stockSummary, lowStock, itemStock, productionStatus, recommendations, receiveStockCommand, markDefectiveCommand, startPackingCommand].map(
-    (c) => [c.name, c],
-  ),
+  [
+    stockSummary,
+    lowStock,
+    itemStock,
+    productionStatus,
+    recommendations,
+    receiveStockCommand,
+    markDefectiveCommand,
+    startPackingCommand,
+    receiveProductionCommand,
+    materialReceiveCommand,
+  ].map((c) => [c.name, c]),
 );
 
 export function isWarehouseCommandName(value: unknown): value is WarehouseCommandName {
@@ -963,6 +1477,23 @@ const ERROR_ALIASES: Record<string, string> = {
 };
 
 /**
+ * error.notFound (NotFoundError) за сутністю → текст для бота: користувач бачить, що невірний номер партії чи замовлення,
+ * а не «Сторінку не знайдено» (текст сторінок). Код результату лишається error.notFound з params.entity.
+ */
+const NOT_FOUND_TEXTS: ReadonlyMap<string, string> = new Map([
+  ["productionBatch", "warehouseCommands.error.batchNotFound"],
+  ["order", "warehouseCommands.error.orderNotFound"],
+]);
+
+function errorTextKey(code: string, params: Record<string, string | number>): string {
+  if (code === "error.notFound") {
+    const specific = NOT_FOUND_TEXTS.get(String(params.entity ?? ""));
+    if (specific) return specific;
+  }
+  return ERROR_ALIASES[code] ?? code;
+}
+
+/**
  * Короткий текст результату для бота (uk/en). Лише кількості, SKU, назви товарів і номери партій.
  * Майбутній бот надсилає його як є (або будує власне форматування з data).
  */
@@ -978,11 +1509,48 @@ export function formatWarehouseCommandOutcome(outcome: WarehouseCommandOutcome, 
     return t("warehouseCommands.refused.unknownCommand");
   }
   if (outcome.status === "error") {
-    const code = ERROR_ALIASES[outcome.code] ?? outcome.code;
+    const code = errorTextKey(outcome.code, outcome.params);
     return t("warehouseCommands.error", { message: hasKey(code) ? t(code, outcome.params) : t("error.generic") });
   }
   if (outcome.status === "confirmation_required") {
-    if ((outcome.preview as { kind?: string } | null)?.kind === "start_packing") {
+    const previewKind = (outcome.preview as { kind?: string } | null)?.kind;
+    if (previewKind === "receive_production") {
+      const p = outcome.preview as ProductionReceiptPreview;
+      const lines = [
+        t("warehouseCommands.confirm.receiveProduction", { number: p.batchNumber, good: n(p.good), defective: n(p.defective) }),
+        ...p.lines.map((l) =>
+          t("warehouseCommands.confirm.receiveProduction.line", {
+            item: itemLabel(l),
+            good: n(l.good),
+            defective: n(l.defective),
+            remaining: n(l.remaining),
+          }),
+        ),
+      ];
+      if (p.statusAfter) {
+        lines.push(t("warehouseCommands.confirm.batchStatus", { before: t(`productionStatus.${p.status}`), after: t(`productionStatus.${p.statusAfter}`) }));
+      }
+      if (p.overReceived > 0 && p.allowOverReceipt) lines.push(t("warehouseCommands.confirm.overReceived", { count: p.overReceived }));
+      if (p.blockedReason) {
+        lines.push(t(`warehouseCommands.production.blocked.${p.blockedReason}`, { status: t(`productionStatus.${p.status}`) }));
+      }
+      if (p.alreadyApplied) lines.push(t("warehouseCommands.replay"));
+      return lines.join("\n");
+    }
+    if (previewKind === "material_receive") {
+      const p = outcome.preview as MaterialReceivePreview;
+      const lines = [
+        t("warehouseCommands.confirm.materialReceive", {
+          item: `${p.material.name} (${p.material.code})`,
+          quantity: n(p.quantity),
+          unit: t(`materialUnit.${p.material.unit}`),
+        }),
+        t("warehouseCommands.confirm.materialChange", { before: n(p.current.onHand), after: n(p.after.onHand) }),
+      ];
+      if (p.alreadyApplied) lines.push(t("warehouseCommands.replay"));
+      return lines.join("\n");
+    }
+    if (previewKind === "start_packing") {
       const p = outcome.preview as StartPackingPreview;
       const lines = [t("warehouseCommands.confirm.startPacking", { order: p.orderNumber, units: n(p.units), status: t(`status.${p.status}`) })];
       if (p.alreadyPacked) lines.push(t("warehouseCommands.packing.already_packed", { order: p.orderNumber }));
@@ -1009,7 +1577,9 @@ export function formatWarehouseCommandOutcome(outcome: WarehouseCommandOutcome, 
     | ProductionStatusResult
     | RecommendationsResult
     | StockChangeResult
-    | StartPackingCommandResult;
+    | StartPackingCommandResult
+    | ProductionReceiptCommandResult
+    | MaterialReceiveResult;
   switch (d.kind) {
     case "stock_summary":
       return [
@@ -1073,6 +1643,22 @@ export function formatWarehouseCommandOutcome(outcome: WarehouseCommandOutcome, 
       ].join("\n");
     case "start_packing":
       return t(`warehouseCommands.packing.${d.result}`, { order: d.orderNumber });
+    case "receive_production":
+      if (d.result === "replay") return t("warehouseCommands.replay");
+      return t("warehouseCommands.receivedProduction", {
+        number: d.batchNumber,
+        good: n(d.good),
+        defective: n(d.defective),
+        status: t(`productionStatus.${d.status}`),
+      });
+    case "material_receive":
+      if (d.result === "replay") return t("warehouseCommands.replay");
+      return t("warehouseCommands.materialReceived", {
+        item: `${d.name} (${d.code})`,
+        quantity: n(d.quantity),
+        unit: t(`materialUnit.${d.unit}`),
+        onHand: n(d.onHand),
+      });
     case "receive_stock":
     case "mark_defective":
       if (d.result === "replay") return t("warehouseCommands.replay");
