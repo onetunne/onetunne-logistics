@@ -139,12 +139,15 @@ export function pickLocation(nodes: readonly GqlLocation[], hasMore: boolean): L
  * Відомі з даних застосунку причини різниці committed/on_hand, що НЕ змінюють «доступно»:
  * inFlight — передано перевізнику (у застосунку списано), але в Shopify замовлення ще не виконано (committed і on_hand
  * Shopify ще містять ці одиниці); fulfilledOutside — виконано в Shopify, а в застосунку ще зарезервовано.
- * uncertain — частково виконані/повернені замовлення: розподіл за позиціями невідомий (автоприйняття вимкнено).
+ * uncertain — частково виконані замовлення або повернення (Shopify міг поповнити залишок до того, як склад оприбуткував
+ * повернення): розподіл одиниць невідомий (автоприйняття вимкнено). returnsPending — повернені/відшкодовані після
+ * відправлення одиниці, яких склад ще не оприбуткував як повернення покупця.
  */
 export interface FulfillmentTiming {
   inFlight: number;
   fulfilledOutside: number;
   uncertain: boolean;
+  returnsPending?: number;
 }
 
 export interface AppLevel {
@@ -162,23 +165,48 @@ export interface LevelComparison {
   /** Shopify «доступно» − «доступно» застосунку. */
   diff: number;
   /**
-   * Очікувана різниця: одиниці, які Shopify закріпив (committed), а застосунок не резервує — неоплачені замовлення
-   * (застосунок їх не імпортує), чернетки, ще не синхронізовані замовлення. Shopify «доступно» менше на цю кількість.
+   * Очікувана різниця (пояснена замовленнями): −committedNotReserved (Shopify закріпив одиниці, яких застосунок не
+   * резервує, — «доступно» Shopify менше) + частина reservationExcess, яку Shopify уже звільнив (зміна/скасування
+   * замовлення ще не застосовані в застосунку — «доступно» Shopify більше).
    */
   expectedDiff: number;
   committedNotReserved: number;
+  /**
+   * Застосунок резервує більше, ніж Shopify закріпив (з поправкою на передані/виконані замовлення): Shopify уже звільнив
+   * одиниці (замовлення змінено/скасовано в Shopify, а в застосунку — ще ні, напр. через активну накладну) або виконав
+   * замовлення, яке застосунок ще не синхронізував. Розподіл між цими причинами — за on_hand (див. compareLevels);
+   * будь-який reservationExcess > 0 вимикає автоприйняття.
+   */
+  reservationExcess: number;
   /** Shopify on_hand − available − committed: одиниці в станах reserved/damaged/safety_stock/quality_control Shopify. */
   shopifyOtherStates: number;
   inFlight: number;
   fulfilledOutside: number;
   uncertain: boolean;
+  /** Повернені/відшкодовані після відправлення одиниці, яких склад ще не оприбуткував (див. FulfillmentTiming). */
+  returnsPending: number;
 }
 
+/**
+ * Порівняння. Позначення: S — Shopify, A — застосунок, t = inFlight − fulfilledOutside, raw = S.committed − A.reserved − t.
+ * raw > 0 — Shopify закріпив одиниці, яких застосунок не резервує (committedNotReserved = raw, очікувано −raw).
+ * raw < 0 — застосунок резервує більше (reservationExcess = −raw). Якщо on_hand узгоджений (S.available + S.committed =
+ * A.on_hand + t), Shopify звільнив ці одиниці → очікувано +reservationExcess («доступно» Shopify більше); якщо on_hand
+ * Shopify менший — Shopify виконав замовлення раніше, ніж застосунок це побачив → «доступно» однакове (очікувано 0).
+ * Непояснена частина (diff − expectedDiff) — розбіжність фізичного залишку: S.available + S.committed − (A.on_hand + t)
+ * (+ частина reservationExcess, віднесена до виконання в Shopify).
+ */
 export function compareLevels(shopify: ShopifyLevelQuantities, app: AppLevel, timing: FulfillmentTiming): LevelComparison {
   const appAvailable = app.onHand - app.reserved;
   const diff = shopify.available - appAvailable;
-  const committedExcess = shopify.committed - app.reserved;
-  const committedNotReserved = Math.max(0, committedExcess - (timing.inFlight - timing.fulfilledOutside));
+  const timingAdj = timing.inFlight - timing.fulfilledOutside;
+  const raw = shopify.committed - app.reserved - timingAdj;
+  const committedNotReserved = Math.max(0, raw);
+  const reservationExcess = Math.max(0, -raw);
+  const onHandGap = shopify.available + shopify.committed - (app.onHand + timingAdj);
+  const fulfilledFirst = Math.min(reservationExcess, Math.max(0, -onHandGap));
+  const releasedFirst = reservationExcess - fulfilledFirst;
+  const expectedDiff = releasedFirst - committedNotReserved;
   return {
     appOnHand: app.onHand,
     appReserved: app.reserved,
@@ -187,12 +215,14 @@ export function compareLevels(shopify: ShopifyLevelQuantities, app: AppLevel, ti
     shopifyOnHand: shopify.onHand,
     shopifyCommitted: shopify.committed,
     diff,
-    expectedDiff: committedNotReserved === 0 ? 0 : -committedNotReserved,
+    expectedDiff: expectedDiff === 0 ? 0 : expectedDiff,
     committedNotReserved,
+    reservationExcess,
     shopifyOtherStates: shopify.onHand - shopify.available - shopify.committed,
     inFlight: timing.inFlight,
     fulfilledOutside: timing.fulfilledOutside,
     uncertain: timing.uncertain,
+    returnsPending: timing.returnsPending ?? 0,
   };
 }
 
@@ -218,10 +248,81 @@ export function unexplainedDiff(c: Pick<LevelComparison, "diff" | "expectedDiff"
   return c.diff - c.expectedDiff;
 }
 
+/** Походження розбіжності з ініціалізації обліку (внутрішні зміни до запуску обліку). */
+export const OPENING_HISTORY_ORIGIN = "opened_with_internal_history";
+
 /**
- * Автоматичне прийняття значення Shopify (externalShopifyChanges = apply) — лише коли різниця не має інших
- * пояснень: немає очікуваної різниці, невдалих передач і невизначеності. Інакше — розгляд власником.
+ * Причини, з яких автоприйняття значення Shopify (externalShopifyChanges = apply) НЕ виконується — різниця має інше
+ * можливе пояснення, ніж зміна, зроблена в Shopify:
+ * - explained_part — частину різниці пояснюють замовлення (expectedDiff ≠ 0);
+ * - uncertain — частково виконані замовлення / повернення, не оприбутковані складом;
+ * - reservation_excess — застосунок резервує більше, ніж закріпив Shopify (замовлення змінено/скасовано/виконано
+ *   в Shopify, а в застосунку — ще ні);
+ * - other_states — у Shopify є одиниці в станах reserved/damaged/safety_stock/quality_control (переміщення між станами
+ *   змінює «доступно», але не on_hand: прийняття «зменшило» б фізичний залишок);
+ * - failed_pushes — невдалі передачі (Shopify, імовірно, їх не отримав);
+ * - unsent_movements — внутрішні зміни on_hand, яких Shopify не отримав від останнього узгодження (передачу вимкнено,
+ *   немає дозволу, повернення, рухи до відкриття, відхилені невдалі передачі): прийняття скасувало б їх;
+ * - opening_history — розбіжність із запуску обліку (внутрішня історія до відкриття — лише рішення власника);
+ * - push_pending — результат «надіслати склад» ще невідомий (тайм-аут / обробляється).
  */
-export function canAutoApply(c: Pick<LevelComparison, "expectedDiff" | "uncertain">, failedPushes: number): boolean {
-  return c.expectedDiff === 0 && failedPushes === 0 && !c.uncertain;
+export const AUTO_APPLY_BLOCKERS = [
+  "explained_part",
+  "uncertain",
+  "reservation_excess",
+  "other_states",
+  "failed_pushes",
+  "unsent_movements",
+  "opening_history",
+  "push_pending",
+] as const;
+export type AutoApplyBlocker = (typeof AUTO_APPLY_BLOCKERS)[number];
+
+export interface AutoApplyContext {
+  failedPushes: number;
+  /** Сума on_hand неотриманих Shopify внутрішніх рухів від останнього узгодження (unsentSinceAgreement). */
+  unsentDelta: number;
+  origin?: string | null;
+  pushPending?: boolean;
+}
+
+export function autoApplyBlockers(
+  c: Pick<LevelComparison, "expectedDiff" | "uncertain" | "reservationExcess" | "shopifyOtherStates">,
+  ctx: AutoApplyContext,
+): AutoApplyBlocker[] {
+  const out: AutoApplyBlocker[] = [];
+  if (c.expectedDiff !== 0) out.push("explained_part");
+  if (c.uncertain) out.push("uncertain");
+  if (c.reservationExcess !== 0) out.push("reservation_excess");
+  if (c.shopifyOtherStates !== 0) out.push("other_states");
+  if (ctx.failedPushes > 0) out.push("failed_pushes");
+  if (ctx.unsentDelta !== 0) out.push("unsent_movements");
+  if (ctx.origin === OPENING_HISTORY_ORIGIN) out.push("opening_history");
+  if (ctx.pushPending) out.push("push_pending");
+  return out;
+}
+
+/** Автоматичне прийняття значення Shopify — лише коли різниця не має інших пояснень (autoApplyBlockers порожній). */
+export function canAutoApply(
+  c: Pick<LevelComparison, "expectedDiff" | "uncertain" | "reservationExcess" | "shopifyOtherStates">,
+  ctx: AutoApplyContext,
+): boolean {
+  return autoApplyBlockers(c, ctx).length === 0;
+}
+
+/**
+ * Автоприйняття діє, лише коли зміни складу надсилаються в Shopify (shopifyPush = deltas) і є дозвіл write_inventory.
+ * Інакше кожна внутрішня зміна лишається поза Shopify, і різниця майже завжди має інше пояснення — розгляд власником.
+ */
+export function autoApplyEffective(env: { externalMode: "review" | "apply"; pushMode: "off" | "deltas"; canWrite: boolean }): boolean {
+  return env.externalMode === "apply" && env.pushMode === "deltas" && env.canWrite;
+}
+
+/**
+ * «Надіслати склад» змінює available дельтою, а Shopify змінює on_hand на ту саму дельту. Якщо частина одиниць Shopify
+ * у станах reserved/damaged/safety_stock/quality_control, збільшення available додало б on_hand понад фізичний залишок
+ * (і продаж одиниць, які Shopify вважає непридатними). Такі одиниці власник звільняє в Shopify або позначає брак на складі.
+ */
+export function pushBlockedByOtherStates(c: Pick<LevelComparison, "shopifyOtherStates" | "diff" | "expectedDiff">): boolean {
+  return c.shopifyOtherStates > 0 && -unexplainedDiff(c) > 0;
 }
