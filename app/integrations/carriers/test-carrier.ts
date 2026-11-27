@@ -5,8 +5,12 @@
  * пошук за reference (авторитетний), скасування. Імітація збоїв керується налаштуванням
  * testCarrier.simulation — для перевірки захисту від дублікатів і звірки після збою.
  * Реальних зовнішніх запитів не робить.
+ * Документи: лише зразок етикетки (PDF, A6), позначений «TEST — NOT VALID FOR SHIPPING», — щоб друк етикеток (зокрема
+ * об'єднаний PDF у черзі пакування) можна було перевірити в демо. На етикетці немає персональних даних: лише номер
+ * тестової накладної, reference і дата. Тестовий перевізник реєструється лише в демо.
  */
 import { createHash } from "node:crypto";
+import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import type { TestCarrierSimulation } from "~/modules/settings/schema";
 import { SandboxWaybillConflictError, type SandboxPayload, type SandboxRecord, type SandboxStore } from "./sandbox-store";
 import {
@@ -14,11 +18,14 @@ import {
   type CarrierAdapter,
   type CarrierCallOptions,
   type CarrierCapabilities,
+  type CarrierDocument,
+  type CarrierDocumentKind,
   type CarrierErrorDetail,
   type CarrierErrorKind,
   type CreatedShipment,
   type CreateShipmentRequest,
   type LookupResult,
+  type ShipmentRef,
 } from "./types";
 
 export const TEST_CARRIER_CODE = "test";
@@ -128,11 +135,12 @@ export class TestCarrierAdapter implements CarrierAdapter {
     createShipment: true,
     updateShipment: false,
     cancelShipment: true,
-    documents: false,
+    documents: true,
     tracking: false,
     returns: false,
     findByReference: true,
     referenceLookupAuthoritative: true,
+    documentKinds: ["label"],
   };
 
   private readonly store: SandboxStore;
@@ -197,6 +205,25 @@ export class TestCarrierAdapter implements CarrierAdapter {
     return { cancelled: true };
   }
 
+  /** Зразок етикетки (PDF, A6) для створеної й не скасованої тестової накладної — з позначкою TEST, без персональних даних. */
+  async getDocument(shipment: ShipmentRef, kind: CarrierDocumentKind, opts?: CarrierCallOptions): Promise<CarrierDocument> {
+    this.ensureNotAborted(opts);
+    if (kind !== "label") throw this.error("not_supported", `Test carrier provides only sample labels, not ${kind}`);
+    const rec = await this.guard("unavailable", "Test carrier lookup failed", () => this.store.findByWaybill(shipment.waybillNumber));
+    if (!rec || rec.cancelled) {
+      throw this.error("rejected", `Waybill not found or cancelled: ${shipment.waybillNumber}`, [
+        { carrierCode: rec ? "CANCELLED" : "NOT_FOUND", message: "no active test waybill" },
+      ]);
+    }
+    return {
+      kind,
+      format: "pdf",
+      contentType: "application/pdf",
+      content: await sampleLabelPdf(rec),
+      fileName: `test-label-${rec.waybillNumber}.pdf`,
+    };
+  }
+
   /** Створює запис у sandbox (ідемпотентно за reference) з підбором вільного номера накладної. */
   private async createRecord(req: CreateShipmentRequest, opts?: CarrierCallOptions): Promise<SandboxRecord> {
     const existing = await this.guard("unavailable", "Test carrier lookup failed", () =>
@@ -256,6 +283,42 @@ export class TestCarrierAdapter implements CarrierAdapter {
   private error(kind: CarrierErrorKind, message: string, details: CarrierErrorDetail[] = []): CarrierError {
     return new CarrierError(kind, this.code, message, details);
   }
+}
+
+/** A6 у пунктах. */
+const LABEL_SIZE: [number, number] = [297.64, 419.53];
+
+/**
+ * Зразок етикетки тестового перевізника: великий напис TEST, номер накладної, reference, дата створення й умовні
+ * «штрихи» з цифр номера (не справжній штрихкод). Лише ASCII (стандартний шрифт PDF).
+ */
+export async function sampleLabelPdf(rec: Pick<SandboxRecord, "waybillNumber" | "reference" | "createdAt">): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  doc.setTitle(`TEST LABEL ${rec.waybillNumber}`);
+  doc.setProducer("ONE TUNNE Logistics (test carrier)");
+  const page = doc.addPage(LABEL_SIZE);
+  const bold = await doc.embedFont(StandardFonts.HelveticaBold);
+  const regular = await doc.embedFont(StandardFonts.Helvetica);
+  const [w, h] = LABEL_SIZE;
+  const black = rgb(0, 0, 0);
+  page.drawRectangle({ x: 10, y: 10, width: w - 20, height: h - 20, borderColor: black, borderWidth: 2 });
+  page.drawText("TEST", { x: 24, y: h - 90, size: 64, font: bold, color: black });
+  page.drawText("SAMPLE LABEL - NOT VALID FOR SHIPPING", { x: 24, y: h - 115, size: 10, font: bold, color: black });
+  page.drawText("Test carrier (sandbox)", { x: 24, y: h - 135, size: 10, font: regular, color: black });
+  page.drawText("Waybill", { x: 24, y: h - 170, size: 9, font: regular, color: black });
+  page.drawText(rec.waybillNumber, { x: 24, y: h - 192, size: 20, font: bold, color: black });
+  page.drawText(`Ref: ${rec.reference.replace(/[^\x20-\x7e]/g, "?")}`, { x: 24, y: h - 214, size: 9, font: regular, color: black });
+  page.drawText(`Created: ${rec.createdAt.toISOString().slice(0, 10)}`, { x: 24, y: h - 228, size: 9, font: regular, color: black });
+  // Умовні штрихи (ширина за цифрами номера) — візуальна імітація, НЕ штрихкод перевізника.
+  let x = 24;
+  for (const ch of rec.waybillNumber.replace(/\D/g, "")) {
+    const bar = 1 + (Number(ch) % 4);
+    page.drawRectangle({ x, y: 60, width: bar, height: 80, color: black });
+    x += bar + 2 + (Number(ch) % 3);
+    if (x > w - 30) break;
+  }
+  page.drawText("TEST - DO NOT HAND OVER TO A CARRIER", { x: 24, y: 36, size: 9, font: bold, color: black });
+  return doc.save();
 }
 
 function toCreated(rec: SandboxRecord): CreatedShipment {

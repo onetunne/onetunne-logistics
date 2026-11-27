@@ -89,3 +89,36 @@ export function isShipped(status: OrderStatus): boolean {
 export function isEditable(status: OrderStatus): boolean {
   return EDITABLE_STATUSES.includes(status);
 }
+
+/**
+ * Shopify показує повне або часткове виконання замовлення (orders.fulfillment_status — displayFulfillmentStatus у нижньому
+ * регістрі). Для замовлення, НЕ відправленого застосунком, це виконання поза застосунком: така накладна була б повторним
+ * відправленням (modules/shipments/waybill.server.ts блокує створення), а склад списує лише за явним рішенням менеджера
+ * («Відправлено поза застосунком», modules/orders/shipped-outside.server.ts).
+ *
+ * shippableFulfilled (orders.shopify_shippable_fulfilled) уточнює ЧАСТКОВЕ виконання: false — Shopify виконав лише
+ * позиції без доставки (цифрову подарункову картку Shopify виконує після активації, зазвичай автоматично; так само —
+ * цифрові товари), фізичні товари ще не відправлено → це не виконання поза застосунком. Не передано / null (невідомо) — як
+ * виконання (безпечніше: накладна не створюється). Повне виконання (fulfilled) — завжди виконання: Shopify вважає, що
+ * відправляти більше нічого.
+ */
+export function isFulfilledInShopify(fulfillmentStatus: string | null | undefined, shippableFulfilled?: boolean | null): boolean {
+  if (fulfillmentStatus === "fulfilled") return true;
+  return fulfillmentStatus === "partially_fulfilled" && shippableFulfilled !== false;
+}
+
+/** Те саме за рядком замовлення (orders.fulfillment_status + orders.shopify_shippable_fulfilled). */
+export function isOrderFulfilledInShopify(order: { fulfillmentStatus: string | null; shopifyShippableFulfilled: boolean | null }): boolean {
+  return isFulfilledInShopify(order.fulfillmentStatus, order.shopifyShippableFulfilled);
+}
+
+/**
+ * Статуси, з яких менеджер може підтвердити «Відправлено поза застосунком» (замовлення виконано в Shopify, а накладної
+ * застосунку немає) — окремий явний перехід у handed_to_carrier, не частина ORDER_TRANSITIONS: автоматичні шляхи
+ * (відстеження, синхронізація) так перейти не можуть.
+ */
+export const SHIPPED_OUTSIDE_APP_FROM: readonly OrderStatus[] = EDITABLE_STATUSES;
+
+export function canMarkShippedOutsideApp(status: OrderStatus): boolean {
+  return SHIPPED_OUTSIDE_APP_FROM.includes(status);
+}

@@ -190,6 +190,39 @@ export const trackingSchema = z.object({
     .default(""),
 });
 
+/**
+ * Етап 5: склад і виробництво. Усі поля мають .default() — збережені раніше налаштування лишаються дійсними.
+ */
+export const WAREHOUSE_SHOPIFY_PUSH_MODES = ["off", "deltas"] as const;
+export const WAREHOUSE_EXTERNAL_CHANGE_MODES = ["review", "apply"] as const;
+export const warehouseSchema = z.object({
+  /** Поріг «мало на складі» (доступно ≤ порогу) для позицій без власного порогу. */
+  lowStockThreshold: z.number().int().min(0).max(100000).default(5),
+  /** Типовий термін виробництва партії, днів (рекомендації наступних партій). */
+  productionLeadDays: z.number().int().min(1).max(365).default(30),
+  /** Цільовий запас після надходження партії, днів продажів. */
+  targetCoverDays: z.number().int().min(1).max(730).default(60),
+  /** Округлення рекомендованої кількості партії вгору до кратного (штук). */
+  batchRounding: z.number().int().min(1).max(10000).default(10),
+  /**
+   * Передача внутрішніх змін залишку (надходження, брак, коригування) у Shopify дельтою: off — не надсилати
+   * (рухи позначаються shopify_sync_state = skipped); deltas — у чергу (pending). Продажі/виконання Shopify рахує сам.
+   */
+  shopifyPush: z.enum(WAREHOUSE_SHOPIFY_PUSH_MODES).default("off"),
+  /**
+   * Зміни залишку, зроблені в Shopify не застосунком: review — розбіжність на розгляд власника (inventory_conflicts);
+   * apply — прийняти значення Shopify автоматично (рух shopify_external).
+   */
+  externalShopifyChanges: z.enum(WAREHOUSE_EXTERNAL_CHANGE_MODES).default("review"),
+  /**
+   * Фізичні події можуть зробити on_hand від'ємним (з попередженням negative_on_hand): передача перевізнику
+   * (consume_sale) — ЗАВЖДИ (посилка вже фізично передана); прийняте значення Shopify (shopify_external) — лише
+   * коли true. false — прийняття значення Shopify, що дає on_hand < 0, відхиляється (inventory.insufficient).
+   * Інші рухи (коригування, брак, витрата матеріалів) ніколи не роблять on_hand від'ємним.
+   */
+  allowNegativeOnHand: z.boolean().default(true),
+});
+
 export const settingsSchemas = {
   automation: automationSchema,
   shipper: shipperSchema,
@@ -199,6 +232,7 @@ export const settingsSchemas = {
   novaPost: novaPostSchema,
   checkoutRates: checkoutRatesSchema,
   tracking: trackingSchema,
+  warehouse: warehouseSchema,
 } as const;
 
 export type SettingsKey = keyof typeof settingsSchemas;
@@ -240,6 +274,15 @@ export const DEFAULT_SETTINGS: AllSettings = {
   novaPost: { payerType: "Sender", payerContractNumber: "", deliveryType: "", tariffCurrency: "UAH", tariffConfirmation: null },
   checkoutRates: { enabled: false, markupPercent: 0, markupFixed: "0.00", rounding: "none", fxRates: [], serviceName: "" },
   tracking: { enabled: true, intervalMinutes: 60, pushToShopify: true, notifyCustomer: false, trackingUrlTemplate: "" },
+  warehouse: {
+    lowStockThreshold: 5,
+    productionLeadDays: 30,
+    targetCoverDays: 60,
+    batchRounding: 10,
+    shopifyPush: "off",
+    externalShopifyChanges: "review",
+    allowNegativeOnHand: true,
+  },
 };
 
 /** Перелік обов'язкових полів відправника для створення накладної. */

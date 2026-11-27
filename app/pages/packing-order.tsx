@@ -1,0 +1,1469 @@
+import { useEffect, useReducer, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import {
+  Form,
+  useActionData,
+  useFetcher,
+  useFetchers,
+  useLoaderData,
+  useNavigation,
+  type ActionFunctionArgs,
+  type LoaderFunctionArgs,
+  type Params,
+} from "react-router";
+import { ActionBanner, type ActionResult } from "~/components/action-banner";
+import { CarrierDocumentButtons } from "~/components/carrier-documents";
+import { useCan, useHref } from "~/components/shell";
+import { OrderStatusBadge, TestBadge } from "~/components/status-badge";
+import type { OrderPriority } from "~/db/schema";
+import { isShipped } from "~/domain/order-status";
+import { requirePermission } from "~/domain/permissions";
+import { useLocale, useT, type TFunction } from "~/i18n";
+import { countryName, formatDateTime, formatWeight } from "~/lib/format";
+import { NotFoundError } from "~/lib/errors";
+import {
+  MANUAL_ADJUST_REASONS,
+  MAX_OVERRIDE_REASON_LENGTH,
+  MAX_PARCEL_DIMENSION_MM,
+  MAX_PARCEL_WEIGHT_GRAMS,
+  MAX_SCAN_LENGTH,
+  PRIORITIES,
+  PRIORITY_KEYS,
+  isManualAdjustReason,
+  parsePriority,
+} from "~/modules/packing/constants";
+import {
+  adjustPackedLine,
+  confirmCancelledPackingReturned,
+  confirmPacked,
+  confirmParcelWeight,
+  recordScan,
+  saveOrderParcel,
+  savePackingParcel,
+  setOrderPriority,
+  startPacking,
+  unpackOrder,
+  type ConfirmPackedResult,
+  type ScanResult,
+} from "~/modules/packing/packing.server";
+import { CameraScanGate, type CameraFrameResult } from "~/modules/packing/camera-gate";
+import { mismatchNeedsReissue } from "~/modules/packing/parcel-compare";
+import { INITIAL_SCAN_FEEDBACK, scanFeedbackReducer } from "~/modules/packing/scan-feedback";
+import {
+  NO_BOX,
+  initialParcelForm,
+  parcelPrefillMarkers,
+  prefillForBox,
+  reduceParcelForm,
+  resolveParcelForm,
+  type ParcelFormAction,
+  type ParcelFormEnv,
+  type ParcelFormState,
+} from "~/modules/packing/parcel-form";
+import { loadPackingScreen } from "~/modules/packing/view.server";
+import { getRequestContext } from "~/server/context.server";
+import { formString, toActionError } from "~/server/http.server";
+import {
+  Badge,
+  Banner,
+  Button,
+  Card,
+  Checkbox,
+  ConfirmSubmitButton,
+  Disclosure,
+  Grid,
+  InlineCode,
+  KeyValueList,
+  Page,
+  Select,
+  Stack,
+  Text,
+  TextField,
+  Thumbnail,
+  type BadgeTone,
+  type KeyValueItem,
+} from "~/ui";
+
+/**
+ * Екран пакування замовлення (picking/:orderId), спершу для телефона:
+ * позиції з фото (модель/колір/SKU/кількість) → чекліст через сканування (сканер-клавіатура, ручне введення або
+ * камера, якщо браузер підтримує BarcodeDetector: одна одиниця = одне свідоме зчитування, camera-gate.ts) і ручні ±
+ * з причиною (−1 — і для зайвих одиниць) → коробка (★ узгоджена з накладною / вибір) і параметри посилки
+ * (вага/габарити — ручне коригування замовлення; до накладної — теж, target=order) → «Запаковано» (лише з повним
+ * комплектом і непорожнім чеклістом; власник — з причиною; списується перелік матеріалів, який бачив пакувальник —
+ * materialsKey) → за потреби «Розпакувати». Розбіжність посилки з накладною — попередження й шлях до «Переоформити»
+ * на сторінці замовлення. Дозволи — сервер (packing.perform; пріоритет — orders.edit; ім'я й місто отримувача —
+ * лише з orders.view).
+ */
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const PRIORITY_TONE: Record<OrderPriority, BadgeTone> = { 0: "outline", 1: "warning", 2: "critical" };
+
+function orderIdFrom(params: Params): string {
+  const id = params.orderId ?? "";
+  if (!UUID_RE.test(id)) throw new Response("Not Found", { status: 404 });
+  return id.toLowerCase();
+}
+
+export async function loader({ request, params }: LoaderFunctionArgs) {
+  const ctx = await getRequestContext(request);
+  try {
+    requirePermission(ctx.actor, "packing.perform");
+  } catch {
+    throw new Response("Forbidden", { status: 403 });
+  }
+  const orderId = orderIdFrom(params);
+  const screen = await loadPackingScreen(ctx, orderId).catch((e: unknown) => {
+    if (e instanceof NotFoundError) throw new Response("Not Found", { status: 404 });
+    throw e;
+  });
+  return {
+    ...screen,
+    countryLabel: screen.order.countryCode ? countryName(screen.order.countryCode, ctx.locale) : null,
+    isDemo: ctx.mode === "demo",
+    /** Підтвердити без повного комплекту — лише власник (перевіряє і сервіс). */
+    canOverride: ctx.actor.role === "owner",
+  };
+}
+
+type PackingActionResult = ActionResult & { feedback?: "scan" | "adjust"; sound?: "ok" | "error" };
+
+const itemName = (l: { title: string; variantTitle: string | null }) => (l.variantTitle ? `${l.title} — ${l.variantTitle}` : l.title);
+
+function scanResult(r: ScanResult): PackingActionResult {
+  switch (r.kind) {
+    case "matched":
+      return {
+        ok: true,
+        message: "packing.scan.matched",
+        params: { item: itemName(r.line), packed: r.line.packed, required: r.line.required },
+        extra: r.progress.complete ? ["packing.scan.allDone"] : [],
+        tone: "success",
+        feedback: "scan",
+        sound: "ok",
+      };
+    case "over_quantity":
+      return { ok: false, error: "packing.scan.overQuantity", params: { item: itemName(r.line), required: r.line.required }, feedback: "scan", sound: "error" };
+    case "ambiguous":
+      return r.scope === "catalog"
+        ? {
+            ok: false,
+            error: "packing.scan.ambiguousCatalog",
+            params: { code: r.code, count: r.count, list: r.variants.map((v) => itemName({ title: v.productTitle, variantTitle: v.variantTitle })).join("; ") },
+            feedback: "scan",
+            sound: "error",
+          }
+        : { ok: false, error: "packing.scan.ambiguous", params: { code: r.code }, feedback: "scan", sound: "error" };
+    case "wrong_item":
+      return { ok: false, error: "packing.scan.wrongItem", params: { item: itemName({ title: r.productTitle, variantTitle: r.variantTitle }), code: r.code }, feedback: "scan", sound: "error" };
+    case "unknown_code":
+      return { ok: false, error: "packing.scan.unknownCode", params: { code: r.code }, feedback: "scan", sound: "error" };
+    case "empty":
+      return { ok: false, error: "packing.scan.empty", feedback: "scan", sound: "error" };
+  }
+}
+
+function confirmResult(r: ConfirmPackedResult): PackingActionResult {
+  if (r.kind === "already_packed") return { ok: true, message: "packing.confirm.already", tone: "info" };
+  const extra: string[] = [];
+  const consumed = r.materials.lines.reduce((s, l) => s + l.consumed, 0);
+  const repeated = r.materials.lines.some((l) => l.consumed === 0 && l.shortage === 0) && consumed > 0;
+  if (r.materials.alreadyConsumed) extra.push("packing.confirm.materialsAlready");
+  else if (repeated) extra.push("packing.confirm.materialsNew");
+  else if (consumed > 0) extra.push("packing.confirm.materialsConsumed");
+  if (r.materials.totalShortage > 0) extra.push("packing.confirm.materialsShortage");
+  if (r.mismatch) extra.push("packing.confirm.mismatch");
+  return {
+    ok: true,
+    message: r.override ? "packing.confirm.doneOverride" : "packing.confirm.done",
+    params: { consumed, shortage: r.materials.totalShortage },
+    extra,
+    tone: r.materials.totalShortage > 0 || r.mismatch ? "warning" : "success",
+  };
+}
+
+export async function action({ request, params }: ActionFunctionArgs): Promise<PackingActionResult> {
+  const ctx = await getRequestContext(request);
+  const orderId = orderIdFrom(params);
+  try {
+    requirePermission(ctx.actor, "packing.perform");
+    const form = await request.formData();
+    switch (formString(form, "intent")) {
+      case "start": {
+        const r = await startPacking(ctx, orderId);
+        if (r.kind === "started") return { ok: true, message: "packing.start.started", tone: "success" };
+        if (r.kind === "already_packed") return { ok: true, message: "packing.start.alreadyPacked", tone: "info" };
+        return { ok: true, message: "packing.start.already", params: { name: r.startedByName ?? "—" }, tone: "info" };
+      }
+      case "scan":
+        return scanResult(await recordScan(ctx, orderId, formString(form, "code").slice(0, 200)));
+      case "adjust": {
+        const raw = formString(form, "delta");
+        const delta = raw === "1" ? 1 : raw === "-1" ? -1 : null;
+        const reason = formString(form, "reason");
+        const lineId = formString(form, "lineId");
+        if (delta === null || !UUID_RE.test(lineId)) return { ok: false, error: "error.validation", feedback: "adjust" };
+        if (!isManualAdjustReason(reason)) return { ok: false, error: "packing.error.reasonRequired", feedback: "adjust" };
+        const r = await adjustPackedLine(ctx, orderId, lineId, delta, reason);
+        if (r.kind === "below_zero") return { ok: false, error: "packing.adjust.belowZero", feedback: "adjust", sound: "error" };
+        if (r.kind === "over_quantity") {
+          return { ok: false, error: "packing.scan.overQuantity", params: { item: itemName(r.line), required: r.line.required }, feedback: "adjust", sound: "error" };
+        }
+        return {
+          ok: true,
+          message: "packing.adjust.done",
+          params: { item: itemName(r.line), packed: r.line.packed, required: r.line.required },
+          tone: "success",
+          feedback: "adjust",
+          sound: "ok",
+        };
+      }
+      case "parcel": {
+        // Підставлені автоматично значення (габарити коробки, розрахункова вага) не є ручним коригуванням:
+        // зберігається лише введене пакувальником (parcel-form.ts).
+        const values = resolveParcelForm({
+          weightGrams: formString(form, "weightGrams"),
+          lengthMm: formString(form, "lengthMm"),
+          widthMm: formString(form, "widthMm"),
+          heightMm: formString(form, "heightMm"),
+          weightPrefill: formString(form, "weightPrefill"),
+          dimsPrefill: formString(form, "dimsPrefill"),
+        });
+        const input = { expectedVersion: formString(form, "version"), boxMaterialId: formString(form, "boxMaterialId"), ...values };
+        if (formString(form, "target") === "order") {
+          // До накладної (пакування ще немає): ручне коригування замовлення, яке використає нова накладна.
+          const r = await saveOrderParcel(ctx, orderId, input);
+          // Зважена вага менша за 90 % ваги товарів за Shopify — накладна її не використає (див. попередження вгорі).
+          const ignored = r.weightCheck?.use === "ignored";
+          return {
+            ok: true,
+            message: r.changed.length > 0 ? "packing.parcel.savedOrder" : "packing.parcel.noChanges",
+            params: { count: r.changed.length },
+            extra: ignored ? ["packing.parcel.weightIgnoredSaved"] : [],
+            tone: ignored ? "warning" : r.changed.length > 0 ? "success" : "info",
+          };
+        }
+        const r = await savePackingParcel(ctx, orderId, input);
+        const ignored = r.weightCheck?.use === "ignored";
+        return {
+          ok: true,
+          message: r.changed.length > 0 ? "packing.parcel.saved" : "packing.parcel.noChanges",
+          params: { count: r.changed.length },
+          extra: [...(ignored ? ["packing.parcel.weightIgnoredSaved"] : []), ...(r.mismatch ? ["packing.parcel.mismatch"] : [])],
+          tone: r.mismatch || ignored ? "warning" : r.changed.length > 0 ? "success" : "info",
+        };
+      }
+      case "confirmWeight": {
+        // Рішення власника: зважена вага правильна (ваги товарів у Shopify завищені) — її використає нова накладна.
+        const r = await confirmParcelWeight(ctx, orderId, { weightGrams: formString(form, "weightGrams") });
+        if (r.kind === "confirmed") return { ok: true, message: "packing.weightCheck.confirmed", tone: "success" };
+        return { ok: true, message: r.kind === "already_confirmed" ? "packing.weightCheck.alreadyConfirmed" : "packing.weightCheck.notNeeded", tone: "info" };
+      }
+      case "confirm": {
+        const override = form.has("override") ? { override: { reason: formString(form, "overrideReason").slice(0, MAX_OVERRIDE_REASON_LENGTH) } } : {};
+        // Відбиток переліку матеріалів, який бачив пакувальник (форма надсилає його завжди): інший план на сервері — або
+        // запит без відбитка (застаріла сторінка) — повторне підтвердження зі свіжим переліком (packing.error.materialsChanged).
+        const expectedMaterials = formString(form, "materialsKey");
+        return confirmResult(await confirmPacked(ctx, orderId, Number(formString(form, "version")), { ...override, expectedMaterials }));
+      }
+      case "unpack": {
+        const r = await unpackOrder(ctx, orderId, { resetChecklist: form.has("resetChecklist") });
+        if (r.kind === "not_packed") return { ok: true, message: "packing.unpack.notPacked", tone: "info" };
+        const needsWaybill = r.status === "awaiting_review";
+        return {
+          ok: true,
+          message: needsWaybill ? "packing.unpack.doneNeedsWaybill" : "packing.unpack.done",
+          extra: [
+            ...(r.materialsConsumed ? ["packing.unpack.materialsNote"] : []),
+            // Етап 5: зміни позицій із Shopify застосує повторне читання замовлення (поставлено в чергу).
+            ...(r.shopifyResync === "queued" ? ["order.shopifyLines.resyncQueued"] : []),
+          ],
+          tone: needsWaybill ? "warning" : "success",
+        };
+      }
+      case "returned": {
+        // Етап 5: замовлення скасовано після пакування — склад розібрав посилку й повернув товар на полицю.
+        const r = await confirmCancelledPackingReturned(ctx, orderId);
+        return r.kind === "returned"
+          ? { ok: true, message: "packing.cancelledAfter.returned", tone: "success" }
+          : { ok: true, message: "packing.cancelledAfter.nothing", tone: "info" };
+      }
+      case "priority": {
+        const priority = parsePriority(formString(form, "priority"));
+        if (priority === null) return { ok: false, error: "packing.error.invalidPriority" };
+        const r = await setOrderPriority(ctx, orderId, priority);
+        return { ok: true, message: r.changed ? "packing.priority.saved" : "packing.priority.unchanged", tone: r.changed ? "success" : "info" };
+      }
+      default:
+        return { ok: false, error: "error.generic" };
+    }
+  } catch (e) {
+    return toActionError(e);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// UI
+// ---------------------------------------------------------------------------
+
+type Data = ReturnType<typeof useLoaderData<typeof loader>>;
+type Line = Data["lines"][number];
+
+function useBusy() {
+  const navigation = useNavigation();
+  const submitting = navigation.state !== "idle" && navigation.formMethod?.toUpperCase() === "POST";
+  return (intent: string) => submitting && navigation.formData?.get("intent") === intent;
+}
+
+function dimsText(d: readonly number[] | null | undefined): string | null {
+  return d && d.length === 3 ? d.join(" × ") : null;
+}
+
+function priorityLabel(p: OrderPriority, t: TFunction): string {
+  return t(`packing.priority.${PRIORITY_KEYS[p]}`);
+}
+
+/** Короткий сигнал (вібрація там, де підтримується) — пакувальник не дивиться на екран під час сканування. */
+function signal(kind: "ok" | "error" | undefined) {
+  if (!kind || typeof navigator === "undefined" || typeof navigator.vibrate !== "function") return;
+  try {
+    navigator.vibrate(kind === "error" ? [120, 60, 120] : 40);
+  } catch {
+    // не підтримується — без сигналу
+  }
+}
+
+export default function PackingOrderPage() {
+  const data = useLoaderData<typeof loader>();
+  const actionData = useActionData<typeof action>();
+  const t = useT();
+  const locale = useLocale();
+  const href = useHref();
+  const { order, packing, shipment } = data;
+  const open = packing?.status === "in_progress" && order.status === "awaiting_picking";
+  const packed = order.status === "packed" && packing?.status === "packed";
+  /** Передано перевізнику або скасовано — пакування завершене, лише перегляд. */
+  const closed = isShipped(order.status) || order.status === "cancelled";
+
+  return (
+    <Page
+      title={t("packing.screen.title", { number: order.orderNumber })}
+      subtitle={t("packing.screen.subtitle", { date: formatDateTime(order.placedAt, locale) })}
+      backHref={href("picking")}
+      backLabel={t("packing.screen.back")}
+      titleMeta={
+        <Stack as="span" direction="horizontal" gap={1} align="center" wrap>
+          <OrderStatusBadge status={order.status} />
+          {order.priority > 0 ? <Badge tone={PRIORITY_TONE[order.priority]}>{priorityLabel(order.priority, t)}</Badge> : null}
+          {data.progress.requiredUnits > 0 ? (
+            <Badge tone={data.progress.complete ? "success" : "info"}>
+              {t("packing.progress.short", { packed: data.progress.packedUnits, required: data.progress.requiredUnits })}
+            </Badge>
+          ) : null}
+        </Stack>
+      }
+    >
+      <Stack gap={4}>
+        <ActionBanner data={actionData} />
+        {data.cancelledAfterPacking ? (
+          <CancelledAfterPackingBanner data={data} />
+        ) : closed ? (
+          <Banner tone="info" action={<Button to={href(`orders/${order.id}`)}>{t("packing.screen.toOrder")}</Button>}>
+            {t(order.status === "cancelled" ? "packing.screen.cancelled" : "packing.screen.shipped")}
+          </Banner>
+        ) : data.deletedAtCarrier ? (
+          <Banner tone="critical" title={t("tracking.deleted.title")} action={<Button to={href(`orders/${order.id}`)}>{t("packing.screen.toOrder")}</Button>}>
+            {t("packing.screen.deletedAtCarrier")}
+          </Banner>
+        ) : data.packedWithoutWaybill ? (
+          <Banner tone="warning" title={t("packing.screen.packedNoWaybill.title")} action={<Button to={href(`orders/${order.id}`)}>{t("packing.screen.toOrder")}</Button>}>
+            {t("packing.screen.packedNoWaybill.body")}
+          </Banner>
+        ) : !shipment?.packable && !packed ? (
+          <Banner tone="warning" title={t("packing.screen.noWaybill.title")} action={<Button to={href(`orders/${order.id}`)}>{t("packing.screen.toOrder")}</Button>}>
+            {t("packing.screen.noWaybill.body")}
+          </Banner>
+        ) : null}
+        {!closed && data.fulfilledInShopify ? (
+          <Banner tone="critical" title={t("packing.screen.fulfilledInShopify.title")} action={<Button to={href(`orders/${order.id}`)}>{t("packing.screen.toOrder")}</Button>}>
+            {t("packing.screen.fulfilledInShopify.body")}
+          </Banner>
+        ) : null}
+        {!closed && data.shopifyLinesPending ? (
+          <Banner tone="critical" title={t("packing.screen.shopifyLinesPending.title")} action={<Button to={href(`orders/${order.id}`)}>{t("packing.screen.toOrder")}</Button>}>
+            <p>{t("packing.screen.shopifyLinesPending.body")}</p>
+            {data.canOverride ? <p>{t("packing.screen.shopifyLinesPending.owner")}</p> : null}
+          </Banner>
+        ) : null}
+        {data.weightCheck ? <WeightCheckBanner data={data} /> : null}
+        {data.mismatch ? <MismatchBanner data={data} /> : null}
+        <Grid columns={{ xs: 1, lg: 2 }} gap={4}>
+          <Stack gap={4}>
+            <StatusCard data={data} />
+            {open ? <ScanCard /> : null}
+            <ChecklistCard data={data} open={open} />
+          </Stack>
+          <Stack gap={4}>
+            <MaterialsCard data={data} />
+            <ParcelCard data={data} />
+            {closed ? null : <ConfirmCard data={data} open={open} packed={packed} />}
+          </Stack>
+        </Grid>
+      </Stack>
+    </Page>
+  );
+}
+
+function StatusCard({ data }: { data: Data }) {
+  const t = useT();
+  const locale = useLocale();
+  const can = useCan();
+  const href = useHref();
+  const busy = useBusy();
+  const { order, packing, shipment } = data;
+  const items: KeyValueItem[] = [
+    {
+      key: "recipient",
+      label: t("packing.screen.recipient"),
+      value: data.customerDataHidden ? (
+        <Stack as="span" gap={0}>
+          <span>{data.countryLabel ?? "—"}</span>
+          <Text as="span" variant="caption" tone="subdued">
+            {t("packing.screen.customerHidden")}
+          </Text>
+        </Stack>
+      ) : (
+        [order.recipientName, order.city, data.countryLabel].filter(Boolean).join(", ") || "—"
+      ),
+    },
+    {
+      key: "waybill",
+      label: t("packing.screen.waybill"),
+      value: shipment?.waybillNumber ? (
+        <Stack as="span" direction="horizontal" gap={1} align="center" wrap>
+          <InlineCode>{shipment.waybillNumber}</InlineCode>
+          <span>{shipment.testMode ? t("demo.testCarrier") : shipment.carrierName}</span>
+          {shipment.testMode ? <TestBadge /> : null}
+        </Stack>
+      ) : (
+        "—"
+      ),
+    },
+    {
+      key: "started",
+      label: t("packing.screen.startedBy"),
+      value: packing?.startedByName ? `${packing.startedByName} · ${formatDateTime(packing.startedAt, locale)}` : t("packing.screen.notStarted"),
+    },
+    ...(packing?.packedByName
+      ? [{ key: "packed", label: t("packing.screen.packedBy"), value: `${packing.packedByName} · ${formatDateTime(packing.packedAt, locale)}` }]
+      : []),
+  ];
+  return (
+    <Card title={t("packing.screen.statusTitle")}>
+      <Stack gap={4}>
+        <KeyValueList items={items} />
+        {shipment?.labelAvailable ? <CarrierDocumentButtons orderId={order.id} shipmentId={shipment.id} kinds={["label"]} /> : null}
+        {shipment && !shipment.labelAvailable && shipment.testMode ? (
+          <Text variant="caption" tone="subdued">
+            {t("packing.labels.demoNote")}
+          </Text>
+        ) : null}
+        {data.canStart ? (
+          <Form method="post">
+            <input type="hidden" name="intent" value="start" />
+            <Button type="submit" variant="primary" fullWidth loading={busy("start")}>
+              {t(packing ? "packing.start.resume" : "packing.start.button")}
+            </Button>
+          </Form>
+        ) : null}
+        {can("orders.edit") && order.status !== "cancelled" && !isShipped(order.status) ? (
+          <Form method="post">
+            <input type="hidden" name="intent" value="priority" />
+            <Stack direction="horizontal" gap={2} align="end" wrap>
+              <Select
+                id="packing-priority"
+                name="priority"
+                label={t("packing.priority.label")}
+                options={PRIORITIES.map((p) => ({ value: String(p), label: priorityLabel(p, t) }))}
+                defaultValue={String(order.priority)}
+              />
+              <Button type="submit" loading={busy("priority")}>
+                {t("common.save")}
+              </Button>
+            </Stack>
+          </Form>
+        ) : null}
+        <Button to={href(`orders/${order.id}`)} variant="plain">
+          {t("packing.screen.toOrder")}
+        </Button>
+      </Stack>
+    </Card>
+  );
+}
+
+// --- Сканування ---------------------------------------------------------------
+
+interface DetectedBarcode {
+  rawValue: string;
+}
+interface BarcodeDetectorInstance {
+  detect(source: HTMLVideoElement): Promise<DetectedBarcode[]>;
+}
+interface BarcodeDetectorClass {
+  new (options?: { formats?: string[] }): BarcodeDetectorInstance;
+  getSupportedFormats?: () => Promise<string[]>;
+}
+
+function barcodeDetectorClass(): BarcodeDetectorClass | null {
+  if (typeof window === "undefined") return null;
+  const ctor = (window as unknown as { BarcodeDetector?: BarcodeDetectorClass }).BarcodeDetector;
+  return typeof ctor === "function" && typeof navigator !== "undefined" && typeof navigator.mediaDevices?.getUserMedia === "function" ? ctor : null;
+}
+
+function ScanCard() {
+  const t = useT();
+  const fetcher = useFetcher<typeof action>();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
+  // Черга кодів: апаратний сканер може надіслати наступний код, поки попередній ще обробляється. Кожен код —
+  // окремий запит по черзі (новий запит не перериває попередній, коди не склеюються в полі введення).
+  const queue = useRef<string[]>([]);
+  const inFlight = useRef(false);
+  const [pending, setPending] = useState(0);
+  const busy = fetcher.state !== "idle";
+  // Результат сканування не «висить» після інших дій і з часом зникає (scan-feedback.ts).
+  const [feedback, dispatchFeedback] = useReducer(scanFeedbackReducer, INITIAL_SCAN_FEEDBACK);
+  const navigation = useNavigation();
+  const fetchers = useFetchers();
+  const otherActivity =
+    (navigation.state === "submitting" && navigation.formData?.get("intent") !== "scan") ||
+    fetchers.some((f) => f.state === "submitting" && f.formData?.get("intent") !== "scan");
+  useEffect(() => {
+    if (fetcher.data?.feedback === "scan") dispatchFeedback({ type: "result", ok: fetcher.data.ok, at: Date.now() });
+  }, [fetcher.data]);
+  useEffect(() => {
+    if (otherActivity) dispatchFeedback({ type: "otherAction", at: Date.now() });
+  }, [otherActivity]);
+  useEffect(() => {
+    if (!feedback.visible) return;
+    const timer = window.setInterval(() => dispatchFeedback({ type: "tick", at: Date.now() }), 1000);
+    return () => window.clearInterval(timer);
+  }, [feedback.visible, feedback.seq]);
+  const result = feedback.visible && fetcher.data?.feedback === "scan" ? fetcher.data : null;
+
+  // Автофокус лише на пристроях із мишею/клавіатурою (на телефоні не відкриваємо клавіатуру без потреби).
+  useEffect(() => {
+    if (window.matchMedia?.("(pointer: fine)").matches) inputRef.current?.focus();
+  }, []);
+
+  const pump = () => {
+    if (inFlight.current) return;
+    const next = queue.current.shift();
+    setPending(queue.current.length);
+    if (next === undefined) return;
+    inFlight.current = true;
+    fetcher.submit({ intent: "scan", code: next }, { method: "post" });
+  };
+
+  useEffect(() => {
+    if (fetcher.state !== "idle") return;
+    inFlight.current = false;
+    pump();
+    // pump читає лише refs і стабільний fetcher.submit
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetcher.state]);
+
+  useEffect(() => {
+    if (fetcher.data) signal(fetcher.data.sound);
+  }, [fetcher.data]);
+
+  const submitCode = (code: string) => {
+    if (!code.trim()) return;
+    queue.current.push(code);
+    pump();
+  };
+
+  const onSubmit = (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const input = inputRef.current;
+    if (!input) return;
+    const code = input.value;
+    // Поле очищується одразу — наступний код сканера потрапляє в порожнє поле.
+    input.value = "";
+    submitCode(code);
+  };
+
+  // Деякі сканери завершують код табуляцією замість Enter.
+  const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Tab" && e.currentTarget.value.trim()) {
+      e.preventDefault();
+      formRef.current?.requestSubmit();
+    }
+  };
+
+  return (
+    <Card title={t("packing.scan.title")} description={t("packing.scan.help")}>
+      <Stack gap={3}>
+        <form ref={formRef} method="post" onSubmit={onSubmit}>
+          <input type="hidden" name="intent" value="scan" />
+          <Stack direction="horizontal" gap={2} align="end" wrap>
+            <div className="ot-field" style={{ flex: "1 1 12rem", minWidth: 0 }}>
+              <label className="ot-field__label" htmlFor="packing-scan-code">
+                {t("packing.scan.label")}
+              </label>
+              <div className="ot-input-wrap">
+                <input
+                  ref={inputRef}
+                  id="packing-scan-code"
+                  name="code"
+                  className="ot-input"
+                  autoComplete="off"
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  enterKeyHint="go"
+                  maxLength={MAX_SCAN_LENGTH}
+                  placeholder={t("packing.scan.placeholder")}
+                  onKeyDown={onKeyDown}
+                />
+              </div>
+            </div>
+            {/* Кнопка не блокується під час запиту: інакше браузер не надсилає форму за Enter (сканер). */}
+            <Button type="submit" variant="primary" aria-busy={busy || undefined}>
+              {t("packing.scan.submit")}
+            </Button>
+          </Stack>
+        </form>
+        <div aria-live="assertive" aria-atomic="true">
+          {result ? <ActionBanner data={result} /> : null}
+        </div>
+        {pending > 0 ? (
+          <Text variant="caption" tone="subdued">
+            {t("packing.scan.queued", { count: pending })}
+          </Text>
+        ) : null}
+        <CameraScanner onCode={submitCode} />
+      </Stack>
+    </Card>
+  );
+}
+
+/**
+ * Камера — лише якщо браузер має BarcodeDetector і доступ до камери (Chrome на Android тощо). У Safari на iOS
+ * BarcodeDetector зазвичай вимкнено, у вбудованій адмінці Shopify доступ до камери може бути заборонено —
+ * тоді кнопка не показується або з'являється пояснення; сканер і ручне введення працюють завжди.
+ */
+function CameraScanner({ onCode }: { onCode: (code: string) => void }) {
+  const t = useT();
+  const [supported, setSupported] = useState<boolean | null>(null);
+  const [active, setActive] = useState(false);
+  const [error, setError] = useState(false);
+  /** Підказка під відео: той самий код у кадрі / кілька кодів (оновлюється лише при зміні). */
+  const [hint, setHint] = useState<"held" | "multiple" | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const onCodeRef = useRef(onCode);
+  onCodeRef.current = onCode;
+  // Одна одиниця = одне свідоме зчитування (camera-gate.ts): код у кадрі не зараховується повторно.
+  const gateRef = useRef(new CameraScanGate());
+
+  useEffect(() => {
+    setSupported(barcodeDetectorClass() !== null);
+  }, []);
+
+  useEffect(() => {
+    if (!active) return;
+    const Detector = barcodeDetectorClass();
+    if (!Detector) return;
+    let stopped = false;
+    let stream: MediaStream | null = null;
+    let timer: number | undefined;
+    const gate = gateRef.current;
+    gate.reset();
+    const showHint = (r: CameraFrameResult) => {
+      const next = r.kind === "held" ? "held" : r.kind === "multiple" ? "multiple" : r.kind === "emit" || r.kind === "none" ? null : undefined;
+      if (next !== undefined) setHint((cur) => (cur === next ? cur : next));
+    };
+    void (async () => {
+      try {
+        const formats = await Detector.getSupportedFormats?.().catch(() => undefined);
+        const detector = new Detector(formats && formats.length > 0 ? { formats } : undefined);
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+        if (stopped) return;
+        const video = videoRef.current;
+        if (!video) return;
+        video.srcObject = stream;
+        await video.play();
+        const tick = async () => {
+          if (stopped) return;
+          try {
+            const codes = await detector.detect(video);
+            const r = gate.frame(
+              codes.map((c) => c.rawValue),
+              Date.now(),
+            );
+            if (r.kind === "emit") onCodeRef.current(r.code);
+            showHint(r);
+          } catch {
+            // кадр не розпізнано — пробуємо наступний
+          }
+          timer = window.setTimeout(() => void tick(), 300);
+        };
+        void tick();
+      } catch {
+        if (!stopped) {
+          setError(true);
+          setActive(false);
+        }
+      }
+    })();
+    return () => {
+      stopped = true;
+      if (timer) window.clearTimeout(timer);
+      stream?.getTracks().forEach((track) => track.stop());
+      setHint(null);
+    };
+  }, [active]);
+
+  if (supported === null) return null;
+  if (!supported) {
+    return (
+      <Text variant="caption" tone="subdued">
+        {t("packing.camera.unsupported")}
+      </Text>
+    );
+  }
+  return (
+    <Stack gap={2}>
+      <Stack direction="horizontal" gap={2} wrap>
+        <Button
+          onClick={() => {
+            setError(false);
+            setActive((v) => !v);
+          }}
+        >
+          {t(active ? "packing.camera.stop" : "packing.camera.start")}
+        </Button>
+      </Stack>
+      {active ? (
+        <>
+          <video
+            ref={videoRef}
+            muted
+            playsInline
+            aria-label={t("packing.camera.videoLabel")}
+            style={{ width: "100%", maxWidth: "28rem", borderRadius: "8px", background: "#000" }}
+          />
+          <Text variant="caption" tone="subdued">
+            {t("packing.camera.help")}
+          </Text>
+          <div aria-live="polite">
+            {hint === "held" ? (
+              <Stack direction="horizontal" gap={2} align="center" wrap>
+                <Text variant="body-sm">{t("packing.camera.held")}</Text>
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    gateRef.current.rearm();
+                    setHint(null);
+                  }}
+                >
+                  {t("packing.camera.next")}
+                </Button>
+              </Stack>
+            ) : hint === "multiple" ? (
+              <Text variant="body-sm">{t("packing.camera.multiple")}</Text>
+            ) : null}
+          </div>
+        </>
+      ) : null}
+      {error ? (
+        <Text variant="caption" tone="critical">
+          {t("packing.camera.error")}
+        </Text>
+      ) : null}
+    </Stack>
+  );
+}
+
+// --- Чекліст ------------------------------------------------------------------
+
+function ChecklistCard({ data, open }: { data: Data; open: boolean }) {
+  const t = useT();
+  const [reason, setReason] = useState("");
+  const { progress } = data;
+  return (
+    <Card
+      title={t("packing.checklist.title")}
+      description={t("packing.checklist.summary", { packed: progress.packedUnits, required: progress.requiredUnits, lines: progress.totalLines })}
+    >
+      <Stack gap={3}>
+        {open && (data.lines.length > 0 || data.staleLines.length > 0) ? (
+          <Select
+            id="packing-adjust-reason"
+            name="reason"
+            label={t("packing.adjust.reasonLabel")}
+            placeholder={t("packing.adjust.reasonPlaceholder")}
+            options={MANUAL_ADJUST_REASONS.map((r) => ({ value: r, label: t(`packing.adjust.reason.${r}`) }))}
+            value={reason}
+            onChange={(e) => setReason(e.currentTarget.value)}
+            helpText={t("packing.adjust.reasonHelp")}
+          />
+        ) : null}
+        {data.lines.length === 0 ? <Text tone="subdued">{t("packing.checklist.empty")}</Text> : null}
+        <Stack as="ul" gap={3}>
+          {data.lines.map((line) => (
+            <ChecklistLine key={line.id} line={line} open={open} reason={reason} />
+          ))}
+        </Stack>
+        {data.staleUnits > 0 ? (
+          <Banner tone="warning">
+            <Stack gap={2}>
+              <p>{t("packing.checklist.stale", { count: data.staleUnits })}</p>
+              {/* −1 для одиниць позицій, яких більше немає в замовленні (інакше чекліст не виправити без власника). */}
+              <Stack as="ul" gap={2}>
+                {data.staleLines.map((line) => (
+                  <StaleLine key={line.id} line={line} open={open} reason={reason} />
+                ))}
+              </Stack>
+            </Stack>
+          </Banner>
+        ) : null}
+        {progress.over.length > 0 ? <Banner tone="warning">{t("packing.checklist.over", { count: progress.overUnits })}</Banner> : null}
+        {data.otherLines.length > 0 ? (
+          <Stack gap={1}>
+            <Text variant="body-sm" weight="semibold">
+              {t("packing.checklist.otherTitle")}
+            </Text>
+            {data.otherLines.map((l) => (
+              <Text key={l.id} variant="body-sm" tone="subdued">
+                {t("packing.checklist.otherLine", { title: l.title, quantity: l.quantity })}
+              </Text>
+            ))}
+          </Stack>
+        ) : null}
+      </Stack>
+    </Card>
+  );
+}
+
+function StaleLine({ line, open, reason }: { line: Data["staleLines"][number]; open: boolean; reason: string }) {
+  const t = useT();
+  const fetcher = useFetcher<typeof action>();
+  const busy = fetcher.state !== "idle";
+  const error = fetcher.state === "idle" && fetcher.data && !fetcher.data.ok ? fetcher.data : null;
+  const title = line.title ? (line.variantTitle ? `${line.title} — ${line.variantTitle}` : line.title) : t("packing.checklist.staleUnknown");
+  return (
+    <Stack as="li" gap={1}>
+      <Stack direction="horizontal" gap={2} align="center" wrap>
+        <Text variant="body-sm" weight="semibold">
+          {title}
+        </Text>
+        <Badge tone="critical" size="sm">
+          {t("packing.line.qty", { packed: line.packed, required: 0 })}
+        </Badge>
+        {open ? (
+          <fetcher.Form method="post">
+            <input type="hidden" name="intent" value="adjust" />
+            <input type="hidden" name="lineId" value={line.id} />
+            <input type="hidden" name="reason" value={reason} />
+            <Button type="submit" name="delta" value="-1" size="sm" disabled={!reason || busy} aria-label={t("packing.adjust.minus", { item: title })}>
+              −1
+            </Button>
+          </fetcher.Form>
+        ) : null}
+      </Stack>
+      {error ? <ActionBanner data={error} /> : null}
+    </Stack>
+  );
+}
+
+function ChecklistLine({ line, open, reason }: { line: Line; open: boolean; reason: string }) {
+  const t = useT();
+  const fetcher = useFetcher<typeof action>();
+  const busy = fetcher.state !== "idle";
+  const complete = line.packed === line.required;
+  const over = line.packed > line.required;
+  const tone: BadgeTone = over ? "critical" : complete ? "success" : line.packed > 0 ? "info" : "outline";
+  const error = fetcher.state === "idle" && fetcher.data && !fetcher.data.ok ? fetcher.data : null;
+
+  useEffect(() => {
+    if (fetcher.state === "idle" && fetcher.data) signal(fetcher.data.sound);
+  }, [fetcher.state, fetcher.data]);
+
+  const traits = [line.model ? t("packing.line.model", { value: line.model }) : null, line.color ? t("packing.line.color", { value: line.color }) : null].filter(Boolean);
+  return (
+    <Stack as="li" gap={2}>
+      <Stack direction="horizontal" gap={3} align="start" wrap={false}>
+        <Thumbnail src={line.imageUrl} alt={line.title} size="lg" />
+        <Stack gap={1}>
+          <Text weight="semibold">{line.title}</Text>
+          {line.variantTitle ? <Text variant="body-sm">{line.variantTitle}</Text> : null}
+          {traits.length > 0 ? (
+            <Text variant="body-sm" tone="subdued">
+              {traits.join(" · ")}
+            </Text>
+          ) : null}
+          <Text variant="caption" tone="subdued">
+            {[line.sku ? t("packing.line.sku", { value: line.sku }) : null, line.barcode ? t("packing.line.barcode", { value: line.barcode }) : null]
+              .filter(Boolean)
+              .join(" · ") || t("packing.line.noCodes")}
+          </Text>
+          <Stack direction="horizontal" gap={2} align="center" wrap>
+            <Badge tone={tone}>{t("packing.line.qty", { packed: line.packed, required: line.required })}</Badge>
+            {complete ? <Text variant="caption">{t("packing.line.complete")}</Text> : null}
+          </Stack>
+        </Stack>
+      </Stack>
+      {open ? (
+        <fetcher.Form method="post">
+          <input type="hidden" name="intent" value="adjust" />
+          <input type="hidden" name="lineId" value={line.id} />
+          <input type="hidden" name="reason" value={reason} />
+          <Stack direction="horizontal" gap={2} align="center" wrap>
+            <Button
+              type="submit"
+              name="delta"
+              value="-1"
+              size="sm"
+              disabled={!reason || busy || line.packed === 0}
+              aria-label={t("packing.adjust.minus", { item: line.title })}
+            >
+              −1
+            </Button>
+            <Button
+              type="submit"
+              name="delta"
+              value="1"
+              size="sm"
+              disabled={!reason || busy || line.packed >= line.required}
+              aria-label={t("packing.adjust.plus", { item: line.title })}
+            >
+              +1
+            </Button>
+            {!reason ? (
+              <Text variant="caption" tone="subdued">
+                {t("packing.adjust.chooseReason")}
+              </Text>
+            ) : null}
+          </Stack>
+          {error ? <ActionBanner data={error} /> : null}
+        </fetcher.Form>
+      ) : null}
+    </Stack>
+  );
+}
+
+// --- Матеріали, посилка, підтвердження ----------------------------------------
+
+function MaterialsCard({ data }: { data: Data }) {
+  const t = useT();
+  return (
+    <Card title={t("packing.materials.title")} description={t("packing.materials.help")}>
+      {data.materials.length === 0 ? (
+        <Text tone="subdued">{t("packing.materials.none")}</Text>
+      ) : (
+        <Stack as="ul" gap={2}>
+          {data.materials.map((m) => (
+            <Stack as="li" key={m.materialId} direction="horizontal" gap={2} align="center" justify="between" wrap>
+              <Stack gap={0}>
+                <Text variant="body-sm" weight="semibold">
+                  {m.name}
+                </Text>
+                <Text variant="caption" tone="subdued">
+                  {m.isBox ? t("packing.materials.box") : t("packing.materials.kit")} · {m.code}
+                </Text>
+              </Stack>
+              <Stack as="span" direction="horizontal" gap={1} align="center">
+                <Badge tone="strong">{t("packing.materials.qty", { quantity: m.required })}</Badge>
+                {m.onHand < m.required && !data.materialsConsumed ? (
+                  <Badge tone="warning" size="sm">
+                    {t("packing.materials.short", { onHand: m.onHand })}
+                  </Badge>
+                ) : null}
+              </Stack>
+            </Stack>
+          ))}
+        </Stack>
+      )}
+      {data.materialsConsumed ? (
+        <Text variant="caption" tone="subdued">
+          {t("packing.materials.consumedNote")}
+        </Text>
+      ) : null}
+    </Card>
+  );
+}
+
+function ParcelCard({ data }: { data: Data }) {
+  const t = useT();
+  const locale = useLocale();
+  const { packing, parcel, waybillParcel } = data;
+  // Форма: у пакуванні (зокрема після «Розпакувати» без накладної) або ДО накладної без пакування — ручне
+  // коригування замовлення, яке використає нова накладна (parcelTarget, view.server.ts).
+  const editable = data.parcelTarget !== null;
+  // Після збереження (інші збережені значення / коробка) форма з'являється заново з новими значеннями;
+  // сканування (нова версія пакування) форму не скидає — введене, але ще не збережене, лишається.
+  const formKey = [packing?.id ?? "", parcel.formBoxId ?? "", parcel.savedWeightGrams, parcel.savedDimsMm?.join("x") ?? "", parcel.saved].join("|");
+  return (
+    <Card title={t("packing.parcel.title")} description={t("packing.parcel.help")}>
+      <Stack gap={3}>
+        {waybillParcel && (waybillParcel.weightGrams || waybillParcel.dimsMm) ? (
+          <Text variant="body-sm" tone="subdued">
+            {t("packing.parcel.waybillValues", {
+              weight: formatWeight(waybillParcel.weightGrams, locale),
+              dims: dimsText(waybillParcel.dimsMm) ?? "—",
+            })}
+          </Text>
+        ) : null}
+        {data.waybillWeightIgnored ? (
+          <Text variant="body-sm" tone="subdued">
+            {t("packing.waybillWeight.ignored", {
+              manual: formatWeight(data.waybillWeightIgnored.manualGrams, locale),
+              goods: formatWeight(data.waybillWeightIgnored.goodsGrams, locale),
+            })}
+          </Text>
+        ) : null}
+        {!editable ? (
+          isShipped(data.order.status) || data.order.status === "cancelled" ? null : (
+            <Text tone="subdued">{t("packing.parcel.startFirst")}</Text>
+          )
+        ) : (
+          <>
+            {data.parcelTarget === "order" ? (
+              <Text variant="body-sm" tone="subdued">
+                {t("packing.parcel.beforeWaybill")}
+              </Text>
+            ) : null}
+            <ParcelForm key={formKey} data={data} />
+          </>
+        )}
+      </Stack>
+    </Card>
+  );
+}
+
+/**
+ * Форма посилки: вага й габарити підставляються з вибраної коробки (габарити) і розрахунку (товари + тара);
+ * зміна коробки оновлює поля, яких пакувальник не змінював. Підставлене не зберігається як ручне коригування —
+ * сервер отримує підказки (weightPrefill/dimsPrefill) і зберігає лише введене (parcel-form.ts).
+ */
+function ParcelForm({ data }: { data: Data }) {
+  const t = useT();
+  const locale = useLocale();
+  const busy = useBusy();
+  const actionData = useActionData<typeof action>();
+  const fieldErrors = actionData && !actionData.ok ? actionData.fieldErrors : undefined;
+  const err = (name: string) => (fieldErrors?.[name] ? t(fieldErrors[name]!) : null);
+  const { packing, parcel, suggestion } = data;
+  const boxLocked = packing?.status === "packed";
+  const toOrder = data.parcelTarget === "order";
+  const env: ParcelFormEnv = { boxes: data.boxes, goodsWeightGrams: parcel.goodsWeightGrams, defaultTareGrams: parcel.defaultTareGrams };
+  const [state, dispatch] = useReducer(
+    (s: ParcelFormState, a: ParcelFormAction) => reduceParcelForm(env, s, a),
+    null,
+    () => initialParcelForm(env, { boxId: parcel.formBoxId, weightGrams: parcel.savedWeightGrams, dimsMm: parcel.savedDimsMm }),
+  );
+  const markers = parcelPrefillMarkers(env, state);
+  const prefill = prefillForBox(env, state.boxId);
+  const options = [
+    { value: NO_BOX, label: t("packing.parcel.noBox") },
+    ...data.boxes.map((b) => ({
+      value: b.id,
+      label: [
+        b.id === suggestion.boxId ? `★ ${b.name}` : b.name,
+        dimsText(b.innerDimsMm) ? `${dimsText(b.innerDimsMm)} ${t("packing.unit.mm")}` : null,
+        t("packing.parcel.boxStock", { onHand: b.onHand }),
+        b.active ? null : t("packing.parcel.boxInactive"),
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    })),
+  ];
+  // ★ узгоджена з накладною (view.server.ts packingSuggestion): коробка накладної / у межах габаритів накладної.
+  const suggestionText = !suggestion.boxId
+    ? t("packing.parcel.noSuggestion", { reason: t(`packing.parcel.reason.${suggestion.reason}`) })
+    : suggestion.source === "waybill"
+      ? t("packing.parcel.suggestedWaybill", { name: suggestion.name ?? "" })
+      : [
+          t("packing.parcel.suggested", {
+            name: suggestion.name ?? "",
+            reason: suggestion.source === "waybill_fit" ? `${t(`packing.parcel.reason.${suggestion.reason}`)}, ${t("packing.parcel.withinWaybill")}` : t(`packing.parcel.reason.${suggestion.reason}`),
+          }),
+          suggestion.differsFromWaybill ? t("packing.parcel.suggestedDiffers", { dims: dimsText(data.waybillParcel?.dimsMm) ?? "—" }) : null,
+        ]
+          .filter(Boolean)
+          .join(" ");
+  const savedWeightShown = parcel.savedWeightGrams !== null && state.weight.trim() === String(parcel.savedWeightGrams);
+  const weightHelp = !state.weightManual
+    ? prefill.weightGrams
+      ? t("packing.parcel.estimateHint", { weight: formatWeight(prefill.weightGrams, locale) })
+      : t("packing.parcel.weighHint")
+    : savedWeightShown
+      ? t(data.weightCheck?.use === "ignored" ? "packing.parcel.savedIgnoredHint" : "packing.parcel.savedHint")
+      : prefill.weightGrams
+        ? t("packing.parcel.manualEstimateHint", { weight: formatWeight(prefill.weightGrams, locale) })
+        : t("packing.parcel.manualHint");
+  return (
+    <Form method="post">
+      <input type="hidden" name="intent" value="parcel" />
+      {toOrder ? <input type="hidden" name="target" value="order" /> : null}
+      <input type="hidden" name="version" value={toOrder ? data.order.version : (packing?.version ?? 0)} />
+      <input type="hidden" name="weightPrefill" value={markers.weightPrefill} />
+      <input type="hidden" name="dimsPrefill" value={markers.dimsPrefill} />
+      {boxLocked ? <input type="hidden" name="boxMaterialId" value={packing?.boxMaterialId ?? NO_BOX} /> : null}
+      <Stack gap={3}>
+        <Select
+          id="packing-box"
+          name={boxLocked ? "boxMaterialIdLocked" : "boxMaterialId"}
+          label={t("packing.parcel.box")}
+          options={options}
+          value={state.boxId}
+          onChange={(e) => dispatch({ type: "box", boxId: e.currentTarget.value })}
+          disabled={boxLocked}
+          helpText={boxLocked ? t("packing.parcel.boxLocked") : suggestionText}
+          error={err("boxMaterialId")}
+        />
+        <Stack gap={1}>
+          <TextField
+            id="packing-weight"
+            name="weightGrams"
+            type="number"
+            inputMode="numeric"
+            min={1}
+            max={MAX_PARCEL_WEIGHT_GRAMS}
+            step={1}
+            label={t("packing.parcel.weight")}
+            suffix={t("packing.unit.g")}
+            value={state.weight}
+            onChange={(e) => dispatch({ type: "weight", value: e.currentTarget.value })}
+            helpText={weightHelp}
+            error={err("weightGrams")}
+          />
+          {state.weightManual && prefill.weightGrams ? (
+            <div>
+              <Button variant="plain" size="sm" onClick={() => dispatch({ type: "useEstimate" })}>
+                {t("packing.parcel.useEstimate")}
+              </Button>
+            </div>
+          ) : null}
+        </Stack>
+        {/* Одиниця — у заголовку групи: на вузькому екрані (320 px) суфікс «мм» не лишав місця для значення. */}
+        <Text variant="body-sm" weight="semibold">
+          {t("packing.parcel.dimsLabel")}
+        </Text>
+        <Grid columns={{ xs: 3 }} gap={2}>
+          {(["lengthMm", "widthMm", "heightMm"] as const).map((name, index) => (
+            <TextField
+              key={name}
+              id={`packing-${name}`}
+              name={name}
+              type="number"
+              inputMode="numeric"
+              min={1}
+              max={MAX_PARCEL_DIMENSION_MM}
+              step={1}
+              label={t(`packing.parcel.${name}`)}
+              value={state.dims[index]}
+              onChange={(e) => dispatch({ type: "dim", index: index as 0 | 1 | 2, value: e.currentTarget.value })}
+              error={err(name)}
+            />
+          ))}
+        </Grid>
+        {state.dimsManual ? (
+          <Stack direction="horizontal" gap={2} align="center" wrap>
+            <Text variant="caption" tone="subdued">
+              {t("packing.parcel.dimsManual")}
+            </Text>
+            {prefill.dimsMm ? (
+              <Button variant="plain" size="sm" onClick={() => dispatch({ type: "useBoxDims" })}>
+                {t("packing.parcel.useBoxDims")}
+              </Button>
+            ) : null}
+          </Stack>
+        ) : prefill.dimsMm ? (
+          <Text variant="caption" tone="subdued">
+            {t("packing.parcel.dimsFromBox")}
+          </Text>
+        ) : null}
+        <Text variant="caption" tone="subdued">
+          {t("packing.parcel.usageNote")}
+        </Text>
+        <Button type="submit" loading={busy("parcel")}>
+          {t("packing.parcel.save")}
+        </Button>
+      </Stack>
+    </Form>
+  );
+}
+
+/** Скасовано після початку пакування / «Запаковано»: розібрати посилку, повернути товар, потім «Повернуто на склад». */
+function CancelledAfterPackingBanner({ data }: { data: Data }) {
+  const t = useT();
+  const busy = useBusy();
+  const info = data.cancelledAfterPacking!;
+  return (
+    <Banner tone="warning" title={t("packing.cancelledAfter.title")}>
+      <Stack gap={3}>
+        <Text>{t(info.previousStatus === "packed" ? "packing.cancelledAfter.bodyPacked" : "packing.cancelledAfter.bodyInProgress")}</Text>
+        {info.materialsConsumed ? <Text weight="semibold">{t("packing.cancelledAfter.materials")}</Text> : null}
+        <Form method="post">
+          <input type="hidden" name="intent" value="returned" />
+          <ConfirmSubmitButton
+            variant="primary"
+            loading={busy("returned")}
+            title={t("packing.cancelledAfter.confirmTitle")}
+            confirmLabel={t("packing.cancelledAfter.confirm")}
+            cancelLabel={t("common.cancel")}
+            message={<Text>{t("packing.cancelledAfter.confirmBody")}</Text>}
+          >
+            {t("packing.cancelledAfter.button")}
+          </ConfirmSubmitButton>
+        </Form>
+      </Stack>
+    </Banner>
+  );
+}
+
+/**
+ * Зважена вага менша за 90 % ваги товарів за даними Shopify: накладна (нова/переоформлена) її не використає, доки
+ * власник не підтвердить, що зважено правильно (ваги товарів у Shopify завищені) — confirmParcelWeight.
+ */
+function WeightCheckBanner({ data }: { data: Data }) {
+  const t = useT();
+  const locale = useLocale();
+  const busy = useBusy();
+  const check = data.weightCheck!;
+  const params = {
+    manual: formatWeight(check.manualGrams, locale),
+    goods: formatWeight(check.goodsGrams, locale),
+    min: formatWeight(check.minGrams, locale),
+  };
+  if (check.use === "owner_verified") {
+    return <Banner tone="info">{t("packing.weightCheck.verified", params)}</Banner>;
+  }
+  return (
+    <Banner tone="warning" title={t("packing.weightCheck.title")}>
+      <Stack gap={2}>
+        <p>{t("packing.weightCheck.body", params)}</p>
+        <p>{t("packing.weightCheck.fix")}</p>
+        {data.canOverride ? (
+          <Form method="post">
+            <input type="hidden" name="intent" value="confirmWeight" />
+            <input type="hidden" name="weightGrams" value={check.manualGrams} />
+            <ConfirmSubmitButton
+              loading={busy("confirmWeight")}
+              title={t("packing.weightCheck.confirmTitle")}
+              confirmLabel={t("packing.weightCheck.confirm")}
+              cancelLabel={t("common.cancel")}
+              message={<Text>{t("packing.weightCheck.confirmBody", params)}</Text>}
+            >
+              {t("packing.weightCheck.button", params)}
+            </ConfirmSubmitButton>
+          </Form>
+        ) : (
+          <p>{t("packing.weightCheck.askOwner")}</p>
+        )}
+      </Stack>
+    </Banner>
+  );
+}
+
+function MismatchBanner({ data }: { data: Data }) {
+  const t = useT();
+  const locale = useLocale();
+  const can = useCan();
+  const href = useHref();
+  const m = data.mismatch!;
+  // Лише вага, яку нова накладна теж проігнорує, — переоформлення не допоможе (причина — ваги товарів у Shopify).
+  const reissueHelps = mismatchNeedsReissue(m);
+  const canReissue = can("waybills.manage") && can("waybills.create") && reissueHelps;
+  const packed = data.order.status === "packed";
+  return (
+    <Banner
+      tone="warning"
+      title={t("packing.mismatch.title")}
+      action={canReissue ? <Button to={href(`orders/${data.order.id}`)}>{t("packing.mismatch.toReissue")}</Button> : undefined}
+    >
+      {m.weight ? (
+        <p>{t("packing.mismatch.weight", { waybill: formatWeight(m.weight.waybillGrams, locale), packed: formatWeight(m.weight.packedGrams, locale) })}</p>
+      ) : null}
+      {m.weight?.ignoredByWaybill ? (
+        <p>
+          {t("packing.mismatch.weightIgnored", {
+            packed: formatWeight(m.weight.packedGrams, locale),
+            goods: formatWeight(m.weight.ignoredByWaybill.goodsGrams, locale),
+          })}
+        </p>
+      ) : null}
+      {m.dims ? (
+        <p>
+          {t(m.dims.exceeds ? "packing.mismatch.dimsExceeds" : "packing.mismatch.dims", {
+            waybill: dimsText(m.dims.waybillMm) ?? "—",
+            packed: dimsText(m.dims.packedMm) ?? "—",
+          })}
+        </p>
+      ) : null}
+      {reissueHelps ? <p>{t(packed ? "packing.mismatch.packedHint" : "packing.mismatch.hint")}</p> : null}
+      {reissueHelps && !canReissue ? <p>{t("packing.mismatch.askManager")}</p> : null}
+    </Banner>
+  );
+}
+
+function ConfirmCard({ data, open, packed }: { data: Data; open: boolean; packed: boolean }) {
+  const t = useT();
+  const locale = useLocale();
+  const busy = useBusy();
+  const { progress, packing } = data;
+  if (packed && packing) {
+    return (
+      <Card title={t("packing.confirm.title")}>
+        <Stack gap={3}>
+          <Banner tone="success">{t("packing.confirm.packedBy", { name: packing.packedByName ?? "—", time: formatDateTime(packing.packedAt, locale) })}</Banner>
+          <Form method="post">
+            <input type="hidden" name="intent" value="unpack" />
+            <Stack gap={3}>
+              <Checkbox id="packing-reset-checklist" name="resetChecklist" label={t("packing.unpack.reset")} />
+              <ConfirmSubmitButton
+                loading={busy("unpack")}
+                title={t("packing.unpack.title")}
+                confirmLabel={t("packing.unpack.confirm")}
+                cancelLabel={t("common.cancel")}
+                message={
+                  <Stack gap={2}>
+                    <Text>{t("packing.unpack.body")}</Text>
+                    <Text weight="semibold">{t("packing.unpack.materials")}</Text>
+                  </Stack>
+                }
+              >
+                {t("packing.unpack.button")}
+              </ConfirmSubmitButton>
+            </Stack>
+          </Form>
+        </Stack>
+      </Card>
+    );
+  }
+  if (!open || !packing) {
+    return (
+      <Card title={t("packing.confirm.title")}>
+        <Text tone="subdued">{t(data.order.status === "packed" ? "packing.confirm.packedOutside" : "packing.confirm.startFirst")}</Text>
+      </Card>
+    );
+  }
+  // Списується лише те, чого ще не списано для цього пакування (напр. нова коробка після розпакування).
+  const toConsume = data.materials.filter((m) => !data.consumedMaterialIds.includes(m.materialId));
+  const materialsPreview = toConsume.map((m) => t("packing.confirm.materialLine", { name: m.name, quantity: m.required })).join(", ");
+  /** Коробку не вибрано (неточний підбір не підставляється) — пакувальник має бачити, що коробка не спишеться. */
+  const noBox = !packing.boxMaterialId && data.boxes.length > 0 && !data.materialsConsumed;
+  /** Немає товарів для перевірки — не «повний комплект» (лише власник із причиною). */
+  const nothingToPack = progress.requiredUnits === 0;
+  const otherLinesText = data.otherLines.map((l) => t("packing.checklist.otherLine", { title: l.title, quantity: l.quantity })).join(", ");
+  const previousBoxesText = data.previousBoxes.map((b) => b.name).join(", ");
+  return (
+    <Card title={t("packing.confirm.title")}>
+      <Stack gap={3}>
+        <Text>{t("packing.confirm.progress", { packed: progress.packedUnits, required: progress.requiredUnits })}</Text>
+        {noBox ? (
+          <Text variant="body-sm" tone="subdued">
+            {t("packing.confirm.noBox")}
+          </Text>
+        ) : null}
+        {previousBoxesText ? (
+          <Text variant="body-sm" tone="subdued">
+            {t("packing.confirm.previousBoxes", { list: previousBoxesText })}
+          </Text>
+        ) : null}
+        <Form method="post">
+          <input type="hidden" name="intent" value="confirm" />
+          <input type="hidden" name="version" value={packing.version} />
+          <input type="hidden" name="materialsKey" value={data.materialsKey} />
+          {progress.complete && !nothingToPack && !data.shopifyLinesPending && !data.fulfilledInShopify ? (
+            <ConfirmSubmitButton
+              variant="primary"
+              fullWidth
+              loading={busy("confirm")}
+              title={t("packing.confirm.dialogTitle", { number: data.order.orderNumber })}
+              confirmLabel={t("packing.confirm.confirm")}
+              cancelLabel={t("common.cancel")}
+              message={
+                <Stack gap={2}>
+                  <Text>{t("packing.confirm.dialogBody")}</Text>
+                  <Text weight="semibold">
+                    {materialsPreview
+                      ? t("packing.confirm.dialogMaterials", { list: materialsPreview })
+                      : data.materialsConsumed
+                        ? t("packing.confirm.dialogMaterialsAlready")
+                        : t("packing.confirm.dialogNoMaterials")}
+                  </Text>
+                  {noBox ? <Text>{t("packing.confirm.noBox")}</Text> : null}
+                  {otherLinesText ? <Text>{t("packing.confirm.dialogOtherLines", { list: otherLinesText })}</Text> : null}
+                  {previousBoxesText ? <Text>{t("packing.confirm.previousBoxes", { list: previousBoxesText })}</Text> : null}
+                  {mismatchNeedsReissue(data.mismatch) ? <Text>{t("packing.confirm.dialogMismatch")}</Text> : null}
+                  <Text variant="body-sm" tone="subdued">
+                    {t("packing.confirm.notShipped")}
+                  </Text>
+                </Stack>
+              }
+            >
+              {t("packing.confirm.button")}
+            </ConfirmSubmitButton>
+          ) : (
+            <Stack gap={2}>
+              <Button variant="primary" fullWidth disabled>
+                {t("packing.confirm.button")}
+              </Button>
+              <Text variant="body-sm" tone="subdued">
+                {t(
+                  data.fulfilledInShopify
+                    ? "packing.confirm.blockedFulfilled"
+                    : data.shopifyLinesPending
+                      ? "packing.confirm.blockedShopifyLines"
+                      : nothingToPack
+                        ? "packing.confirm.nothingToPack"
+                        : "packing.confirm.incomplete",
+                )}
+              </Text>
+            </Stack>
+          )}
+        </Form>
+        {(!progress.complete || nothingToPack || data.shopifyLinesPending) && !data.fulfilledInShopify && data.canOverride ? (
+          <Disclosure summary={t("packing.override.summary")}>
+            <Form method="post">
+              <input type="hidden" name="intent" value="confirm" />
+              <input type="hidden" name="version" value={packing.version} />
+              <input type="hidden" name="materialsKey" value={data.materialsKey} />
+              <input type="hidden" name="override" value="1" />
+              <Stack gap={3}>
+                <Text variant="body-sm">{t("packing.override.help")}</Text>
+                <TextField
+                  id="packing-override-reason"
+                  name="overrideReason"
+                  label={t("packing.override.reason")}
+                  multiline={2}
+                  maxLength={MAX_OVERRIDE_REASON_LENGTH}
+                  required
+                />
+                <ConfirmSubmitButton
+                  variant="critical"
+                  loading={busy("confirm")}
+                  title={t("packing.override.title")}
+                  confirmLabel={t("packing.override.confirm")}
+                  cancelLabel={t("common.cancel")}
+                  message={
+                    <Stack gap={2}>
+                      <Text>{t("packing.override.body", { packed: progress.packedUnits, required: progress.requiredUnits })}</Text>
+                      {data.shopifyLinesPending ? <Text weight="semibold">{t("packing.override.shopifyLines")}</Text> : null}
+                    </Stack>
+                  }
+                >
+                  {t("packing.override.button")}
+                </ConfirmSubmitButton>
+              </Stack>
+            </Form>
+          </Disclosure>
+        ) : null}
+      </Stack>
+    </Card>
+  );
+}
+
+export { RouteErrorBoundary as ErrorBoundary } from "~/components/route-error";

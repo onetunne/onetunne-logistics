@@ -5,7 +5,7 @@ import {
   runNovaPostConnectionCheck,
 } from "~/modules/rates/nova-post-setup.server";
 import type { NovaPostConnectionCheck } from "~/integrations/carriers/nova-post/connection-check.server";
-import { isTariffConfirmed } from "~/modules/settings/schema";
+import { isTariffConfirmed, WAREHOUSE_EXTERNAL_CHANGE_MODES, WAREHOUSE_SHOPIFY_PUSH_MODES } from "~/modules/settings/schema";
 import { Suspense, useRef, useState, type ReactNode } from "react";
 import type { ZodType } from "zod";
 import {
@@ -51,6 +51,7 @@ import {
   type SettingsValue,
 } from "~/modules/settings/schema";
 import { loadSettings, updateSetting, type UpdateSettingResult } from "~/modules/settings/settings.server";
+import { saveWarehouseSettings } from "~/modules/warehouse/settings.server";
 import { currentShop } from "~/modules/shopify-sync/sync.server";
 import { getRequestContext } from "~/server/context.server";
 import { formString, toActionError } from "~/server/http.server";
@@ -101,6 +102,7 @@ const INTENTS = [
   "enableCheckout",
   "disableCheckout",
   "saveTracking",
+  "saveWarehouse",
   "saveTestCarrier",
   "resetDemo",
 ] as const;
@@ -218,6 +220,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     /** Назва сервісу розрахунку доставки в Shopify (для інструкції «додайте тариф у зону доставки»). */
     checkoutServiceName: DEFAULT_CARRIER_SERVICE_NAME,
     tracking: { value: values.tracking, version: versions.tracking },
+    warehouse: { value: values.warehouse, version: versions.warehouse },
     testCarrier: isDemo ? { value: values.testCarrier, version: versions.testCarrier } : null,
     integrations: {
       // Лише булеві ознаки та публічні назви — жодних значень змінних середовища.
@@ -506,6 +509,24 @@ async function runIntent(ctx: RequestContext, intent: Intent, form: FormData): P
       };
       return saved(await updateSetting(ctx.db, ctx.actor, "tracking", await withStored(ctx, "tracking", input), version));
     }
+    case "saveWarehouse": {
+      requirePermission(ctx.actor, "settings.manage");
+      const version = expectedVersion(form);
+      if (version === null) return { ok: false, error: "error.generic" };
+      const input = {
+        lowStockThreshold: integerNumber(formString(form, "lowStockThreshold")),
+        productionLeadDays: integerNumber(formString(form, "productionLeadDays")),
+        targetCoverDays: integerNumber(formString(form, "targetCoverDays")),
+        batchRounding: integerNumber(formString(form, "batchRounding")),
+        ...presentFields(form, ["shopifyPush", "externalShopifyChanges"]),
+        allowNegativeOnHand: form.has("allowNegativeOnHand"),
+      };
+      const { result, alerts } = await saveWarehouseSettings(ctx, input, version);
+      if (!result.ok) return invalid(result.fieldErrors);
+      return alerts
+        ? { ok: true, message: "settings.warehouse.savedWithAlerts", params: { opened: alerts.opened, resolved: alerts.resolved } }
+        : { ok: true, message: "result.settings.saved" };
+    }
     case "saveTestCarrier": {
       if (ctx.mode !== "demo") throw new Response("Not Found", { status: 404 });
       requirePermission(ctx.actor, "settings.manage");
@@ -681,6 +702,10 @@ const FIELD_ERROR_KEYS: Readonly<Record<string, string>> = {
   weightGrams: "settings.checkoutRates.error.weight",
   value: "settings.checkoutRates.error.value",
   intervalMinutes: "settings.tracking.error.interval",
+  lowStockThreshold: "settings.warehouse.error.lowStockThreshold",
+  productionLeadDays: "settings.warehouse.error.productionLeadDays",
+  targetCoverDays: "settings.warehouse.error.targetCoverDays",
+  batchRounding: "settings.warehouse.error.batchRounding",
   trackingUrlTemplate: "settings.tracking.error.template",
   recipientRegistrationAddressConfirmed: "settings.customs.registrationConfirmRequired",
   "enabled:settings.checkoutRates.notReady.tariff_not_fixed": "settings.checkoutRates.notReady.tariff_not_fixed",
@@ -785,6 +810,7 @@ export default function SettingsPage() {
           }}
         />
         <TrackingSection data={data} {...sectionProps("saveTracking")} />
+        <WarehouseSection data={data} {...sectionProps("saveWarehouse")} />
         {data.testCarrier ? <TestCarrierSection data={data} {...sectionProps("saveTestCarrier")} /> : null}
         <IntegrationsSection data={data} />
         <Grid columns={{ xs: 1, lg: data.can.demoReset ? 2 : 1 }} gap={4}>
@@ -2082,6 +2108,97 @@ function TrackingSection({ data, result, pending, fieldError }: SectionProps) {
                 placeholder="https://…{number}"
                 helpText={t("settings.tracking.trackingUrlTemplateHelp")}
                 error={fieldError("trackingUrlTemplate")}
+                disabled={!editable}
+              />
+            </div>
+          </FormLayout>
+          <SaveRow canSave={editable} pending={pending} version={version} />
+        </Stack>
+      </Form>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------- Склад (етап 5)
+
+function WarehouseSection({ data, result, pending, fieldError }: SectionProps) {
+  const t = useT();
+  const { value, version } = data.warehouse;
+  const editable = data.can.manage;
+  // Демо: Shopify не підключено — передача й зміни з Shopify не діють (рухи складу — «Не надсилалося», movementOptionsFor).
+  // Поля лишаються редагованими для перегляду; збережене значення й робочий текст не змінюються.
+  const demo = data.mode === "demo";
+  const shopifyHelp = (help: string, demoNote: string) =>
+    demo ? (
+      <Stack as="span" gap={1}>
+        <Text as="span" variant="caption" weight="semibold">
+          {demoNote}
+        </Text>
+        <span>{help}</span>
+      </Stack>
+    ) : (
+      help
+    );
+  const number = (name: "lowStockThreshold" | "productionLeadDays" | "targetCoverDays" | "batchRounding", min: number, max: number, suffix?: string) => (
+    <TextField
+      label={t(`settings.warehouse.${name}`)}
+      name={name}
+      type="number"
+      inputMode="numeric"
+      min={min}
+      max={max}
+      step={1}
+      defaultValue={value[name]}
+      {...(suffix ? { suffix } : {})}
+      helpText={t(`settings.warehouse.${name}Help`)}
+      error={fieldError(name)}
+      disabled={!editable}
+    />
+  );
+  return (
+    <Card title={t("settings.warehouse.title")} description={t("settings.warehouse.description")}>
+      <Form method="post" key={version}>
+        <Hidden intent="saveWarehouse" version={version} />
+        <Stack gap={4}>
+          <ActionBanner data={result} />
+          {demo ? (
+            <Banner tone="info">{t("settings.warehouse.demoBanner")}</Banner>
+          ) : value.shopifyPush === "deltas" ? (
+            <Banner tone="info">{t("settings.warehouse.pushOnBanner")}</Banner>
+          ) : null}
+          {value.externalShopifyChanges === "apply" && value.shopifyPush !== "deltas" ? (
+            <Banner tone="warning">{t("settings.warehouse.applyWithoutPushWarning")}</Banner>
+          ) : null}
+          <FormLayout columns={2}>
+            {number("lowStockThreshold", 0, 100000, t("settings.warehouse.unitPieces"))}
+            {number("productionLeadDays", 1, 365, t("settings.warehouse.unitDays"))}
+            {number("targetCoverDays", 1, 730, t("settings.warehouse.unitDays"))}
+            {number("batchRounding", 1, 10000, t("settings.warehouse.unitPieces"))}
+            <Select
+              label={t("settings.warehouse.shopifyPush")}
+              name="shopifyPush"
+              defaultValue={value.shopifyPush}
+              options={WAREHOUSE_SHOPIFY_PUSH_MODES.map((m) => ({ value: m, label: t(`settings.warehouse.shopifyPush.${m}`) }))}
+              helpText={shopifyHelp(t("settings.warehouse.shopifyPushHelp"), t("settings.warehouse.shopifyPushDemo"))}
+              error={fieldError("shopifyPush")}
+              disabled={!editable}
+            />
+            <Select
+              label={t("settings.warehouse.externalShopifyChanges")}
+              name="externalShopifyChanges"
+              defaultValue={value.externalShopifyChanges}
+              options={WAREHOUSE_EXTERNAL_CHANGE_MODES.map((m) => ({ value: m, label: t(`settings.warehouse.externalShopifyChanges.${m}`) }))}
+              helpText={shopifyHelp(t("settings.warehouse.externalShopifyChangesHelp"), t("settings.warehouse.externalShopifyChangesDemo"))}
+              error={fieldError("externalShopifyChanges")}
+              disabled={!editable}
+            />
+            <div className="ot-form-layout__full">
+              <Checkbox
+                label={t("settings.warehouse.allowNegativeOnHand")}
+                name="allowNegativeOnHand"
+                defaultChecked={value.allowNegativeOnHand}
+                helpText={t("settings.warehouse.allowNegativeOnHandHelp")}
+                error={fieldError("allowNegativeOnHand")}
                 disabled={!editable}
               />
             </div>

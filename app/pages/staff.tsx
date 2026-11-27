@@ -1,7 +1,16 @@
 import { Form, useActionData, useLoaderData, useNavigation, type ActionFunctionArgs, type LoaderFunctionArgs } from "react-router";
 import { asc, eq } from "drizzle-orm";
 import { staffMembers } from "~/db/schema";
-import { can, requirePermission } from "~/domain/permissions";
+import {
+  DELEGABLE_PERMISSIONS,
+  OWNER_ONLY_PERMISSIONS,
+  STAFF_DEFAULT_PERMISSIONS,
+  can,
+  requirePermission,
+  resolvePermissions,
+  staffOverridesFromSelection,
+  type Permission,
+} from "~/domain/permissions";
 import { useLocale, useT } from "~/i18n";
 import { formatDateTime } from "~/lib/format";
 import { DomainError } from "~/lib/errors";
@@ -10,9 +19,19 @@ import { ActionBanner, type ActionResult } from "~/components/action-banner";
 import { getRequestContext } from "~/server/context.server";
 import { formString, toActionError } from "~/server/http.server";
 import { getEnv } from "~/lib/env.server";
-import { Badge, Banner, Button, Card, Checkbox, InlineCode, Page, Select, Stack, Text, TextField } from "~/ui";
+import { Badge, Banner, Button, Card, Checkbox, Disclosure, InlineCode, Page, Select, Stack, Text, TextField } from "~/ui";
 
 const UUID_RE = /^[0-9a-f-]{36}$/i;
+/** Префікс полів прав у формі: perm.<дозвіл> (прапорець без value — браузер надсилає "on"). */
+const PERMISSION_FIELD = "perm.";
+/** Прихована ознака, що форма містить блок прав (інакше збережені права не змінюються). */
+const PERMISSIONS_FORM_FIELD = "permissionsForm";
+
+/** Діючі права працівника з урахуванням перевизначень (лише ті, що можна надати/зняти). */
+function delegatedPermissions(overrides: { grant?: readonly string[]; revoke?: readonly string[] }): Permission[] {
+  const effective = resolvePermissions("staff", overrides);
+  return DELEGABLE_PERMISSIONS.filter((p) => effective.has(p));
+}
 
 /** Працівники: кожен бачить свій Shopify User ID; керує ролями лише власник. */
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -32,7 +51,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
       active: m.active,
       lastSeenAt: m.lastSeenAt,
       ownerByEnv: Boolean(m.shopifyUserId && ownerIds.includes(m.shopifyUserId)),
+      permissions: delegatedPermissions(m.permissionOverrides),
+      customized: (m.permissionOverrides.grant?.length ?? 0) + (m.permissionOverrides.revoke?.length ?? 0),
     })),
+    delegable: DELEGABLE_PERMISSIONS,
+    staffDefaults: STAFF_DEFAULT_PERMISSIONS,
+    ownerOnly: OWNER_ONLY_PERMISSIONS,
   };
 }
 
@@ -51,11 +75,27 @@ export async function action({ request }: ActionFunctionArgs): Promise<ActionRes
     if (`shopify:${member.shopifyUserId}` === ctx.actor.id && (!active || role !== "owner")) {
       throw new DomainError("staff.cannotDemoteSelf", 409);
     }
+    // Окремі права — лише для ролі «Працівник» і лише з DELEGABLE_PERMISSIONS (перевіряє сервер; права лише власника —
+    // відмова). Власнику перевизначення не потрібні: очищуються, щоб не діяли несподівано після зміни ролі.
+    let permissionOverrides = member.permissionOverrides;
+    if (role === "owner") {
+      permissionOverrides = {};
+    } else if (form.get(PERMISSIONS_FORM_FIELD) === "1") {
+      const selected = [...new Set([...form.keys()].filter((k) => k.startsWith(PERMISSION_FIELD)).map((k) => k.slice(PERMISSION_FIELD.length)))];
+      const parsed = staffOverridesFromSelection(selected);
+      if (!parsed.ok) throw new DomainError("staff.error.ownerOnlyPermission", 400);
+      permissionOverrides = parsed.overrides;
+    }
     await ctx.db
       .update(staffMembers)
-      .set({ role, active, displayName: displayName || member.displayName, updatedAt: new Date() })
+      .set({ role, active, displayName: displayName || member.displayName, permissionOverrides, updatedAt: new Date() })
       .where(eq(staffMembers.id, id));
-    await writeAudit(ctx.db, ctx.actor, "staff.updated", { type: "staff", id }, { role, active });
+    await writeAudit(ctx.db, ctx.actor, "staff.updated", { type: "staff", id }, {
+      role,
+      active,
+      grant: [...(permissionOverrides.grant ?? [])],
+      revoke: [...(permissionOverrides.revoke ?? [])],
+    });
     return { ok: true, message: "staff.saved" };
   } catch (e) {
     return toActionError(e);
@@ -109,6 +149,34 @@ export default function StaffPage() {
                       ]}
                     />
                     <Checkbox label={t("staff.active")} name="active" defaultChecked={m.active} />
+                    <input type="hidden" name={PERMISSIONS_FORM_FIELD} value="1" />
+                    <Disclosure
+                      summary={
+                        m.customized > 0
+                          ? `${t("staff.permissions.title")} · ${t("staff.permissions.customized", { count: m.customized })}`
+                          : t("staff.permissions.title")
+                      }
+                    >
+                      <Stack gap={2}>
+                        <Text variant="body-sm" tone="subdued">
+                          {m.role === "owner" || m.ownerByEnv ? t("staff.permissions.ownerNote") : t("staff.permissions.help")}
+                        </Text>
+                        {data.delegable.map((p) => (
+                          <Checkbox
+                            key={p}
+                            id={`perm-${m.id}-${p}`}
+                            name={`${PERMISSION_FIELD}${p}`}
+                            label={
+                              data.staffDefaults.includes(p) ? `${t(`permission.${p}`)} (${t("staff.permissions.default")})` : t(`permission.${p}`)
+                            }
+                            defaultChecked={m.permissions.includes(p)}
+                          />
+                        ))}
+                        <Text variant="body-sm" tone="subdued">
+                          {t("staff.permissions.ownerOnly", { list: data.ownerOnly.map((p) => t(`permission.${p}`)).join(", ") })}
+                        </Text>
+                      </Stack>
+                    </Disclosure>
                     <div>
                       <Button type="submit" loading={busy}>
                         {t("common.save")}

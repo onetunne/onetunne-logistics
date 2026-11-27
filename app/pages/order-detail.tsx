@@ -18,7 +18,7 @@ import { OverriddenBadge, VariantCustomsForm } from "~/components/variant-custom
 import { OrderStatusBadge, SeverityBadge, ShipmentStatusBadge, TestBadge } from "~/components/status-badge";
 import { TrackingStatusBadge, isTrackingStatus, trackingTimelineTone } from "~/components/tracking-badge";
 import { shipmentTrackingEvents } from "~/db/schema";
-import { isShipped, type OrderStatus } from "~/domain/order-status";
+import { isOrderFulfilledInShopify, isShipped, type OrderStatus } from "~/domain/order-status";
 import { requirePermission } from "~/domain/permissions";
 import { hasKey, makeT, useLocale, useT, type TFunction } from "~/i18n";
 import { localizeCode, localizeParams } from "~/i18n/localize";
@@ -31,6 +31,7 @@ import {
   loadCountryRuleRows,
   loadOrderAggregate,
   loadOrderHistory,
+  loadOrderRow,
   shippingAddressOf,
 } from "~/modules/orders/repository.server";
 import {
@@ -42,6 +43,12 @@ import {
   updateVariantCustomsData,
   validateOrderById,
 } from "~/modules/orders/workflow.server";
+import { confirmShippedOutsideApp, shippedOutsideState } from "~/modules/orders/shipped-outside.server";
+import { manualWeightIgnoredOf } from "~/modules/packaging/parcel";
+import { MAX_OVERRIDE_REASON_LENGTH, PRIORITIES, PRIORITY_KEYS, parsePriority } from "~/modules/packing/constants";
+import { mismatchNeedsReissue } from "~/modules/packing/parcel-compare";
+import { setOrderPriority } from "~/modules/packing/packing.server";
+import { loadPackingSummary } from "~/modules/packing/view.server";
 import { MANUALLY_CLOSABLE_ISSUE_CODES } from "~/modules/problems/categories";
 import { OVERRIDE_FIELDS, type OverrideField } from "~/modules/products/customs-overrides";
 import { loadVariantCustomsParts } from "~/modules/products/repository.server";
@@ -52,7 +59,7 @@ import {
   ACTIVE_SHIPMENT_STATUSES,
   STALE_CREATING_MS,
   cancelOrder,
-  cancelWaybill,
+  cancelWaybillDetailed,
   confirmNotCreated,
   createWaybill,
   isManualLink,
@@ -61,6 +68,7 @@ import {
   type CreateWaybillResult,
 } from "~/modules/shipments/waybill.server";
 import { isReissuable, reissueWaybill, type ReissueResult } from "~/modules/shipments/reissue.server";
+import { requestShopifyResync, shopifyLinesPending } from "~/modules/shopify-sync/pending-lines.server";
 import { loadShopifyPushState, resendOrderToShopify } from "~/modules/shopify-sync/sync.server";
 import { markHandedOver, refreshShipmentTracking } from "~/modules/tracking/tracking.server";
 import { MAX_CANDIDATE_LENGTH, SHIPPING_FIELDS, type ShippingField } from "~/modules/validation/types";
@@ -190,7 +198,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     throw e;
   });
   const variantIds = [...new Set(agg.items.flatMap((i) => (i.variant ? [i.variant.id] : [])))];
-  const [history, ruleRows, settings, trackingEvents, variantParts, shopifyPush] = await Promise.all([
+  const [history, ruleRows, settings, trackingEvents, variantParts, shopifyPush, packingSummary] = await Promise.all([
     loadOrderHistory(ctx.db, orderId),
     loadCountryRuleRows(ctx.db),
     getSettings(ctx.db),
@@ -218,6 +226,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     loadVariantCustomsParts(ctx.db, variantIds),
     // Етап 4: стан передачі підтверджених змін контактів/адреси в Shopify (черга + відкриті помилки синхронізації).
     loadShopifyPushState(ctx.db, ctx.shopify.kind, agg.order),
+    // Етап 5: пакування (працівник, чекліст, посилка, розбіжність з накладною) і пріоритет.
+    loadPackingSummary(ctx.db, orderId),
   ]);
   const { order } = agg;
   const now = ctx.now().getTime();
@@ -276,7 +286,28 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
       countryCode: currentCountry,
       /** Дані можна перевіряти й редагувати (до створення накладної). */
       editable: VALIDATABLE_STATUSES.includes(order.status),
+      /** Етап 5: Shopify змінив позиції, а застосунок їх ще не застосував (активна накладна) — нова накладна/передача заблоковані. */
+      shopifyLinesPending: shopifyLinesPending(order),
+      /** Етап 5: Shopify показує (часткове) виконання, а застосунок замовлення не відправляв. */
+      fulfilledInShopify: isOrderFulfilledInShopify(order) && !isShipped(order.status) && order.status !== "cancelled",
+      /**
+       * Етап 5: Shopify частково виконав лише позиції без доставки (напр. цифрову подарункову картку) — накладна
+       * застосунку дозволена; картка пояснює це менеджеру.
+       */
+      nonShippingFulfilledOnly:
+        order.fulfillmentStatus === "partially_fulfilled" && order.shopifyShippableFulfilled === false && !isShipped(order.status) && order.status !== "cancelled",
+      fulfillmentStatus: order.fulfillmentStatus,
+      /**
+       * «Відправлено поза застосунком»: available — можна підтвердити (без активної накладної; дозвіл waybills.manage —
+       * сервер і UI); shopify_lines_pending — спершу повторне читання позицій із Shopify (кнопку приховано).
+       */
+      shippedOutside: shippedOutsideState(
+        order,
+        agg.shipments.some((s) => (ACTIVE_SHIPMENT_STATUSES as readonly string[]).includes(s.status)),
+      ),
     },
+    /** Власник (ручна передача перевізнику попри неперенесені зміни позицій — лише власник). */
+    isOwner: ctx.actor.role === "owner",
     items: agg.items.map((i) => ({
       id: i.id,
       title: i.title,
@@ -327,6 +358,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         trackingNumber: s.trackingNumber,
         packageName: s.packageCode ? (packageNames.get(s.packageCode) ?? s.packageCode) : null,
         actualWeightGrams: s.actualWeightGrams,
+        /** Етап 5: зважену вручну вагу не надіслано (менша за 90 % ваги товарів за Shopify, не підтверджена власником). */
+        manualWeightIgnored: manualWeightIgnoredOf(s.requestSnapshot),
         volumetricWeightGrams: s.volumetricWeightGrams,
         chargeableWeightGrams: s.chargeableWeightGrams,
         declaredValue: s.declaredValue,
@@ -420,6 +453,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     shopifyPushEnabled: settings.tracking.pushToShopify,
     /** Етап 4: стан передачі виправлених контактів/адреси в Shopify (без персональних даних, лише тексти Shopify). */
     shopifyPush,
+    /** Етап 5: картка «Пакування» (без даних покупця). */
+    packing: packingSummary,
     /** Лише назви незаповнених полів відправника — без значень. */
     missingShipperFields: REQUIRED_SHIPPER_FIELDS.filter((f) => !String(settings.shipper[f] ?? "").trim()),
   };
@@ -693,10 +728,14 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<A
         if (!shipmentId) return { ok: false, error: "error.notFound" };
         // «Скасувати й виправити дані»: лише скасування (нове покоління — вручну після виправлення).
         const correction = formString(form, "purpose") === "correction";
-        await cancelWaybill(ctx, shipmentId, { purpose: "correction" });
-        return correction
-          ? { ok: true, message: "result.waybill.cancelled", extra: ["order.correct.result"] }
-          : { ok: true, message: "result.waybill.cancelled" };
+        const cancelled = await cancelWaybillDetailed(ctx, shipmentId, { purpose: "correction" });
+        // Етап 5: зміни позицій із Shopify застосує повторне читання замовлення (поставлено в чергу разом зі скасуванням).
+        const resync = cancelled.shopifyResync === "queued" ? ["order.shopifyLines.resyncQueued"] : [];
+        // Запаковане замовлення лишається «Запаковано» без накладної: виправлення й нова накладна — лише після «Розпакувати».
+        const stillPacked = (await loadOrderRow(ctx.db, orderId)).status === "packed";
+        if (stillPacked) return { ok: true, message: "result.waybill.cancelled", extra: ["packing.cancelWaybill.packedResult", ...resync], tone: "warning" };
+        if (correction) return { ok: true, message: "result.waybill.cancelled", extra: ["order.correct.result", ...resync] };
+        return resync.length > 0 ? { ok: true, message: "result.waybill.cancelled", extra: resync } : { ok: true, message: "result.waybill.cancelled" };
       }
 
       case "reissueWaybill": {
@@ -708,6 +747,28 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<A
 
       case "resendShopify":
         return resendResult(await resendOrderToShopify(ctx, orderId));
+
+      case "resyncShopify": {
+        // Етап 5: повторне читання замовлення з Shopify (лише читання; дедуплікація з webhook).
+        const r = await requestShopifyResync(ctx, orderId);
+        return { ok: true, message: `order.shopifyLines.resync.${r}`, tone: r === "queued" ? "success" : "info" };
+      }
+
+      case "shippedOutside": {
+        // Етап 5: виконано в Shopify поза застосунком — списання резерву один раз (waybills.manage перевіряє сервіс).
+        const r = await confirmShippedOutsideApp(ctx, orderId);
+        return r.kind === "already_shipped"
+          ? { ok: true, message: "order.shippedOutside.result.already", tone: "info" }
+          : { ok: true, message: "order.shippedOutside.result.done", tone: "success" };
+      }
+
+      case "setPriority": {
+        // Етап 5: пріоритет відправлення (черга пакування); дозвіл orders.edit перевіряє сервіс.
+        const priority = parsePriority(formString(form, "priority"));
+        if (priority === null) return { ok: false, error: "packing.error.invalidPriority" };
+        const r = await setOrderPriority(ctx, orderId, priority);
+        return { ok: true, message: r.changed ? "packing.priority.saved" : "packing.priority.unchanged", tone: r.changed ? "success" : "info" };
+      }
 
       case "refreshTracking": {
         const shipmentId = await ownShipmentId();
@@ -734,7 +795,12 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<A
         // Допустимий стан перевіряє сервіс. «Буде передано в Shopify» — лише якщо завдання справді поставлено
         // в чергу: markHandedOver має повертати результат requestShopifyFulfillment ("queued" | "disabled" | "skipped…").
         // Поки сервіс нічого не повертає, повідомлення не показується (не обіцяємо того, чого не знаємо).
-        const shopifyOutcome: unknown = await markHandedOver(ctx, shipment.id);
+        const shopifyOutcome: unknown = await markHandedOver(ctx, shipment.id, {
+          // Етап 5: власник свідомо підтверджує передачу попри неперенесені зміни позицій із Shopify.
+          acknowledgeShopifyLineChanges: formString(form, "acknowledgeShopifyLines") === "1",
+          // Етап 5: власник передає посилку, пакування якої не підтверджено «Запаковано» (причина — в історії).
+          packingOverride: form.has("packingOverride") ? { reason: formString(form, "packingOverrideReason").slice(0, MAX_OVERRIDE_REASON_LENGTH) } : null,
+        });
         return {
           ok: true,
           message: "tracking.result.handedOver",
@@ -823,7 +889,7 @@ function fieldLabel(field: string | null, items: Item[], t: TFunction): string |
 /** Причина зміни: ключі autofix.* / issue.* перекладаються, довільний текст — як є. */
 function reasonText(reason: string | null, t: TFunction): string | null {
   if (!reason) return null;
-  if ((reason.startsWith("autofix.") || reason.startsWith("issue.")) && hasKey(reason)) return t(reason);
+  if ((reason.startsWith("autofix.") || reason.startsWith("issue.") || reason.startsWith("packing.history.")) && hasKey(reason)) return t(reason);
   return reason;
 }
 
@@ -946,6 +1012,7 @@ export default function OrderDetailPage() {
           </Stack>
           <Stack gap={4}>
             <WaybillCard data={data} />
+            <PackingCard data={data} />
             <SummaryCard order={order} />
             <HistoryCard data={data} />
           </Stack>
@@ -1126,6 +1193,15 @@ function IssueItem({ issue, data }: { issue: Issue; data: Data }) {
         </Form>
       ) : null}
 
+      {issue.code === "SHOPIFY_FULFILLED_OUTSIDE_APP" && data.order.shippedOutside === "available" && can("waybills.manage") ? (
+        <ShippedOutsideButton />
+      ) : null}
+      {issue.code === "SHOPIFY_FULFILLED_OUTSIDE_APP" && data.order.shippedOutside === "shopify_lines_pending" ? (
+        <Text variant="body-sm" tone="subdued">
+          {t("order.shippedOutside.linesPending")}
+        </Text>
+      ) : null}
+
       {(issue.severity === "warning" || MANUALLY_CLOSABLE_ISSUE_CODES.includes(issue.code)) && canEdit ? (
         <Form method="post">
           <Hidden intent="dismissIssue" fields={{ issueId: issue.id }} />
@@ -1139,6 +1215,62 @@ function IssueItem({ issue, data }: { issue: Issue; data: Data }) {
         </Form>
       ) : null}
     </Stack>
+  );
+}
+
+/** «Відправлено поза застосунком»: підтвердження з поясненням (списання резерву один раз, без перевізника й Shopify). */
+function ShippedOutsideButton() {
+  const t = useT();
+  const busy = useBusy();
+  return (
+    <Form method="post">
+      <Hidden intent="shippedOutside" />
+      <Stack gap={1}>
+        <div>
+          <ConfirmSubmitButton
+            size="sm"
+            loading={busy("shippedOutside")}
+            title={t("order.shippedOutside.confirmTitle")}
+            confirmLabel={t("order.shippedOutside.confirm")}
+            cancelLabel={t("common.cancel")}
+            message={
+              <Stack gap={2}>
+                <Text>{t("order.shippedOutside.confirmBody")}</Text>
+                <Text weight="semibold">{t("order.shippedOutside.confirmStock")}</Text>
+              </Stack>
+            }
+          >
+            {t("order.shippedOutside.button")}
+          </ConfirmSubmitButton>
+        </div>
+        <Text variant="caption" tone="subdued">
+          {t("order.shippedOutside.help")}
+        </Text>
+      </Stack>
+    </Form>
+  );
+}
+
+/** Shopify змінив позиції, а застосунок їх ще не застосував: що заблоковано й як застосувати. */
+function ShopifyLinesPendingBanner({ data, hasActive }: { data: Data; hasActive: boolean }) {
+  const t = useT();
+  const can = useCan();
+  const busy = useBusy();
+  const canResync = !hasActive && !data.isDemo && data.order.source === "shopify" && can("orders.edit");
+  return (
+    <Banner tone="warning" title={t("order.shopifyLines.title")}>
+      <Stack gap={2}>
+        <p>{t(hasActive ? "order.shopifyLines.bodyActive" : "order.shopifyLines.bodyNoWaybill")}</p>
+        {canResync ? (
+          <Form method="post">
+            <Hidden intent="resyncShopify" />
+            <Button type="submit" size="sm" loading={busy("resyncShopify")}>
+              {t("order.shopifyLines.resyncButton")}
+            </Button>
+          </Form>
+        ) : null}
+      </Stack>
+    </Banner>
   );
 }
 
@@ -1514,8 +1646,10 @@ function WaybillCard({ data }: { data: Data }) {
         <CreatedWaybill
           shipment={active}
           order={data.order}
+          packing={data.packing}
           shopifyPushEnabled={data.shopifyPushEnabled}
           shopifyChanged={Boolean(shopifyChange)}
+          isOwner={data.isOwner}
         />
       </>
     );
@@ -1527,6 +1661,7 @@ function WaybillCard({ data }: { data: Data }) {
   return (
     <Card title={t("order.waybill.title")}>
       <Stack gap={4}>
+        {data.order.shopifyLinesPending ? <ShopifyLinesPendingBanner data={data} hasActive={Boolean(active)} /> : null}
         {body}
         {previous.length > 0 ? <PreviousShipments shipments={previous} /> : null}
       </Stack>
@@ -1537,13 +1672,17 @@ function WaybillCard({ data }: { data: Data }) {
 function CreatedWaybill({
   shipment: s,
   order,
+  packing,
   shopifyPushEnabled,
   shopifyChanged,
+  isOwner,
 }: {
   shipment: Shipment;
   order: OrderData;
+  packing: Data["packing"];
   shopifyPushEnabled: boolean;
   shopifyChanged: boolean;
+  isOwner: boolean;
 }) {
   const t = useT();
   const locale = useLocale();
@@ -1557,7 +1696,23 @@ function CreatedWaybill({
       : []),
     { key: "reference", label: t("order.waybill.reference"), value: <InlineCode>{s.carrierReference}</InlineCode> },
     ...(s.packageName ? [{ key: "package", label: t("order.waybill.package"), value: s.packageName }] : []),
-    { key: "actual", label: t("order.waybill.weightActual"), value: formatWeight(s.actualWeightGrams, locale) },
+    {
+      key: "actual",
+      label: t("order.waybill.weightActual"),
+      value: s.manualWeightIgnored ? (
+        <Stack as="span" gap={0}>
+          <span>{formatWeight(s.actualWeightGrams, locale)}</span>
+          <Text as="span" variant="caption" tone="subdued">
+            {t("packing.waybillWeight.ignored", {
+              manual: formatWeight(s.manualWeightIgnored.manualGrams, locale),
+              goods: formatWeight(s.manualWeightIgnored.goodsGrams, locale),
+            })}
+          </Text>
+        </Stack>
+      ) : (
+        formatWeight(s.actualWeightGrams, locale)
+      ),
+    },
     { key: "volumetric", label: t("order.waybill.weightVolumetric"), value: formatWeight(s.volumetricWeightGrams, locale) },
     { key: "chargeable", label: t("order.waybill.weightChargeable"), value: formatWeight(s.chargeableWeightGrams, locale) },
     { key: "declared", label: t("order.waybill.declaredValue"), value: formatMoney(s.declaredValue, s.currency, locale) },
@@ -1565,7 +1720,18 @@ function CreatedWaybill({
     { key: "attempts", label: t("order.waybill.attempts"), value: s.attempts },
   ];
   const canCancel = can("waybills.manage") && !shipped && order.status !== "cancelled";
-  const canHandOver = can("waybills.manage") && s.handoverAvailable;
+  // Етап 5: неперенесені зміни позицій із Shopify — ручна передача лише власником із явним підтвердженням.
+  const handoverBlockedByShopify = order.shopifyLinesPending && !isOwner;
+  // Етап 5: контроль комплектації — «Запаковано»; розпочато й не підтверджено — лише власник із причиною; пакування
+  // не розпочинали — передача можлива, але з явним застереженням (те саме правило — у markHandedOver на сервері).
+  const handoverPacking: "packed" | "incomplete" | "not_started" =
+    order.status === "packed"
+      ? "packed"
+      : order.status === "awaiting_picking" || packing.packing?.status === "in_progress"
+        ? "incomplete"
+        : "not_started";
+  const handoverBlockedByPacking = handoverPacking === "incomplete" && !isOwner;
+  const canHandOver = can("waybills.manage") && s.handoverAvailable && !handoverBlockedByShopify && !handoverBlockedByPacking;
   const canRefresh = can("waybills.create") && s.trackingSupported;
 
   let shopifyNote: string;
@@ -1605,27 +1771,62 @@ function CreatedWaybill({
           {t("tracking.deleted.body")}
         </Banner>
       ) : null}
+      {handoverBlockedByShopify && can("waybills.manage") && s.handoverAvailable ? (
+        <Text variant="body-sm">{t("order.shopifyLines.handoverBlocked")}</Text>
+      ) : null}
+      {handoverBlockedByPacking && can("waybills.manage") && s.handoverAvailable ? (
+        <Text variant="body-sm">
+          {t("packing.handover.incompleteOwnerOnly", { packed: packing.progress.packedUnits, required: packing.progress.requiredUnits })}
+        </Text>
+      ) : null}
       {canHandOver || canRefresh ? (
         <Stack gap={2}>
           <Stack direction="horizontal" gap={2}>
             {canHandOver ? (
               <Form method="post">
-                <Hidden intent="markHandedOver" fields={{ shipmentId: s.id }} />
-                <ConfirmSubmitButton
-                  variant="primary"
-                  loading={busy("markHandedOver")}
-                  title={t("tracking.handover.title")}
-                  confirmLabel={t("tracking.handover.confirm")}
-                  cancelLabel={t("common.cancel")}
-                  message={
-                    <Stack gap={2}>
-                      <Text>{t("tracking.handover.body")}</Text>
-                      <Text weight="semibold">{shopifyNote}</Text>
-                    </Stack>
-                  }
-                >
-                  {t("tracking.handover.button")}
-                </ConfirmSubmitButton>
+                <Hidden
+                  intent="markHandedOver"
+                  fields={{
+                    shipmentId: s.id,
+                    ...(order.shopifyLinesPending ? { acknowledgeShopifyLines: "1" } : {}),
+                    ...(handoverPacking === "incomplete" ? { packingOverride: "1" } : {}),
+                  }}
+                />
+                <Stack gap={2}>
+                  {handoverPacking === "incomplete" ? (
+                    <TextField
+                      id={`handover-packing-reason-${s.id}`}
+                      name="packingOverrideReason"
+                      label={t("packing.handover.overrideReason")}
+                      helpText={t("packing.handover.overrideHelp", { packed: packing.progress.packedUnits, required: packing.progress.requiredUnits })}
+                      multiline={2}
+                      maxLength={MAX_OVERRIDE_REASON_LENGTH}
+                      required
+                    />
+                  ) : null}
+                  <ConfirmSubmitButton
+                    variant="primary"
+                    loading={busy("markHandedOver")}
+                    title={t("tracking.handover.title")}
+                    confirmLabel={t("tracking.handover.confirm")}
+                    cancelLabel={t("common.cancel")}
+                    message={
+                      <Stack gap={2}>
+                        {order.shopifyLinesPending ? <Text weight="semibold">{t("order.shopifyLines.handoverOwner")}</Text> : null}
+                        {handoverPacking === "incomplete" ? (
+                          <Text weight="semibold">
+                            {t("packing.handover.incompleteDialog", { packed: packing.progress.packedUnits, required: packing.progress.requiredUnits })}
+                          </Text>
+                        ) : null}
+                        {handoverPacking === "not_started" ? <Text weight="semibold">{t("packing.handover.notStartedDialog")}</Text> : null}
+                        <Text>{t("tracking.handover.body")}</Text>
+                        <Text weight="semibold">{shopifyNote}</Text>
+                      </Stack>
+                    }
+                  >
+                    {t("tracking.handover.button")}
+                  </ConfirmSubmitButton>
+                </Stack>
               </Form>
             ) : null}
             {canRefresh ? (
@@ -1850,7 +2051,7 @@ function ChangeWaybillSection({ shipment: s, order, shopifyChanged }: { shipment
             message={
               <Stack gap={2}>
                 <Text weight={kind === "Live" ? "semibold" : undefined}>{t(`order.correct.body${kind}`, params)}</Text>
-                <Text>{t("order.correct.next")}</Text>
+                {order.status === "packed" ? <Text weight="semibold">{t("packing.cancelWaybill.packedWarning")}</Text> : <Text>{t("order.correct.next")}</Text>}
                 <Text variant="body-sm" tone="subdued">
                   {t("order.reissue.labelsNote")}
                 </Text>
@@ -1881,9 +2082,12 @@ function ShopifyChangedHint({ issue, shipment: s, data }: { issue: Issue; shipme
     .map((f) => fieldLabel(f, data.items, t) ?? f)
     .join(", ");
   const shipped = isShipped(data.order.status) || Boolean(s.handedOverAt);
+  const lines = raw.split(",").some((f) => f.trim() === "lineItems");
   return (
     <Banner tone="warning" title={t("order.shopifyChanged.title")}>
       <p>{t("order.shopifyChanged.body", { fields: fields || "—" })}</p>
+      {/* Позиції в застосунку не редагуються: їх застосовує повторне читання з Shopify після скасування накладної. */}
+      {lines && !shipped ? <p>{t("order.shopifyChanged.howLines")}</p> : null}
       <p>{t(shipped ? "order.shopifyChanged.shipped" : "order.shopifyChanged.how")}</p>
     </Banner>
   );
@@ -2132,8 +2336,32 @@ function NoWaybill({ data }: { data: Data }) {
     );
   }
 
+  // Етап 5: виконано в Shopify поза застосунком — нова накладна була б повторним відправленням.
+  const fulfilledIssue = data.openIssues.some((i) => i.code === "SHOPIFY_FULFILLED_OUTSIDE_APP");
+  const fulfilledNotice = order.fulfilledInShopify ? (
+    <Banner tone="warning" title={t("order.shippedOutside.title")}>
+      <Stack gap={2}>
+        <p>{t(order.fulfillmentStatus === "partially_fulfilled" ? "order.shippedOutside.bodyPartial" : "order.shippedOutside.body")}</p>
+        {/* Кнопка — у проблемі SHOPIFY_FULFILLED_OUTSIDE_APP; для замовлень без неї (імпорт до етапу 5) — тут. */}
+        {!fulfilledIssue && order.shippedOutside === "available" && can("waybills.manage") ? <ShippedOutsideButton /> : null}
+        {/* Позиції застаріли щодо Shopify: спершу повторне читання (банер «Позиції змінено в Shopify» вище). */}
+        {!fulfilledIssue && order.shippedOutside === "shopify_lines_pending" ? <p>{t("order.shippedOutside.linesPending")}</p> : null}
+      </Stack>
+    </Banner>
+  ) : order.nonShippingFulfilledOnly ? (
+    // Shopify виконав лише позиції без доставки (цифрова подарункова картка) — фізичні товари відправляє застосунок.
+    <Banner tone="info" title={t("order.shopifyFulfillment.nonShippingOnly.title")}>
+      <p>{t("order.shopifyFulfillment.nonShippingOnly.body")}</p>
+    </Banner>
+  ) : null;
+
   let next: ReactNode;
-  if (order.status === "needs_correction") {
+  if (order.fulfilledInShopify) {
+    next = null;
+  } else if (order.shopifyLinesPending) {
+    // Пояснення й дія — у банері картки (ShopifyLinesPendingBanner).
+    next = null;
+  } else if (order.status === "needs_correction") {
     next = <Text variant="body-sm">{t("order.waybill.blocked.needsCorrection")}</Text>;
   } else if (order.status === "paid") {
     next = <Text variant="body-sm">{t("order.waybill.blocked.notValidated")}</Text>;
@@ -2183,6 +2411,7 @@ function NoWaybill({ data }: { data: Data }) {
   return (
     <Stack gap={3}>
       <Text tone="subdued">{t("order.waybill.none")}</Text>
+      {fulfilledNotice}
       {setup}
       {next}
     </Stack>
@@ -2221,6 +2450,159 @@ function PreviousShipments({ shipments }: { shipments: Shipment[] }) {
         ))}
       </Stack>
     </Stack>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 6а. Пакування (етап 5): працівник, чекліст, посилка, розбіжність з накладною, пріоритет
+// ---------------------------------------------------------------------------
+
+function PackingCard({ data }: { data: Data }) {
+  const t = useT();
+  const locale = useLocale();
+  const can = useCan();
+  const href = useHref();
+  const busy = useBusy();
+  const { packing: summary, order } = data;
+  const p = summary.packing;
+  const canPriority = can("orders.edit") && !isShipped(order.status) && order.status !== "cancelled";
+  // Етап 5: вагу/габарити посилки можна задати до накладної (екран пакування, saveOrderParcel) — шлях туди з картки.
+  const parcelBeforeWaybill = summary.parcelBeforeWaybill && can("packing.perform");
+  if (!p && !summary.inQueue && !summary.packedWithoutWaybill && !summary.cancelledAfterPacking && !canPriority && !parcelBeforeWaybill && !summary.weightCheck) {
+    return null;
+  }
+  const dims = summary.parcel.dimsMm ? summary.parcel.dimsMm.join(" × ") : null;
+  const items: KeyValueItem[] = [
+    {
+      key: "state",
+      label: t("packing.summary.state"),
+      value: p ? t(`packing.summary.status.${p.status}`) : t("packing.summary.notStarted"),
+    },
+    ...(p?.startedByName
+      ? [{ key: "started", label: t("packing.screen.startedBy"), value: `${p.startedByName} · ${formatDateTime(p.startedAt, locale)}` }]
+      : []),
+    ...(p?.packedByName
+      ? [{ key: "packed", label: t("packing.screen.packedBy"), value: `${p.packedByName} · ${formatDateTime(p.packedAt, locale)}` }]
+      : []),
+    ...(p && summary.progress.requiredUnits > 0
+      ? [{ key: "progress", label: t("packing.summary.checklist"), value: t("packing.progress.short", { packed: summary.progress.packedUnits, required: summary.progress.requiredUnits }) }]
+      : []),
+    ...(p?.boxName ? [{ key: "box", label: t("packing.parcel.box"), value: p.boxName }] : []),
+    ...(summary.parcel.weightGrams || dims
+      ? [
+          {
+            key: "parcel",
+            label: t("packing.summary.parcel"),
+            value: [summary.parcel.weightGrams ? formatWeight(summary.parcel.weightGrams, locale) : null, dims ? `${dims} ${t("packing.unit.mm")}` : null]
+              .filter(Boolean)
+              .join(" · "),
+          },
+        ]
+      : []),
+  ];
+  return (
+    <Card title={t("packing.summary.title")}>
+      <Stack gap={3}>
+        <KeyValueList items={items} />
+        {summary.mismatch ? (
+          <Banner tone="warning" title={t("packing.mismatch.title")}>
+            {summary.mismatch.weight ? (
+              <p>
+                {t("packing.mismatch.weight", {
+                  waybill: formatWeight(summary.mismatch.weight.waybillGrams, locale),
+                  packed: formatWeight(summary.mismatch.weight.packedGrams, locale),
+                })}
+              </p>
+            ) : null}
+            {summary.mismatch.weight?.ignoredByWaybill ? (
+              <p>
+                {t("packing.mismatch.weightIgnored", {
+                  packed: formatWeight(summary.mismatch.weight.packedGrams, locale),
+                  goods: formatWeight(summary.mismatch.weight.ignoredByWaybill.goodsGrams, locale),
+                })}
+              </p>
+            ) : null}
+            {summary.mismatch.dims ? (
+              <p>
+                {/* Накладна з типовою упаковкою (габарити — верхня межа): розбіжність — лише більша посилка (як на екрані пакування). */}
+                {t(summary.mismatch.dims.exceeds ? "packing.mismatch.dimsExceeds" : "packing.mismatch.dims", {
+                  waybill: summary.mismatch.dims.waybillMm.join(" × "),
+                  packed: summary.mismatch.dims.packedMm.join(" × "),
+                })}
+              </p>
+            ) : null}
+            {/* Лише вага, яку нова накладна теж проігнорує, — переоформлення не допоможе (порада хибна). */}
+            {mismatchNeedsReissue(summary.mismatch) ? <p>{t(order.status === "packed" ? "packing.mismatch.packedHint" : "packing.mismatch.hint")}</p> : null}
+          </Banner>
+        ) : null}
+        {summary.weightCheck ? (
+          summary.weightCheck.use === "owner_verified" ? (
+            <Banner tone="info">
+              {t("packing.weightCheck.verified", {
+                manual: formatWeight(summary.weightCheck.manualGrams, locale),
+                goods: formatWeight(summary.weightCheck.goodsGrams, locale),
+              })}
+            </Banner>
+          ) : (
+            <Banner tone="warning" title={t("packing.weightCheck.title")}>
+              <p>
+                {t("packing.weightCheck.body", {
+                  manual: formatWeight(summary.weightCheck.manualGrams, locale),
+                  goods: formatWeight(summary.weightCheck.goodsGrams, locale),
+                  min: formatWeight(summary.weightCheck.minGrams, locale),
+                })}
+              </p>
+              <p>{t("packing.weightCheck.fix")}</p>
+              <p>{t("packing.weightCheck.orderHint")}</p>
+            </Banner>
+          )
+        ) : null}
+        {summary.packedWithoutWaybill ? (
+          <Banner tone="warning" title={t("packing.screen.packedNoWaybill.title")}>
+            {t("packing.screen.packedNoWaybill.body")}
+          </Banner>
+        ) : null}
+        {summary.cancelledAfterPacking ? (
+          <Banner tone="warning" title={t("packing.cancelledAfter.title")}>
+            {t("packing.cancelledAfter.orderHint")}
+          </Banner>
+        ) : null}
+        {summary.materialsConsumed && p?.status !== "packed" ? (
+          <Text variant="caption" tone="subdued">
+            {t("packing.materials.consumedNote")}
+          </Text>
+        ) : null}
+        {(summary.inQueue || summary.packedWithoutWaybill || summary.cancelledAfterPacking) && can("packing.perform") ? (
+          <Button to={href(`picking/${order.id}`)}>{t("packing.summary.open")}</Button>
+        ) : parcelBeforeWaybill ? (
+          <Stack gap={1}>
+            <Text variant="caption" tone="subdued">
+              {t("packing.summary.parcelBeforeWaybill")}
+            </Text>
+            <div>
+              <Button to={href(`picking/${order.id}`)}>{t("packing.summary.openParcel")}</Button>
+            </div>
+          </Stack>
+        ) : null}
+        {canPriority ? (
+          <Form method="post">
+            <Hidden intent="setPriority" />
+            <Stack direction="horizontal" gap={2} align="end" wrap>
+              <Select
+                id="order-priority"
+                name="priority"
+                label={t("packing.priority.label")}
+                options={PRIORITIES.map((value) => ({ value: String(value), label: t(`packing.priority.${PRIORITY_KEYS[value]}`) }))}
+                defaultValue={String(summary.priority)}
+              />
+              <Button type="submit" loading={busy("setPriority")}>
+                {t("common.save")}
+              </Button>
+            </Stack>
+          </Form>
+        ) : null}
+      </Stack>
+    </Card>
   );
 }
 

@@ -8,6 +8,7 @@
  * Дані не вигадуються: відсутні HS-код/країна походження/опис позначаються в `missing`.
  */
 import { addMoney, fromMinor, isDecimalString, multiplyMoney, toMinor } from "~/lib/money";
+import { effectiveLineQuantity } from "~/modules/inventory/quantities";
 import { normalizeHsCode } from "~/modules/validation";
 import type { AllSettings } from "~/modules/settings/schema";
 import type { CustomsDeclaration, CustomsItem, ExportReason, Incoterm } from "~/integrations/carriers/types";
@@ -38,8 +39,22 @@ export interface InvoiceOrderInput {
 export interface InvoiceItemInput {
   title: string;
   sku: string | null;
+  /** Замовлена кількість (Shopify LineItem.quantity — разом із поверненими й видаленими одиницями). */
   quantity: number;
+  /**
+   * Етап 5: кількість до відправлення (Shopify LineItem.currentQuantity — без повернених і видалених одиниць).
+   * Саме її декларує інвойс (і митні позиції запиту): ті самі одиниці пакуються, зважуються й списуються зі складу
+   * (effectiveLineQuantity). null / не передано — як quantity (демо, позиції до етапу 5).
+   */
+  currentQuantity?: number | null;
   unitPrice: string;
+  /**
+   * Етап 5: ціна одиниці після ВСІХ знижок — Shopify LineItem.discountedUnitPriceAfterAllDiscountsSet (shopMoney, та
+   * сама валюта, що й unitPrice): «The approximate unit price … This value includes discounts applied to refunded and
+   * removed quantities» (2026-10). Якщо є в усіх позиціях — це митна вартість одиниці (customsUnitValues); null / не
+   * передано (позиції до етапу 5, демо) — розподіл subtotal (transactionUnitValues).
+   */
+  discountedUnitPrice?: string | null;
   currency: string;
   variant: {
     sku: string | null;
@@ -153,6 +168,47 @@ const clean = (v: string | null | undefined): string | null => {
   return t === "" ? null : t;
 };
 
+const isUnitAmount = (v: string | null | undefined): v is string => typeof v === "string" && isDecimalString(v) && toMinor(v) >= 0n;
+
+/**
+ * Митна вартість одиниці кожної позиції.
+ * - Усі позиції мають ціну після всіх знижок від Shopify (discountedUnitPrice, LineItem.
+ *   discountedUnitPriceAfterAllDiscountsSet) — вона й є вартістю одиниці: знижка на одиницю з урахуванням знижок на
+ *   повернені й видалені одиниці, незалежно від того, як Shopify змінює subtotal після редагування замовлення.
+ * - Інакше (хоч одна позиція без неї — збережена до етапу 5 або демо) — для ВСІХ позицій розподіл subtotal
+ *   (transactionUnitValues): змішування двох джерел розподілило б знижку двічі або не розподілило зовсім.
+ */
+export function customsUnitValues(
+  items: readonly { unitPrice: string; quantity: number; discountedUnitPrice?: string | null }[],
+  subtotal: string | null | undefined,
+): string[] {
+  if (items.length > 0 && items.every((i) => isUnitAmount(i.discountedUnitPrice))) {
+    return items.map((i) => fromMinor(toMinor(i.discountedUnitPrice!)));
+  }
+  return transactionUnitValues(items, subtotal);
+}
+
+/**
+ * Позиції, що фізично відправляються (одне джерело для інвойсу, митних позицій і задекларованої вартості запиту):
+ * кількість — effectiveLineQuantity (Shopify currentQuantity), позиції з нульовою кількістю (повністю повернені або
+ * видалені редагуванням) не декларуються. unitValue — митна вартість одиниці (customsUnitValues), помножена на кількість
+ * до відправлення.
+ * Джерело вартості одиниці: LineItem.discountedUnitPriceAfterAllDiscountsSet (точна, якщо є в усіх позиціях); для
+ * позицій без неї — розподіл Order.subtotalPriceSet («after discounts and before returns», shopify.dev, Order, 2026-10)
+ * на ЗАМОВЛЕНІ кількості (LineItem.quantity — «including refunded and removed units»). Обмеження розподілу: якщо Shopify
+ * зменшує subtotalPriceSet при видаленні одиниць редагуванням (документацією не визначено), різниця вважається знижкою
+ * й вартість одиниці занижується — тому розподіл лише запасний варіант для позицій, збережених до етапу 5.
+ */
+export function shippedInvoiceLines<T extends InvoiceItemInput>(
+  items: readonly T[],
+  subtotal: string | null | undefined,
+): Array<{ item: T; quantity: number; unitValue: string }> {
+  const unitValues = customsUnitValues(items, subtotal);
+  return items
+    .map((item, index) => ({ item, quantity: effectiveLineQuantity(item), unitValue: unitValues[index]! }))
+    .filter((l) => l.quantity > 0);
+}
+
 export function buildCommercialInvoice(input: {
   order: InvoiceOrderInput;
   items: InvoiceItemInput[];
@@ -163,8 +219,9 @@ export function buildCommercialInvoice(input: {
   const { order, items, settings } = input;
   const s = settings.shipper;
   const missing: CommercialInvoice["missing"] = [];
-  const unitValues = transactionUnitValues(items, order.subtotal);
-  const lines: InvoiceLine[] = items.map((item, index) => {
+  // Лише одиниці, що відправляються (ті самі, що пакуються й зважуються): повернені/видалені не декларуються.
+  const shipped = shippedInvoiceLines(items, order.subtotal);
+  const lines: InvoiceLine[] = shipped.map(({ item, quantity, unitValue }, index) => {
     const position = index + 1;
     const v = item.variant;
     const hsCode = normalizeHsCode(v?.hsCode ?? "") ?? null;
@@ -184,11 +241,11 @@ export function buildCommercialInvoice(input: {
       material: clean(v?.material),
       hsCode,
       countryOfOrigin: origin,
-      quantity: item.quantity,
-      unitValue: unitValues[index]!,
-      lineValue: multiplyMoney(unitValues[index]!, item.quantity),
+      quantity,
+      unitValue,
+      lineValue: multiplyMoney(unitValue, quantity),
       unitWeightGrams: weight,
-      lineWeightGrams: weight === null ? null : weight * item.quantity,
+      lineWeightGrams: weight === null ? null : weight * quantity,
     };
   });
   const goodsTotal = addMoney("0.00", ...lines.map((l) => l.lineValue));

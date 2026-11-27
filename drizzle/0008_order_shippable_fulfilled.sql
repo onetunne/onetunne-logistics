@@ -1,0 +1,1 @@
+ALTER TABLE "orders" ADD COLUMN "shopify_shippable_fulfilled" boolean;

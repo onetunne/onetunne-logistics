@@ -18,6 +18,14 @@ import products from "./messages/products";
 import orderStage4 from "./messages/order-stage4";
 import customerRequests from "./messages/customer-requests";
 import countryRules from "./messages/country-rules";
+import warehouse from "./messages/warehouse";
+import inventorySync from "./messages/inventory-sync";
+import production from "./messages/production";
+import packaging from "./messages/packaging";
+import packing from "./messages/packing";
+import warehouseAnalytics from "./messages/warehouse-analytics";
+import warehouseInsights from "./messages/warehouse-insights";
+import staff from "./messages/staff";
 
 export * from "./types";
 
@@ -40,6 +48,14 @@ export const MESSAGE_MODULES: Record<string, MessageModule> = {
   orderStage4,
   customerRequests,
   countryRules,
+  warehouse,
+  inventorySync,
+  production,
+  packaging,
+  packing,
+  warehouseAnalytics,
+  warehouseInsights,
+  staff,
 };
 
 function merge(locale: Locale): Messages {
@@ -53,9 +69,84 @@ export const DICTIONARIES: Record<Locale, Messages> = { uk: merge("uk"), en: mer
 export type TranslateParams = Record<string, string | number | null | undefined>;
 export type TFunction = (key: string, params?: TranslateParams) => string;
 
-/** Підстановка параметрів формату `{name}`. Відсутній ключ → українська версія → сам ключ. */
+const PLURAL_RULES: Readonly<Record<Locale, Intl.PluralRules>> = {
+  uk: new Intl.PluralRules("uk-UA"),
+  en: new Intl.PluralRules("en-GB"),
+};
+const PLURAL_START = /\{(\w+),\s*plural,/g;
+const PLURAL_SELECTOR = /^\s*(=\d+|zero|one|two|few|many|other)\s*\{/;
+
+/**
+ * Число для вибору форми: number як є; рядок — уже відформатоване число мови (lib/format: uk «1 234,5», en «1,234.5»).
+ * Не число → null (форма «other»).
+ */
+function pluralNumber(v: TranslateParams[string], locale: Locale): number | null {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v !== "string") return null;
+  const compact = v.replace(/[\s\u00A0\u202F]/g, "");
+  const normalized = locale === "uk" ? compact.replace(",", ".") : compact.replace(/,/g, "");
+  if (!/^-?\d+(?:\.\d+)?$/.test(normalized)) return null;
+  return Number(normalized);
+}
+
+/**
+ * Множина у стилі ICU: `{count, plural, one {# позиція} few {# позиції} many {# позицій} other {# позиції}}`.
+ * Форма — за Intl.PluralRules мови (uk: one/few/many/other, en: one/other); `=N` — точне значення; `#` — значення
+ * параметра як передано (можна вже відформатоване число). Некоректний шаблон повертається без змін.
+ */
+export function applyPlurals(template: string, locale: Locale, params: TranslateParams = {}): string {
+  if (!template.includes(", plural,") && !template.includes(",plural,")) return template;
+  let out = "";
+  let i = 0;
+  for (;;) {
+    PLURAL_START.lastIndex = i;
+    const m = PLURAL_START.exec(template);
+    if (!m) break;
+    const name = m[1]!;
+    const branches = new Map<string, string>();
+    let j = m.index + m[0].length;
+    let closed = false;
+    while (j < template.length) {
+      const rest = template.slice(j);
+      const end = /^\s*\}/.exec(rest);
+      if (end) {
+        j += end[0].length;
+        closed = true;
+        break;
+      }
+      const sel = PLURAL_SELECTOR.exec(rest);
+      if (!sel) return template;
+      j += sel[0].length;
+      const bodyStart = j;
+      let depth = 1;
+      while (j < template.length && depth > 0) {
+        const ch = template[j];
+        if (ch === "{") depth++;
+        else if (ch === "}") depth--;
+        j++;
+      }
+      if (depth !== 0) return template;
+      branches.set(sel[1]!, template.slice(bodyStart, j - 1));
+    }
+    if (!closed || !branches.has("other")) return template;
+    const raw = params[name];
+    const n = pluralNumber(raw, locale);
+    const exact = n === null ? undefined : branches.get(`=${n}`);
+    const byRule = n === null ? undefined : branches.get(PLURAL_RULES[locale].select(n));
+    const chosen = exact ?? byRule ?? branches.get("other")!;
+    out += template.slice(i, m.index) + chosen.replace(/#/g, raw === undefined || raw === null ? "#" : String(raw));
+    i = j;
+  }
+  return out + template.slice(i);
+}
+
+/**
+ * Підстановка параметрів формату `{name}` і множини `{name, plural, …}` (applyPlurals).
+ * Відсутній ключ → українська версія → сам ключ.
+ */
 export function translate(locale: Locale, key: string, params?: TranslateParams): string {
-  const template = DICTIONARIES[locale][key] ?? DICTIONARIES[DEFAULT_LOCALE][key] ?? key;
+  const own = DICTIONARIES[locale][key];
+  const template = applyPlurals(own ?? DICTIONARIES[DEFAULT_LOCALE][key] ?? key, own === undefined ? DEFAULT_LOCALE : locale, params);
   if (!params) return template;
   return template.replace(/\{(\w+)\}/g, (match, name: string) => {
     const v = params[name];

@@ -5,7 +5,20 @@ import { SHOP_CURRENCY_QUERY } from "~/integrations/shopify/graphql";
 import type { JobHandlers } from "~/modules/jobs/worker.server";
 import type { ServiceContext } from "~/server/types";
 import { runTrackingPollJob } from "~/modules/tracking/tracking.server";
+import { createInventorySyncHandlers } from "~/modules/inventory-sync/handlers.server";
+import { logger } from "~/lib/logger.server";
+import {
+  markCollectionDeleted,
+  runScheduledCollectionsSync,
+  syncCollection,
+  syncCollectionMembershipsPage,
+  syncCollectionsPage,
+  syncProductCollections,
+} from "./collections.server";
 import { fulfillShipment, reportFulfillmentFailure } from "./fulfillment.server";
+import { runFulfillmentRefresh } from "./fulfillment-refresh.server";
+import { openNewVariantsFromShopify } from "./inventory-opening.server";
+import { ensureWebhookSubscriptions, type WebhookRegistrar } from "./webhook-subscriptions.server";
 import {
   JOB,
   importOrdersPage,
@@ -23,6 +36,8 @@ export interface SyncDeps {
   /** Контекст сервісів (перевізники, шлюз Shopify) для обробки нових оплачених замовлень. */
   serviceContext: () => ServiceContext;
   admin: (shop: string) => Promise<AdminGraphql>;
+  /** Реєстрація підписок на webhooks з офлайн-сесією (робоче середовище); без неї завдання перевірки нічого не робить. */
+  webhooks?: WebhookRegistrar;
 }
 
 const currencyCache = new Map<string, string>();
@@ -37,6 +52,20 @@ async function shopCurrency(admin: AdminGraphql, shop: string): Promise<string> 
 
 const str = (v: unknown) => (typeof v === "string" ? v : null);
 
+/**
+ * Етап 5 (gap-14): варіанти, що з'явилися після ініціалізації складу, відкриваються тією самою формулою (знімок локації
+ * складу). Збій відкриття не зриває синхронізацію товару: варіант лишається «невідкритим» (видно на сторінці «Склад»),
+ * наступна синхронізація товару спробує знову.
+ */
+async function autoOpenNewVariants(db: Db, admin: AdminGraphql, productGid: string | null) {
+  try {
+    const r = await openNewVariantsFromShopify(db, admin, productGid);
+    if (r && r.opened > 0) logger.info("inventory.auto_opened", { opened: r.opened, notStocked: r.skippedNotStocked });
+  } catch (e) {
+    logger.warn("inventory.auto_open_failed", { error: e });
+  }
+}
+
 /** Обробники фонових завдань синхронізації Shopify. */
 export function createSyncHandlers(deps: SyncDeps): JobHandlers {
   const ctx = () => ({ ...deps.serviceContext(), actor: SYSTEM_ACTOR });
@@ -45,7 +74,8 @@ export function createSyncHandlers(deps: SyncDeps): JobHandlers {
       run: async (job) => {
         const p = job.payload as Record<string, unknown>;
         const admin = await deps.admin(String(p.shop));
-        await syncOrder(ctx(), admin, String(p.orderGid), p.mode === "import" ? "import" : "live");
+        const mode = p.mode === "import" || p.mode === "refresh" ? p.mode : "live";
+        await syncOrder(ctx(), admin, String(p.orderGid), mode);
       },
     },
     [JOB.syncProduct]: {
@@ -53,7 +83,65 @@ export function createSyncHandlers(deps: SyncDeps): JobHandlers {
         const p = job.payload as Record<string, unknown>;
         const shop = String(p.shop);
         const admin = await deps.admin(shop);
-        await syncProduct(deps.db, admin, String(p.productGid), await shopCurrency(admin, shop));
+        const productGid = String(p.productGid);
+        const result = await syncProduct(deps.db, admin, productGid, await shopCurrency(admin, shop));
+        if (result === "saved") await autoOpenNewVariants(deps.db, admin, productGid);
+        // Етап 5: колекції товару (автоматичні колекції змінюються зі зміною товару — collections/update тоді не приходить).
+        if (result !== "deleted") await syncProductCollections(deps.db, admin, productGid);
+      },
+    },
+    [JOB.syncProductCollections]: {
+      run: async (job) => {
+        const p = job.payload as Record<string, unknown>;
+        await syncProductCollections(deps.db, await deps.admin(String(p.shop)), String(p.productGid));
+      },
+    },
+    [JOB.syncCollection]: {
+      run: async (job) => {
+        const p = job.payload as Record<string, unknown>;
+        const shop = String(p.shop);
+        await syncCollection(deps.db, await deps.admin(shop), shop, String(p.collectionGid));
+      },
+    },
+    [JOB.deleteCollection]: {
+      run: async (job) => {
+        await markCollectionDeleted(deps.db, String((job.payload as Record<string, unknown>).collectionGid));
+      },
+    },
+    [JOB.collectionsPage]: {
+      run: async (job) => {
+        const p = job.payload as Record<string, unknown>;
+        const shop = String(p.shop);
+        const startedAt = typeof p.startedAt === "string" && !Number.isNaN(Date.parse(p.startedAt)) ? new Date(p.startedAt) : job.createdAt;
+        await syncCollectionsPage(deps.db, await deps.admin(shop), shop, str(p.after), startedAt);
+      },
+    },
+    [JOB.collectionMembershipsPage]: {
+      run: async (job) => {
+        const p = job.payload as Record<string, unknown>;
+        const shop = String(p.shop);
+        await syncCollectionMembershipsPage(deps.db, await deps.admin(shop), shop, str(p.after));
+      },
+    },
+    [JOB.ensureWebhooks]: {
+      run: async (job) => {
+        if (!deps.webhooks) return;
+        const force = (job.payload as Record<string, unknown>).force === true;
+        const outcome = await ensureWebhookSubscriptions(deps.db, deps.webhooks, { force });
+        logger.info("shopify.ensure_webhooks", { outcome, force });
+      },
+    },
+    [JOB.scheduledCollectionsSync]: {
+      run: async () => {
+        const outcome = await runScheduledCollectionsSync(deps.db);
+        logger.info("shopify.collections_scheduled", { outcome });
+      },
+    },
+    // Етап 5: застарілий статус виконання відправлених замовлень → повторне читання (лише читання Shopify).
+    [JOB.fulfillmentRefresh]: {
+      run: async () => {
+        const outcome = await runFulfillmentRefresh(deps.db);
+        logger.info("shopify.fulfillment_refresh", { ...outcome });
       },
     },
     [JOB.syncInventoryItem]: {
@@ -72,6 +160,7 @@ export function createSyncHandlers(deps: SyncDeps): JobHandlers {
         const shop = String(p.shop);
         const admin = await deps.admin(shop);
         await syncProductsPage(deps.db, admin, shop, str(p.after), await shopCurrency(admin, shop));
+        await autoOpenNewVariants(deps.db, admin, null);
       },
     },
     [JOB.importOrdersPage]: {
@@ -111,6 +200,8 @@ export function createSyncHandlers(deps: SyncDeps): JobHandlers {
         await runTrackingPollJob(ctx());
       },
     },
+    // Етап 5: передача внутрішніх рухів у Shopify (inventory.push) і звірка залишків (inventory.reconcile).
+    ...createInventorySyncHandlers({ db: deps.db, admin: deps.admin }),
   };
 }
 

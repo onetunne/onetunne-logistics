@@ -1,4 +1,4 @@
-import { SECTIONS, sectionHref } from "~/domain/navigation";
+import { SECTIONS, navLink } from "~/domain/navigation";
 import { can } from "~/domain/permissions";
 import { countOpenIssues } from "~/modules/orders/repository.server";
 import { getSetting } from "~/modules/settings/settings.server";
@@ -19,8 +19,9 @@ export async function buildShellData(ctx: RequestContext): Promise<ShellData> {
     },
     nav: SECTIONS.filter((s) => !s.permission || can(ctx.actor, s.permission)).map((s) => ({
       key: s.key,
-      href: sectionHref(ctx.basePath, s),
-      planned: !s.implemented,
+      // Одне правило з макетом (layout.tsx): «Аналітика» з warehouse.view веде на аналітику складу — так її бачить
+      // і вбудоване меню Shopify Admin (app-layout.tsx: NavMenu з пунктів без planned).
+      ...navLink(ctx.basePath, s, (p) => can(ctx.actor, p)),
       stage: s.stage,
       badge: s.key === "problems" && problems.total > 0 ? problems.total : null,
     })),

@@ -36,6 +36,55 @@
       "when": 1795739262167,
       "tag": "0004_country_rules_history",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1795747854558,
+      "tag": "0005_warehouse_production",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1795764490994,
+      "tag": "0006_order_sync_pending_lines",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1795767228341,
+      "tag": "0007_kit_collections",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1795774439665,
+      "tag": "0008_order_shippable_fulfilled",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1795777550299,
+      "tag": "0009_shop_webhook_subscriptions",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1795780205630,
+      "tag": "0010_shopify_api_cost_customs_value",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1795783492128,
+      "tag": "0011_shopify_contact_snapshot",
+      "breakpoints": true
     }
   ]
 }

@@ -100,7 +100,10 @@ export function mapProduct(p: GqlProduct): MappedProduct {
   };
 }
 
-/** Оплачені (у т. ч. частково повернені) замовлення потрапляють в обробку; неоплачені — ні. */
+/**
+ * Оплачені (у т. ч. частково/повністю повернені) замовлення потрапляють в обробку; неоплачені — ні.
+ * Склад резервує лише currentQuantity, тож повернені одиниці (і повністю повернене замовлення) не резервуються.
+ */
 const PAID_STATUSES = new Set(["PAID", "PARTIALLY_REFUNDED", "REFUNDED"]);
 
 export function isPaid(order: Pick<GqlOrder, "displayFinancialStatus">): boolean {
@@ -112,6 +115,11 @@ export interface MappedOrder {
   orderNumber: string;
   financialStatus: string;
   fulfillmentStatus: string | null;
+  /**
+   * Етап 5: Shopify виконав (або міг виконати) одиниці позицій, що потребують доставки; false — виконано лише позиції
+   * без доставки (цифрові подарункові картки тощо); null — у відповіді немає полів позицій (shippableFulfilled).
+   */
+  shippableFulfilled: boolean | null;
   currency: string;
   subtotal: string;
   shippingPaid: string;
@@ -143,11 +151,59 @@ export interface MappedOrder {
     title: string;
     variantTitle: string | null;
     sku: string | null;
+    /** Замовлено (разом із поверненими/видаленими одиницями). */
     quantity: number;
+    /** До відправлення: Shopify currentQuantity (без повернених і видалених); резервує й списує склад. */
+    currentQuantity: number;
+    /** Коли позицію створено в Shopify (LineItem.createdAt); null — немає в даних (старі відповіді/тести). */
+    shopifyCreatedAt: Date | null;
     unitPrice: string;
+    /**
+     * Ціна одиниці після всіх знижок (LineItem.discountedUnitPriceAfterAllDiscountsSet.shopMoney) — митна вартість
+     * одиниці (customs/invoice.ts). null — немає в даних, інша валюта, ніж у ціни позиції, або некоректне значення.
+     */
+    discountedUnitPrice: string | null;
     currency: string;
     imageUrl: string | null;
   }>;
+}
+
+/**
+ * Ціна одиниці після всіх знижок. Shopify (LineItem, 2026-10): «The approximate unit price of the line item in shop and
+ * presentment currencies. This value includes discounts applied to refunded and removed quantities.» Береться shopMoney —
+ * та сама валюта, що й originalUnitPriceSet.shopMoney (ціни позицій) і суми замовлення (orders.currency); якщо валюти
+ * різні або сума некоректна — null (інвойс тоді розподіляє знижку з subtotal, як раніше). Нічого не вигадуємо:
+ * normalizeAmount перетворив би некоректне значення на 0.00 і занизив митну вартість.
+ */
+export function discountedUnitPriceOf(li: GqlOrder["lineItems"]["nodes"][number]): string | null {
+  const money = li.discountedUnitPriceAfterAllDiscountsSet?.shopMoney;
+  if (!money || money.currencyCode !== li.originalUnitPriceSet.shopMoney.currencyCode) return null;
+  if (typeof money.amount !== "string" || !/^\d+(?:\.\d+)?$/.test(money.amount.trim())) return null;
+  return normalizeAmount(money.amount);
+}
+
+function validDate(value: string | null | undefined): Date | null {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/**
+ * Чи виконав Shopify одиниці позицій, що потребують доставки (orders.shopify_shippable_fulfilled). Позиція «не
+ * торкнута виконанням», лише коли unfulfilledQuantity ≥ quantity (див. GqlOrder: тоді жодної одиниці не виконано, хоч
+ * як Shopify враховує повернення); інакше — виконано або неоднозначно (повернення) → true (накладна не створюється).
+ * Не враховуються позиції без доставки (requiresShipping: false) і без одиниць до відправлення (currentQuantity 0:
+ * накладна, пакування й митні позиції застосунку — за поточною кількістю). Немає полів хоча б в одній позиції → null.
+ */
+export function shippableFulfilled(nodes: GqlOrder["lineItems"]["nodes"]): boolean | null {
+  let fulfilled = false;
+  for (const li of nodes) {
+    if (typeof li.unfulfilledQuantity !== "number" || typeof li.requiresShipping !== "boolean") return null;
+    // Позиція без одиниць до відправлення (повністю повернена/видалена) застосунком не відправляється.
+    const current = typeof li.currentQuantity === "number" ? li.currentQuantity : li.quantity;
+    if (li.requiresShipping && current > 0 && li.unfulfilledQuantity < li.quantity) fulfilled = true;
+  }
+  return fulfilled;
 }
 
 export function mapOrder(o: GqlOrder): MappedOrder {
@@ -159,6 +215,7 @@ export function mapOrder(o: GqlOrder): MappedOrder {
     orderNumber: o.name,
     financialStatus: (o.displayFinancialStatus ?? "UNKNOWN").toLowerCase(),
     fulfillmentStatus: o.displayFulfillmentStatus?.toLowerCase() ?? null,
+    shippableFulfilled: shippableFulfilled(o.lineItems.nodes),
     currency: total.currencyCode,
     subtotal: normalizeAmount(o.subtotalPriceSet?.shopMoney.amount ?? total.amount),
     shippingPaid,
@@ -192,7 +249,11 @@ export function mapOrder(o: GqlOrder): MappedOrder {
       variantTitle: blank(li.variantTitle),
       sku: blank(li.sku),
       quantity: li.quantity,
+      // Старі відповіді/тести без currentQuantity → quantity.
+      currentQuantity: typeof li.currentQuantity === "number" ? Math.max(0, li.currentQuantity) : li.quantity,
+      shopifyCreatedAt: validDate(li.createdAt),
       unitPrice: normalizeAmount(li.originalUnitPriceSet.shopMoney.amount),
+      discountedUnitPrice: discountedUnitPriceOf(li),
       currency: li.originalUnitPriceSet.shopMoney.currencyCode,
       imageUrl: li.image?.url ?? null,
     })),

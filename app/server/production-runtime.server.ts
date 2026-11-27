@@ -15,6 +15,11 @@ import { QueueingShopifyGateway } from "~/integrations/shopify/queueing-gateway.
 import type { ShopifyGateway } from "~/integrations/shopify/types";
 import { scheduleTrackingPoll } from "~/modules/tracking/tracking.server";
 import type { ServiceContext } from "./types";
+import { ensureInventoryPushSweep, scheduleFullReconcileCheck } from "~/modules/inventory-sync/schedule.server";
+import { SCHEDULED_RECONCILE_FIRST_DELAY_MS } from "~/modules/inventory-sync/jobs";
+import { SCHEDULED_COLLECTIONS_SYNC_FIRST_DELAY_MS, scheduleCollectionsSyncCheck } from "~/modules/shopify-sync/collections.server";
+import { enqueueWebhookSubscriptionCheck, webhookConfigKey } from "~/modules/shopify-sync/webhook-subscriptions.server";
+import { FULFILLMENT_REFRESH_FIRST_DELAY_MS, scheduleFulfillmentRefreshCheck } from "~/modules/shopify-sync/fulfillment-refresh.server";
 
 /**
  * Робоче середовище: PostgreSQL (DATABASE_URL). Тестовий перевізник тут НЕ реєструється —
@@ -79,10 +84,25 @@ export async function ensureJobWorker(): Promise<void> {
       db: runtime.handle.db,
       serviceContext: () => productionServiceContext(runtime),
       admin: defaultAdmin,
+      webhooks: {
+        configKey: webhookConfigKey(getEnv().SHOPIFY_APP_URL ?? ""),
+        register: async (shop) => (await import("~/shopify.server")).registerShopWebhooks(shop),
+      },
     });
     startJobWorker(runtime.handle.db, handlers);
+    // Підписки на webhooks наявного встановлення: нові теми після оновлення (етап 5 — collections/*) без повторної
+    // авторизації власника (afterAuth для встановленого застосунку не гарантований).
+    await enqueueWebhookSubscriptionCheck(runtime.handle.db);
     // Ланцюжок опитування відстеження: одне очікуване завдання (dedupe), перше — через хвилину після старту.
     await scheduleTrackingPoll(runtime.handle.db, new Date(Date.now() + 60_000));
+    // Страхова передача складських змін у Shopify (етап 5): ланцюжок зупиняється сам, якщо передачу вимкнено.
+    await ensureInventoryPushSweep(runtime.handle.db);
+    // Планова повна звірка залишків із Shopify (кожні 6 год; лише читання; звіряє, коли облік відкрито).
+    await scheduleFullReconcileCheck(runtime.handle.db, { delayMs: SCHEDULED_RECONCILE_FIRST_DELAY_MS });
+    // Щоденна повна синхронізація колекцій (шаблони комплектації «на колекцію»; лише читання Shopify).
+    await scheduleCollectionsSyncCheck(runtime.handle.db, { delayMs: SCHEDULED_COLLECTIONS_SYNC_FIRST_DELAY_MS });
+    // Застарілий статус виконання відправлених замовлень (загублений webhook) → повторне читання; лише читання Shopify.
+    await scheduleFulfillmentRefreshCheck(runtime.handle.db, { delayMs: FULFILLMENT_REFRESH_FIRST_DELAY_MS });
   } catch (e) {
     workerStarted = false;
     logger.error("job.worker_start_failed", { error: e });

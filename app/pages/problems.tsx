@@ -17,7 +17,10 @@ import { requirePermission } from "~/domain/permissions";
 import { hasKey, makeT, useLocale, useT, type Locale } from "~/i18n";
 import { localizeCode, localizeParams } from "~/i18n/localize";
 import { countryName, formatDateTime, formatNumber } from "~/lib/format";
+import { and, eq } from "drizzle-orm";
+import { issues } from "~/db/schema";
 import { countOpenIssues } from "~/modules/orders/repository.server";
+import { confirmShippedOutsideApp, loadShippedOutsideStates, type ShippedOutsideState } from "~/modules/orders/shipped-outside.server";
 import { VALIDATABLE_STATUSES, acceptSuggestion, dismissIssue, validateOrders } from "~/modules/orders/workflow.server";
 import {
   PROBLEM_CATEGORIES,
@@ -158,6 +161,11 @@ interface GroupView {
   countryLabel: string | null;
   /** Чи можна змінювати дані замовлення (застосовувати пропозиції, перевіряти повторно) у поточному статусі. */
   editable: boolean;
+  /**
+   * Етап 5: «Відправлено поза застосунком» для проблеми SHOPIFY_FULFILLED_OUTSIDE_APP (як у картці замовлення):
+   * available — кнопка; shopify_lines_pending — спершу повторне читання з Shopify; unavailable — без дії.
+   */
+  shippedOutside: ShippedOutsideState;
   errorCount: number;
   warningCount: number;
   issues: IssueView[];
@@ -181,7 +189,7 @@ function toIssueView(issue: ProblemIssue, tab: ProblemsTab): IssueView {
   };
 }
 
-function toGroupView(group: ProblemGroup, tab: ProblemsTab, locale: Locale): GroupView {
+function toGroupView(group: ProblemGroup, tab: ProblemsTab, locale: Locale, shippedOutside: ReadonlyMap<string, ShippedOutsideState>): GroupView {
   return {
     key: group.orderId ?? "none",
     orderId: group.orderId,
@@ -190,6 +198,7 @@ function toGroupView(group: ProblemGroup, tab: ProblemsTab, locale: Locale): Gro
     countryCode: group.countryCode,
     countryLabel: group.countryCode ? countryName(group.countryCode, locale) : null,
     editable: group.orderStatus !== null && VALIDATABLE_STATUSES.includes(group.orderStatus),
+    shippedOutside: (group.orderId && shippedOutside.get(group.orderId)) || "unavailable",
     errorCount: group.errorCount,
     warningCount: group.warningCount,
     issues: group.issues.map((i) => toIssueView(i, tab)),
@@ -206,6 +215,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const filters = parseFilters(new URL(request.url).searchParams);
   const [result, totals] = await Promise.all([queryProblems(ctx.db, toQueryFilter(filters)), countOpenIssues(ctx.db)]);
 
+  // «Відправлено поза застосунком»: стан лише для замовлень із відкритою SHOPIFY_FULFILLED_OUTSIDE_APP на сторінці.
+  const shippedOutside = await loadShippedOutsideStates(
+    ctx.db,
+    filters.tab === "open"
+      ? result.groups.flatMap((g) => (g.orderId && g.issues.some((i) => i.code === "SHOPIFY_FULFILLED_OUTSIDE_APP") ? [g.orderId] : []))
+      : [],
+  );
   const countries = result.countries.map((code) => ({ code, name: countryName(code, ctx.locale) }));
   if (filters.country && !countries.some((c) => c.code === filters.country)) {
     countries.push({ code: filters.country, name: countryName(filters.country, ctx.locale) });
@@ -219,7 +235,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     totals,
     facets: result.facets,
     countries,
-    groups: result.groups.map((g) => toGroupView(g, filters.tab, ctx.locale)),
+    groups: result.groups.map((g) => toGroupView(g, filters.tab, ctx.locale, shippedOutside)),
     totalGroups: result.totalGroups,
     totalIssues: result.totalIssues,
     page: result.page,
@@ -246,7 +262,7 @@ function parseOrderIds(form: FormData): string[] {
   return [...ids];
 }
 
-const INTENTS = new Set(["acceptSuggestion", "dismissIssue", "bulkRevalidate", "bulkDismissWarnings"]);
+const INTENTS = new Set(["acceptSuggestion", "dismissIssue", "bulkRevalidate", "bulkDismissWarnings", "shippedOutside"]);
 
 export async function action({ request }: ActionFunctionArgs): Promise<ActionResult> {
   const ctx = await getRequestContext(request);
@@ -301,6 +317,19 @@ export async function action({ request }: ActionFunctionArgs): Promise<ActionRes
     if (intent === "dismissIssue") {
       await dismissIssue(ctx, issueId.toLowerCase());
       return { ok: true, message: "result.issue.dismissed" };
+    }
+
+    if (intent === "shippedOutside") {
+      // Етап 5: «Відправлено поза застосунком» з проблеми SHOPIFY_FULFILLED_OUTSIDE_APP (дозвіл waybills.manage — у сервісі).
+      const [issue] = await ctx.db
+        .select({ orderId: issues.orderId })
+        .from(issues)
+        .where(and(eq(issues.id, issueId.toLowerCase()), eq(issues.status, "open"), eq(issues.code, "SHOPIFY_FULFILLED_OUTSIDE_APP")));
+      if (!issue?.orderId) return { ok: false, error: "problems.error.notFound" };
+      const r = await confirmShippedOutsideApp(ctx, issue.orderId);
+      return r.kind === "already_shipped"
+        ? { ok: true, message: "order.shippedOutside.result.already", tone: "info" }
+        : { ok: true, message: "order.shippedOutside.result.done", tone: "success" };
     }
 
     // Значення має бути одним зі збережених варіантів — перевіряє acceptSuggestion (issue.invalidCandidate).
@@ -801,6 +830,8 @@ function IssueItem({
 }) {
   const t = useT();
   const locale = useLocale();
+  const can = useCan();
+  const canManageWaybills = canEdit && can("waybills.manage");
   const fieldKey = fieldLabelKey(issue.field);
   const resolutionKey = `problems.resolution.${issue.resolution ?? "other"}`;
   const titleKey = `issue.${issue.code}.title`;
@@ -891,6 +922,41 @@ function IssueItem({
             </Button>
             <Text as="span" variant="caption" tone="subdued">
               {t("problems.dismiss.help")}
+            </Text>
+          </Stack>
+        </Form>
+      ) : null}
+
+      {isOpen && issue.code === "SHOPIFY_FULFILLED_OUTSIDE_APP" && group.shippedOutside === "shopify_lines_pending" ? (
+        <Text variant="body-sm" tone="subdued">
+          {t("order.shippedOutside.linesPending")}
+        </Text>
+      ) : null}
+      {isOpen && canManageWaybills && issue.code === "SHOPIFY_FULFILLED_OUTSIDE_APP" && group.shippedOutside === "available" ? (
+        <Form method="post">
+          <input type="hidden" name="intent" value="shippedOutside" />
+          <input type="hidden" name="issueId" value={issue.id} />
+          <Stack gap={1}>
+            <div>
+              <ConfirmSubmitButton
+                size="sm"
+                loading={busy && pending.intent === "shippedOutside"}
+                disabled={busy}
+                title={t("order.shippedOutside.confirmTitle")}
+                confirmLabel={t("order.shippedOutside.confirm")}
+                cancelLabel={t("common.cancel")}
+                message={
+                  <Stack gap={2}>
+                    <Text>{t("order.shippedOutside.confirmBody")}</Text>
+                    <Text weight="semibold">{t("order.shippedOutside.confirmStock")}</Text>
+                  </Stack>
+                }
+              >
+                {t("order.shippedOutside.button")}
+              </ConfirmSubmitButton>
+            </div>
+            <Text variant="caption" tone="subdued">
+              {t("order.shippedOutside.help")}
             </Text>
           </Stack>
         </Form>

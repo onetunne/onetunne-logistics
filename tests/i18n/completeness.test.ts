@@ -47,6 +47,23 @@ describe("i18n completeness", () => {
     expect(missing).toEqual([]);
   });
 
+  it("stage-5 modules have no unused keys (literal use or a dynamic `prefix.${…}` family in app code)", () => {
+    const files = walk(path.resolve("app")).filter((f) => !f.includes(`${path.sep}i18n${path.sep}messages${path.sep}`));
+    const src = files.map((f) => fs.readFileSync(f, "utf8")).join("\n");
+    // Динамічні родини: `warehouse.reason.${code}`, "packing.tab." + key тощо.
+    const prefixes = [...src.matchAll(/[`"']([a-zA-Z0-9_.]+\.)(?:\$\{|["'`]\s*\+)/g)].map((m) => m[1]!);
+    const unused: string[] = [];
+    for (const name of ["warehouse", "production", "warehouseAnalytics", "dashboard", "staff"]) {
+      const mod = MESSAGE_MODULES[name];
+      expect(mod, name).toBeDefined();
+      for (const k of Object.keys(mod!.uk)) {
+        const literal = src.includes(`"${k}"`) || src.includes(`'${k}'`) || src.includes(`\`${k}\``);
+        if (!literal && !prefixes.some((p) => k.startsWith(p))) unused.push(`${name}: ${k}`);
+      }
+    }
+    expect(unused).toEqual([]);
+  });
+
   it("dynamic key families are complete", () => {
     const keys = [
       ...ORDER_STATUSES.map((s) => `status.${s}`),

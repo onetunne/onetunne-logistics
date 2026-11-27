@@ -9,14 +9,20 @@ embedded = true
 [access_scopes]
 # Мінімальні дозволи етапу 2 (той самий список — у версії застосунку в Dev Dashboard і в змінній SCOPES):
 #   write_orders    — читання замовлень і оновлення адреси/email/телефону (orderUpdate); включає read_orders
-#   read_products   — товари, варіанти, фото, метаполе митного опису
+#   read_products   — товари, варіанти, фото, метаполе митного опису; етап 5 — колекції (ручні й автоматичні) і
+#                     товари в них для шаблонів комплектації (Collection, Product.collections, webhooks collections/*)
 #   read_inventory  — залишки, вага, HS-код, країна походження (InventoryItem)
 # Етап 3:
 #   write_merchant_managed_fulfillment_orders — виконання замовлення з трек-номером після передачі перевізнику
 #                                               (fulfillmentCreate; включає read_)
 #   write_shipping  — розрахунок доставки в Checkout (carrierServiceCreate/Update/Delete; включає read_shipping)
+# Етап 5:
+#   write_inventory — передача внутрішніх змін складу (надходження, брак, коригування) у Shopify дельтою
+#                     (inventoryAdjustQuantities) і «надіслати значення складу» для розбіжностей; включає read_inventory.
+#                     Без нього звірка працює (read_inventory), а передача — ні (рухи позначаються skipped).
+#                     Передача ввімкнеться лише після налаштування власника (Склад → shopifyPush = deltas; типово вимкнено).
 # Необов'язково: read_all_orders — імпорт замовлень старших за 60 днів.
-scopes = "write_orders,read_products,read_inventory,write_merchant_managed_fulfillment_orders,write_shipping"
+scopes = "write_orders,read_products,read_inventory,write_inventory,write_merchant_managed_fulfillment_orders,write_shipping"
 
 [auth]
 redirect_urls = ["https://example.com/auth/callback"]

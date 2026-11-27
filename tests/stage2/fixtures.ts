@@ -1,5 +1,5 @@
 import type { AdminGraphql } from "~/integrations/shopify/admin-client.server";
-import type { GqlOrder, GqlProduct } from "~/integrations/shopify/graphql";
+import type { GqlCollection, GqlOrder, GqlProduct } from "~/integrations/shopify/graphql";
 
 /** Вигадані дані у форматі відповідей GraphQL Admin API (поля звірено зі схемою 2026-10). */
 export function gqlProduct(n = 1, over: Partial<GqlProduct> = {}): GqlProduct {
@@ -86,8 +86,28 @@ export function gqlOrder(n = 5001, over: Partial<GqlOrder> = {}): GqlOrder {
   };
 }
 
+/** Етап 5: вигадана колекція Shopify і GID її товарів (порядок — як у Shopify). */
+export interface FakeCollection {
+  collection: GqlCollection;
+  products: string[];
+}
+
+export function gqlCollection(n: number, over: Partial<GqlCollection> = {}): GqlCollection {
+  return { id: `gid://shopify/Collection/${n}`, title: `Тестова колекція ${n}`, handle: `test-collection-${n}`, updatedAt: "2026-11-20T10:00:00Z", ...over };
+}
+
+/** Сторінка з'єднання: курсор — позиція наступного елемента. */
+function connectionPage<T>(all: readonly T[], first: unknown, after: unknown) {
+  const size = Number(first ?? 50);
+  const start = typeof after === "string" && after ? Number(after) : 0;
+  const next = start + size;
+  return { nodes: all.slice(start, next), pageInfo: { hasNextPage: next < all.length, endCursor: next < all.length ? String(next) : null } };
+}
+
 /** Імітація Admin GraphQL: відповідає за назвою операції, записує виклики. */
-export function fakeAdmin(store: { orders: Map<string, GqlOrder>; products: Map<string, GqlProduct> }) {
+export function fakeAdmin(store: { orders: Map<string, GqlOrder>; products: Map<string, GqlProduct>; collections?: Map<string, FakeCollection> }) {
+  const collectionsOf = (productGid: string) =>
+    [...(store.collections?.values() ?? [])].filter((c) => c.products.includes(productGid)).map((c) => c.collection);
   const calls: Array<{ op: string; variables?: Record<string, unknown> }> = [];
   let updateErrors: Array<{ field: string[] | null; message: string }> = [];
   let shipsTo: string[] = ["DE", "UA", "PT", "US", "FR", "PL"];
@@ -124,6 +144,31 @@ export function fakeAdmin(store: { orders: Map<string, GqlOrder>; products: Map<
       case "OtInventoryItem":
         data = { inventoryItem: { id: variables?.id, variant: { id: "v", product: { id: "gid://shopify/Product/1" } } } };
         break;
+      case "OtProductCollections": {
+        const id = String(variables?.id);
+        data = { product: store.products.has(id) ? { id, collections: connectionPage(collectionsOf(id), variables?.first, variables?.after) } : null };
+        break;
+      }
+      case "OtCollections":
+        data = { collections: connectionPage([...(store.collections?.values() ?? [])].map((c) => c.collection), variables?.first, variables?.after) };
+        break;
+      case "OtCollection": {
+        const c = store.collections?.get(String(variables?.id));
+        data = {
+          collection: c ? { ...c.collection, products: connectionPage(c.products.map((id) => ({ id })), variables?.first, variables?.after) } : null,
+        };
+        break;
+      }
+      case "OtProductMemberships": {
+        const page = connectionPage([...store.products.keys()], variables?.first, variables?.after);
+        data = {
+          products: {
+            pageInfo: page.pageInfo,
+            nodes: page.nodes.map((id) => ({ id, collections: connectionPage(collectionsOf(id), variables?.collectionsFirst, null) })),
+          },
+        };
+        break;
+      }
       case "OtShopShipping":
         data = { shop: { shipsToCountries: shipsTo, countriesInShippingZones: { countryCodes: shipsTo, includeRestOfWorld: false } } };
         break;

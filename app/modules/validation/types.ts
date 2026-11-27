@@ -58,9 +58,17 @@ export const ISSUE_CODES = [
   "SHOPIFY_CANCELLED_AFTER_SHIPMENT",
   "SHOPIFY_COUNTRY_NOT_SHIPPED",
   "SHOPIFY_FULFILLMENT_FAILED",
+  /** Етап 5: Shopify показує виконання, але передачу перевізнику в застосунку не зафіксовано (резерв складу лишається). */
+  "SHOPIFY_FULFILLED_OUTSIDE_APP",
   // Відстеження (створюються сервісом відстеження)
   "DELIVERY_PROBLEM",
   "CARRIER_SHIPMENT_DELETED",
+  // Етап 5: склад / пакування (створює модуль пакування — PACKING_ISSUE_CODES у modules/packing/lifecycle.server.ts;
+  // тексти issue.<код>.* — у i18n/messages/packing.ts). Повторна перевірка даних їх не закриває (orders/workflow.server.ts).
+  /** Замовлення скасовано, коли посилку вже пакували або запакували: розібрати й повернути товар на склад. */
+  "ORDER_CANCELLED_AFTER_PACKING",
+  /** Перевізник прийняв посилку, а комплектацію почали й не підтвердили «Запаковано». */
+  "PACKING_SKIPPED_AT_HANDOVER",
 ] as const;
 
 export type IssueCode = (typeof ISSUE_CODES)[number];

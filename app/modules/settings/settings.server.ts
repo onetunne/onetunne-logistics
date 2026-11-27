@@ -23,6 +23,8 @@ const PERMISSION_FOR_KEY: Record<SettingsKey, Permission> = {
   novaPost: "settings.manage",
   checkoutRates: "settings.manage",
   tracking: "settings.manage",
+  // Етап 5: пороги, передача в Shopify, політика розбіжностей — критичні налаштування власника.
+  warehouse: "settings.manage",
 };
 
 export interface VersionedSettings {

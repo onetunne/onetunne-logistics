@@ -16,6 +16,16 @@ export const PERMISSIONS = [
   "finance.view",
   "staff.manage",
   "demo.reset",
+  // Етап 5: склад, виробництво, пакування
+  "warehouse.view", // залишки, історія руху, попередження, виробничі партії (перегляд)
+  "warehouse.receive", // надходження з виробництва/вручну, позначення браку
+  "warehouse.adjust", // ручні коригування, початкові залишки, розв'язання розбіжностей із Shopify (типово — власник)
+  "production.manage", // створення й зміна виробничих партій (типово — власник)
+  // Черга пакування, контроль комплектації, підтвердження «Запаковано», а також фізичні параметри посилки (коробка,
+  // вага, габарити — orders.parcel_*), зокрема ще до створення накладної (modules/packing/packing.server.ts).
+  // Ім'я й місто отримувача на сторінках пакування — лише разом з orders.view (modules/packing/view.server.ts,
+  // queue.server.ts).
+  "packing.perform",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -27,15 +37,57 @@ const STAFF_PERMISSIONS: readonly Permission[] = [
   "orders.bulk",
   "waybills.create",
   "problems.view",
+  "warehouse.view",
+  "warehouse.receive",
+  "packing.perform",
 ];
 
-/** Дозволи, які НІКОЛИ не можна надати працівнику через гнучкі права. */
+/**
+ * Дозволи, які НІКОЛИ не можна надати працівнику через гнучкі права.
+ * finance.view також відкриває поля собівартості складу/виробництва/матеріалів (етап 5).
+ */
 export const OWNER_ONLY_PERMISSIONS: readonly Permission[] = [
   "finance.view",
   "settings.manage",
   "automation.manage",
   "staff.manage",
 ];
+
+/** Типові права ролі «Працівник» (без перевизначень). */
+export const STAFF_DEFAULT_PERMISSIONS: readonly Permission[] = STAFF_PERMISSIONS;
+
+/**
+ * Права, які власник може надати або зняти окремому працівнику (розділ «Працівники»): усі, КРІМ OWNER_ONLY_PERMISSIONS
+ * (фінанси й собівартість, критичні налаштування, автоматизація, керування працівниками) і службового demo.reset.
+ */
+export const DELEGABLE_PERMISSIONS: readonly Permission[] = PERMISSIONS.filter(
+  (p) => !OWNER_ONLY_PERMISSIONS.includes(p) && p !== "demo.reset",
+);
+
+export interface PermissionOverrides {
+  grant: Permission[];
+  revoke: Permission[];
+}
+
+/**
+ * Вибрані власником права працівника → мінімальні перевизначення відносно типових прав ролі «Працівник»
+ * (staff_members.permission_overrides). Будь-яке право поза DELEGABLE_PERMISSIONS (зокрема лише власника) —
+ * відмова: сервер ніколи не зберігає надання прав лише власника, навіть якщо форму підроблено.
+ */
+export function staffOverridesFromSelection(
+  selected: readonly string[],
+): { ok: true; overrides: PermissionOverrides } | { ok: false; rejected: string[] } {
+  const rejected = [...new Set(selected.filter((p) => !(DELEGABLE_PERMISSIONS as readonly string[]).includes(p)))];
+  if (rejected.length > 0) return { ok: false, rejected };
+  const chosen = new Set(selected);
+  return {
+    ok: true,
+    overrides: {
+      grant: DELEGABLE_PERMISSIONS.filter((p) => chosen.has(p) && !STAFF_PERMISSIONS.includes(p)),
+      revoke: DELEGABLE_PERMISSIONS.filter((p) => !chosen.has(p) && STAFF_PERMISSIONS.includes(p)),
+    },
+  };
+}
 
 export const ROLE_PERMISSIONS: Readonly<Record<Role, readonly Permission[]>> = {
   owner: PERMISSIONS,

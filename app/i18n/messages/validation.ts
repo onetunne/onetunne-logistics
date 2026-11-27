@@ -84,7 +84,8 @@ const messages: MessageModule = {
 
     // --- Товари / митниця ---
     "issue.ORDER_NO_ITEMS.title": "Немає товарів",
-    "issue.ORDER_NO_ITEMS.help": "У замовленні немає жодної позиції, тож відправляти нічого. Перевірте замовлення в Shopify.",
+    "issue.ORDER_NO_ITEMS.help":
+      "У замовленні немає позицій до відправлення (жодної або всі повернені чи видалені редагуванням у Shopify), тож відправляти нічого. Перевірте замовлення в Shopify: повністю повернене замовлення зазвичай скасовують.",
     "issue.PRODUCT_NOT_LINKED.title": "Товар не пов'язано",
     "issue.PRODUCT_NOT_LINKED.help":
       "Позицію «{title}» не пов'язано з варіантом товару, тому немає ваги й митних даних. Пов'яжіть позицію з варіантом товару або перевірте, чи товар не видалено в Shopify.",
@@ -120,6 +121,9 @@ const messages: MessageModule = {
     "issue.CARRIER_CANCEL_CONFLICT.title": "Накладну скасовано, а посилку вже передано",
     "issue.CARRIER_CANCEL_CONFLICT.help":
       "{carrier} СКАСУВАВ накладну {waybill}, але під час скасування посилку позначено переданою перевізнику. Накладна в застосунку лишається активною, проте її номер у перевізника більше не діє. Терміново зв’яжіться з перевізником і з’ясуйте долю посилки; після вирішення закрийте цю проблему.",
+    "issue.SHOPIFY_FULFILLED_OUTSIDE_APP.title": "Замовлення виконано в Shopify не застосунком",
+    "issue.SHOPIFY_FULFILLED_OUTSIDE_APP.help":
+      "Shopify показує замовлення виконаним (повністю або частково), але в застосунку відправлення не зафіксовано. Товар лишається зарезервованим на складі, нову накладну не створити (це було б повторне відправлення). Є накладна застосунку — підтвердьте передачу перевізнику в її картці; немає (інший перевізник, самовивіз) — натисніть «Відправлено поза застосунком»: резерв буде списано один раз. Якщо товари не відправлено — перевірте виконання в Shopify. Виконання лише позицій без доставки (напр. цифрової подарункової картки) сюди не потрапляє.",
     "issue.SHOPIFY_FULFILLMENT_FAILED.title": "Трек-номер не передано в Shopify",
     "issue.SHOPIFY_FULFILLMENT_FAILED.help":
       "Посилку передано перевізнику, але виконання з трек-номером у Shopify не створено після кількох спроб ({message}). Перевірте дозволи застосунку (write_merchant_managed_fulfillment_orders) і повторіть на сторінці «Синхронізація Shopify».",
@@ -134,7 +138,7 @@ const messages: MessageModule = {
       "Shopify приймає адресу замовлення лише для країн із зон доставки магазину; для {country} її немає (зараз: {shipsTo}). Активний ринок (Markets) сам цього не додає. Додайте {country} до зони доставки: Shopify → Налаштування → Доставка → профіль доставки → зона, потім збережіть адресу ще раз.",
     "issue.SHOPIFY_ORDER_CHANGED.title": "Дані замовлення змінено в Shopify",
     "issue.SHOPIFY_ORDER_CHANGED.help":
-      "У Shopify змінено поля ({fields}), але локально замовлення вже не можна змінювати автоматично (накладна в роботі або є неперенесені підтверджені зміни). Перевірте, які дані правильні, і за потреби скасуйте накладну та виправте дані.",
+      "У Shopify змінено поля ({fields}), але локально замовлення вже не можна змінювати автоматично (накладна в роботі або є неперенесені підтверджені зміни). Перевірте, які дані правильні, і за потреби скасуйте накладну та виправте дані. Змінені позиції (lineItems) застосунок застосує сам, перечитавши замовлення з Shopify після скасування накладної.",
     "issue.SHOPIFY_SYNC_FAILED.title": "Не вдалося оновити замовлення в Shopify",
     "issue.SHOPIFY_SYNC_FAILED.help":
       "Підтверджені зміни контактів/адреси не передано в Shopify після кількох спроб ({message}). Перевірте дані та повторіть на сторінці «Синхронізація Shopify».",
@@ -169,6 +173,7 @@ const messages: MessageModule = {
     "field.shipping.phone": "Телефон одержувача",
     "field.email": "Email",
     "field.contactPhone": "Контактний телефон",
+    "field.lineItems": "Позиції замовлення (кількість)",
     "field.variant.weightGrams": "Вага, г",
     "field.variant.hsCode": "HS-код",
     "field.variant.countryOfOrigin": "Країна походження",
@@ -254,7 +259,8 @@ const messages: MessageModule = {
 
     // --- Products / customs ---
     "issue.ORDER_NO_ITEMS.title": "No items",
-    "issue.ORDER_NO_ITEMS.help": "The order has no line items, so there is nothing to ship. Check the order in Shopify.",
+    "issue.ORDER_NO_ITEMS.help":
+      "The order has no items left to ship (none, or all of them refunded or removed by an order edit in Shopify), so there is nothing to ship. Check the order in Shopify: a fully refunded order is usually cancelled.",
     "issue.PRODUCT_NOT_LINKED.title": "Product not linked",
     "issue.PRODUCT_NOT_LINKED.help":
       "Line item “{title}” is not linked to a product variant, so there is no weight or customs data. Link the line item to a product variant or check whether the product was deleted in Shopify.",
@@ -290,6 +296,9 @@ const messages: MessageModule = {
     "issue.CARRIER_CANCEL_CONFLICT.title": "Waybill cancelled, but the parcel is already handed over",
     "issue.CARRIER_CANCEL_CONFLICT.help":
       "{carrier} CANCELLED waybill {waybill}, but during the cancellation the parcel was marked as handed to the carrier. The waybill stays active in the app, but its number is no longer valid at the carrier. Contact the carrier urgently to clarify what happens to the parcel; close this problem once resolved.",
+    "issue.SHOPIFY_FULFILLED_OUTSIDE_APP.title": "Order fulfilled in Shopify outside the app",
+    "issue.SHOPIFY_FULFILLED_OUTSIDE_APP.help":
+      "Shopify shows the order as fulfilled (fully or partially), but no shipment is recorded in the app. The items stay reserved in the warehouse and a new waybill cannot be created (it would ship the order twice). If there is an app waybill, confirm the handover to the carrier in its card; if not (another carrier, pickup), press “Shipped outside the app”: the reservation is written off once. If the goods were not shipped, check the fulfillment in Shopify. Fulfilling only items without shipping (such as a digital gift card) does not raise this.",
     "issue.SHOPIFY_FULFILLMENT_FAILED.title": "Tracking number not sent to Shopify",
     "issue.SHOPIFY_FULFILLMENT_FAILED.help":
       "The parcel was handed to the carrier, but a Shopify fulfillment with the tracking number was not created after several attempts ({message}). Check the app permissions (write_merchant_managed_fulfillment_orders) and retry on the “Shopify sync” page.",
@@ -304,7 +313,7 @@ const messages: MessageModule = {
       "Shopify accepts an order address only for countries in the store’s shipping zones; {country} is not there (currently: {shipsTo}). An active market (Markets) does not add it by itself. Add {country} to a shipping zone: Shopify → Settings → Shipping and delivery → shipping profile → zone, then save the address again.",
     "issue.SHOPIFY_ORDER_CHANGED.title": "Order data changed in Shopify",
     "issue.SHOPIFY_ORDER_CHANGED.help":
-      "Fields ({fields}) changed in Shopify, but the order can no longer be updated automatically (a waybill is in progress or confirmed local changes are not yet synced). Check which data is correct and, if needed, cancel the waybill and correct the data.",
+      "Fields ({fields}) changed in Shopify, but the order can no longer be updated automatically (a waybill is in progress or confirmed local changes are not yet synced). Check which data is correct and, if needed, cancel the waybill and correct the data. Changed items (lineItems) are applied by the app itself when it re-reads the order from Shopify after the waybill is cancelled.",
     "issue.SHOPIFY_SYNC_FAILED.title": "Could not update the order in Shopify",
     "issue.SHOPIFY_SYNC_FAILED.help":
       "Confirmed contact/address changes were not sent to Shopify after several attempts ({message}). Check the data and retry on the “Shopify sync” page.",
@@ -339,6 +348,7 @@ const messages: MessageModule = {
     "field.shipping.phone": "Recipient phone",
     "field.email": "Email",
     "field.contactPhone": "Contact phone",
+    "field.lineItems": "Order line items (quantities)",
     "field.variant.weightGrams": "Weight, g",
     "field.variant.hsCode": "HS code",
     "field.variant.countryOfOrigin": "Country of origin",

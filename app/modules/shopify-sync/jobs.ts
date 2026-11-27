@@ -1,0 +1,47 @@
+/**
+ * Типи фонових завдань синхронізації Shopify (без залежностей: модулі, що лише ставлять завдання в чергу, —
+ * накладні, повторне читання замовлення — імпортують їх без циклів з sync.server.ts, який реекспортує JOB).
+ */
+export const JOB = {
+  syncOrder: "shopify.sync_order",
+  syncProduct: "shopify.sync_product",
+  syncInventoryItem: "shopify.sync_inventory_item",
+  deleteProduct: "shopify.delete_product",
+  productsPage: "shopify.products_page",
+  importOrdersPage: "shopify.import_orders_page",
+  pushOrder: "shopify.push_order",
+  /** Етап 3: виконання замовлення з трек-номером після передачі перевізнику. */
+  fulfillShipment: "shopify.fulfill_shipment",
+  /** Етап 3: періодичне опитування відстеження перевізників. */
+  trackingPoll: "tracking.poll",
+  /** Етап 5: колекції товару (Product.collections) → product_collections (collections.server.ts). */
+  syncProductCollections: "shopify.sync_product_collections",
+  /** Етап 5: webhook collections/create|update — назва колекції й товари, членство яких змінилося. */
+  syncCollection: "shopify.sync_collection",
+  /** Етап 5: webhook collections/delete. */
+  deleteCollection: "shopify.delete_collection",
+  /** Етап 5: повна синхронізація колекцій — список колекцій (сторінка). */
+  collectionsPage: "shopify.collections_page",
+  /** Етап 5: повна синхронізація колекцій — членство товарів (сторінка). */
+  collectionMembershipsPage: "shopify.collection_memberships_page",
+  /** Етап 5: щоденна планова повна синхронізація колекцій (ланцюжок; collections.server.ts). */
+  scheduledCollectionsSync: "shopify.collections_scheduled",
+  /** Етап 5: перевірка/оновлення підписок на webhooks (webhook-subscriptions.server.ts). */
+  ensureWebhooks: "shopify.ensure_webhooks",
+  /** Етап 5: планове перечитування застарілого статусу виконання відправлених замовлень (fulfillment-refresh.server.ts). */
+  fulfillmentRefresh: "shopify.fulfillment_refresh",
+} as const;
+
+/** dedupeKey завдання синхронізації замовлення (webhooks, імпорт, повторне читання після скасування накладної). */
+export function orderSyncDedupeKey(orderGid: string): string {
+  return `order:${orderGid}`;
+}
+
+/**
+ * dedupeKey планового страхового читання замовлення (shopify.sync_order з mode refresh, fulfillment-refresh.server.ts).
+ * Окремий від orderSyncDedupeKey: завдання refresh застосовує лише новіші дані Shopify, тож не повинно поглинати
+ * звичайне читання (webhook, повторне читання менеджером або після скасування накладної), яке застосовується завжди.
+ */
+export function orderRefreshDedupeKey(orderGid: string): string {
+  return `order-refresh:${orderGid}`;
+}

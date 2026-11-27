@@ -94,7 +94,8 @@ describe("pure rules", () => {
 describe("tool definitions", () => {
   it("are filtered by the actor's permissions and carry JSON schemas", () => {
     const ownerNames = toolDefinitionsFor(OWNER).map((d) => d.name);
-    expect(ownerNames).toEqual([
+    // Інструменти складу (етап 5, warehouse_*) перевіряє tests/stage5/commands.test.ts.
+    expect(ownerNames.filter((name) => !name.startsWith("warehouse_"))).toEqual([
       "find_orders",
       "get_order",
       "list_problems",

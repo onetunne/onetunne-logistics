@@ -528,7 +528,7 @@ describe("order detail: tracking and handover (stage 3)", () => {
       trackingSupported: false,
       handoverAvailable: true,
       trackingEvents: [],
-      documents: [],
+      documents: ["label"], // етап 5: зразок етикетки тестового перевізника (TEST)
       shopify: { state: "not_applicable", sentAt: null },
     });
     expect(await act(id, { intent: "refreshTracking", shipmentId })).toEqual({ ok: false, error: "tracking.notSupported", params: {} });
@@ -543,7 +543,9 @@ describe("order detail: tracking and handover (stage 3)", () => {
     expect(html).toContain("Замовлення не з Shopify — у Shopify нічого не надсилається.");
     expect(html).toContain("Перевізник не підтримує відстеження через API.");
     expect(html).toContain("Після фактичної передачі посилки позначте це вручну кнопкою «Передано перевізнику».");
-    expect(html).toContain("Документи перевізника недоступні");
+    // Етап 5: тестовий перевізник видає зразок етикетки (TEST) — кнопка документа замість «недоступні».
+    expect(html).not.toContain("Документи перевізника недоступні");
+    expect(html).toContain("Етикетка (маркування)");
     expect(html).toContain(`/demo/orders/${id}/invoice`);
     expect(html).toContain("Комерційний інвойс для друку");
     expect(html).not.toContain("Оновити статус");

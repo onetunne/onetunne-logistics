@@ -17,7 +17,8 @@ const messages: MessageModule = {
       "Робочого перевізника ще не підключено, тому накладні тут поки не створюються. Тестовий перевізник у робочій версії недоступний.",
     "waybills.info.notShipped":
       "Створена накладна — ще не відправлення: статус «Передано перевізнику» з’являється лише після фактичної передачі посилки.",
-    "waybills.info.stage3": "Друк PDF-етикеток та інвойсів, редагування накладних і масовий друк PDF — етап 3.",
+    "waybills.info.stage3":
+      "Етикетку перевізника (PDF) і комерційний інвойс друкують з картки замовлення; етикетки кількох замовлень одним PDF, пакувальні листи й інвойси — у розділі «Комплектація». Змінити дані створеної накладної — «Переоформити накладну» на картці замовлення (стару буде скасовано, створено нову).",
     "waybills.info.novaGlobal": "Nova Global підключимо після отримання офіційної документації API та ключів.",
 
     // Перевізники
@@ -85,7 +86,8 @@ const messages: MessageModule = {
       "No live carrier is connected yet, so waybills are not created here for now. The test carrier is not available in the live app.",
     "waybills.info.notShipped":
       "A created waybill is not a shipment: the “Handed to carrier” status appears only after the parcel is actually handed over.",
-    "waybills.info.stage3": "Printing PDF labels and invoices, editing waybills and bulk PDF printing are stage 3.",
+    "waybills.info.stage3":
+      "Print the carrier label (PDF) and the commercial invoice from the order page; labels of several orders in one PDF, packing slips and invoices are in Picking. To change a created waybill, use “Re-issue waybill” on the order page (the old one is cancelled and a new one created).",
     "waybills.info.novaGlobal": "Nova Global will be connected once the official API documentation and keys are received.",
 
     "waybills.carriers.title": "Carriers",

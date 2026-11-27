@@ -1,5 +1,5 @@
 import { customsOverridesInputSchema, type OverrideField } from "~/modules/products/customs-overrides";
-import { and, eq, inArray, like, notLike, or, sql } from "drizzle-orm";
+import { and, eq, inArray, like, notInArray, notLike, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { DbOrTx, Tx } from "~/db/client.server";
 import { issues, orderChanges, orderLineItems, orders, productVariants, shipments } from "~/db/schema";
@@ -9,11 +9,13 @@ import { ConflictError, DomainError, NotFoundError } from "~/lib/errors";
 import { writeAudit } from "~/modules/audit/audit.server";
 import { getSetting } from "~/modules/settings/settings.server";
 import { MANUALLY_CLOSABLE_ISSUE_CODES } from "~/modules/problems/categories";
+import { PACKING_ISSUE_CODES } from "~/modules/packing/lifecycle.server";
 import { issueFingerprint, validateOrder, type ValidationOptions } from "~/modules/validation";
 import {
   SHIPPING_FIELDS,
   type AddressInput,
   type AutoFix,
+  type IssueCode,
   type ShippingField,
   type ValidationResult,
 } from "~/modules/validation/types";
@@ -28,6 +30,12 @@ import {
   toValidationInput,
   type OrderRow,
 } from "./repository.server";
+
+/**
+ * Проблеми сервісів без префікса CARRIER_/SHOPIFY_, які повторна перевірка даних не закриває: попередження складу
+ * (пакування). Тип гарантує, що кожен код пакування зареєстровано в ISSUE_CODES (категорія, тексти, «Проблеми»).
+ */
+const SERVICE_ISSUE_CODES: IssueCode[] = [...PACKING_ISSUE_CODES];
 
 /** Статуси, у яких на етапі 1 дозволено перевірку та редагування даних (до створення накладної). */
 export const VALIDATABLE_STATUSES: readonly OrderStatus[] = ["paid", "awaiting_review", "needs_correction"];
@@ -134,7 +142,9 @@ export async function validateOrderInTx(
     );
   }
 
-  // 2) Синхронізація проблем: нові — додати, наявні — оновити, зниклі — закрити.
+  // 2) Синхронізація проблем: нові — додати, наявні — оновити, зниклі — закрити. Лише проблеми перевірки даних:
+  //    проблеми перевізника, синхронізації Shopify і попередження складу (пакування) створюють і закривають їхні
+  //    сервіси — повторна перевірка не може знати, що посилку розібрано чи перевірено.
   const existing = await tx
     .select()
     .from(issues)
@@ -144,6 +154,7 @@ export async function validateOrderInTx(
         eq(issues.status, "open"),
         notLike(issues.code, "CARRIER_%"),
         notLike(issues.code, "SHOPIFY_%"),
+        notInArray(issues.code, SERVICE_ISSUE_CODES),
       ),
     );
   const nextByFingerprint = new Map(result.issues.map((i) => [issueFingerprint(orderId, i), i]));

@@ -17,6 +17,12 @@ import {
 } from "~/modules/shopify-sync/sync.server";
 import { ActionBanner, type ActionResult } from "~/components/action-banner";
 import { hasScope } from "~/modules/rates/carrier-service.server";
+import {
+  enqueueWebhookSubscriptionCheck,
+  webhookConfigKey,
+  webhookSubscriptionStatus,
+} from "~/modules/shopify-sync/webhook-subscriptions.server";
+import { getEnv } from "~/lib/env.server";
 import { getRequestContext } from "~/server/context.server";
 import { formString, toActionError } from "~/server/http.server";
 import { Badge, Banner, Button, Card, ConfirmSubmitButton, InlineCode, KeyValueList, Page, Stack, Text, TextField } from "~/ui";
@@ -51,6 +57,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       shipping: null,
       failedOrders: [],
       stage3Scopes: [],
+      webhooks: null,
     };
   const shop = await currentShop(ctx.db);
   const since = new Date(Date.now() - 60 * 86400_000).toISOString().slice(0, 10);
@@ -97,6 +104,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
     failedOrders,
     // Надані дозволи — з запису встановлення (оновлюється webhook app/scopes_update).
     stage3Scopes: STAGE3_SCOPES.map((scope) => ({ scope, granted: hasScope(shop?.scopes, scope) })),
+    // Етап 5: підтверджені Shopify теми webhooks і чи відповідають вони поточній конфігурації застосунку.
+    webhooks: shop ? webhookSubscriptionStatus(shop, webhookConfigKey(getEnv().SHOPIFY_APP_URL ?? "")) : null,
   };
 }
 
@@ -144,6 +153,11 @@ export async function action({ request }: ActionFunctionArgs): Promise<ActionRes
           })),
         },
       } as ActionResult & { report: unknown };
+    }
+    if (intent === "registerWebhooks") {
+      await enqueueWebhookSubscriptionCheck(ctx.db, { force: true });
+      await writeAudit(ctx.db, ctx.actor, "shopify.webhooks_register_requested", { type: "shop", id: shop.shop });
+      return { ok: true, message: "shopify.result.webhooksQueued" };
     }
     if (intent === "retryDead") {
       const n = await retryDeadJobs(ctx.db);
@@ -200,6 +214,40 @@ export default function ShopifySyncPage() {
             ]}
           />
         </Card>
+        {data.webhooks ? (
+          <Card title={t("shopify.webhooks.title")} description={t("shopify.webhooks.help")}>
+            <Stack gap={3}>
+              <Stack direction="horizontal" gap={2} wrap align="center">
+                <Badge tone={data.webhooks.state === "up_to_date" ? "success" : "warning"}>
+                  {t(`shopify.webhooks.state.${data.webhooks.state}`)}
+                </Badge>
+                <Text variant="body-sm" tone="subdued">
+                  {t("shopify.connection.webhooks")}: {formatDateTime(data.webhooks.registeredAt, locale)}
+                </Text>
+              </Stack>
+              {data.webhooks.registered.length > 0 ? (
+                <Stack gap={1}>
+                  <Text variant="body-sm">{t("shopify.webhooks.registered", { count: data.webhooks.registered.length })}</Text>
+                  <Stack direction="horizontal" gap={1} wrap>
+                    {data.webhooks.registered.map((topic) => (
+                      <InlineCode key={topic}>{topic}</InlineCode>
+                    ))}
+                  </Stack>
+                </Stack>
+              ) : null}
+              {data.webhooks.missing.length > 0 ? (
+                <Banner tone="warning">{t("shopify.webhooks.missing", { topics: data.webhooks.missing.join(", ") })}</Banner>
+              ) : null}
+              {data.webhooks.state !== "up_to_date" ? <Text variant="body-sm">{t("shopify.webhooks.pending")}</Text> : null}
+              <Form method="post">
+                <input type="hidden" name="intent" value="registerWebhooks" />
+                <Button type="submit" loading={busy}>
+                  {t("shopify.webhooks.button")}
+                </Button>
+              </Form>
+            </Stack>
+          </Card>
+        ) : null}
         <Card title={t("shopify.scopes.title")} description={t("shopify.scopes.help")}>
           <Stack gap={3}>
             <KeyValueList

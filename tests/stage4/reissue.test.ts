@@ -159,7 +159,9 @@ describe("reissueWaybill: duplicate protection", () => {
     const results = await Promise.all(Array.from({ length: 4 }, () => reissueWaybill(ctx, old.id).catch((e: unknown) => e)));
     const kinds = results.map((r) => (r instanceof Error ? `error:${(r as { code?: string }).code ?? r.message}` : (r as { kind: string }).kind));
     expect(kinds.filter((k) => k === "reissued")).toHaveLength(1);
-    // Решта — «паралельний запит» або відмова для вже скасованої накладної; нічого не створено.
+    // Решта — «паралельний запит» або відмова для вже скасованої накладної; нічого не створено. Вікно між скасуванням і
+    // новою накладною переможця (замовлення «Очікує перевірки») — теж «паралельний запит», не відмова за статусом
+    // (детерміновано: tests/stage4/reissue-concurrent-window.test.ts).
     for (const k of kinds.filter((k) => k !== "reissued")) expect(["concurrent", "error:waybill.notCancellable"]).toContain(k);
     const rows = await orderShipments(id);
     expect(rows.filter((s) => ["creating", "created", "unknown"].includes(s.status))).toHaveLength(1);

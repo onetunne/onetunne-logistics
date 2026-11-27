@@ -65,10 +65,10 @@ const messages: MessageModule = {
     "settings.packaging.description": "Упаковка та дільник об’ємної ваги, за якими розраховується вага в накладних.",
     "settings.packaging.defaultPackage": "Упаковка за замовчуванням",
     "settings.packaging.defaultPackageHelp":
-      "Підставляється в кожну нову накладну. Вибір упаковки для окремого замовлення — у розділі «Комплектація» (заплановано).",
+      "Використовується, якщо для замовлення не вибрано коробку: під час пакування коробку обирає працівник або застосунок підбирає її за габаритами й вагою (Склад → Пакувальні матеріали).",
     "settings.packaging.volumetricDivisor": "Дільник об’ємної ваги",
     "settings.packaging.volumetricDivisorHelp":
-      "Об’ємна вага = Д × Ш × В (см) / дільник. Оплачувана вага — більша з фактичної та об’ємної. Правила конкретного перевізника — етап 3.",
+      "Об’ємна вага = Д × Ш × В (см) / дільник. Оплачувана вага — більша з фактичної та об’ємної.",
     "settings.packaging.divisorUnit": "см³/кг",
     "settings.packaging.packagesTitle": "Доступні упаковки",
     "settings.packaging.packagesReadOnly": "Перелік упаковок поки лише для перегляду.",
@@ -77,6 +77,48 @@ const messages: MessageModule = {
     "settings.packaging.col.tare": "Вага тари",
     "settings.packaging.dimensionsValue": "{length} × {width} × {height} см",
     "settings.packaging.isDefault": "За замовчуванням",
+
+    // Склад (етап 5)
+    "settings.warehouse.title": "Склад",
+    "settings.warehouse.description":
+      "Попередження про низькі залишки, параметри рекомендацій виробництва та обмін залишками з Shopify. Змінює лише власник.",
+    "settings.warehouse.lowStockThreshold": "Поріг «мало на складі»",
+    "settings.warehouse.lowStockThresholdHelp":
+      "Попередження, коли доступно для продажу ≤ порогу. Діє для товарів і матеріалів без власного порогу; після збереження попередження переоцінюються.",
+    "settings.warehouse.productionLeadDays": "Термін виробництва партії",
+    "settings.warehouse.productionLeadDaysHelp": "Скільки днів зазвичай триває виробництво (для рекомендацій наступних партій).",
+    "settings.warehouse.targetCoverDays": "Цільовий запас",
+    "settings.warehouse.targetCoverDaysHelp": "На скільки днів продажів має вистачати товару після надходження партії.",
+    "settings.warehouse.batchRounding": "Округлення кількості партії",
+    "settings.warehouse.batchRoundingHelp": "Рекомендована кількість округлюється вгору до кратного цьому числу.",
+    "settings.warehouse.unitDays": "дн.",
+    "settings.warehouse.unitPieces": "шт.",
+    "settings.warehouse.shopifyPush": "Передача змін складу в Shopify",
+    "settings.warehouse.shopifyPush.off": "Не передавати (лише звірка)",
+    "settings.warehouse.shopifyPush.deltas": "Передавати зміни (надходження, брак, коригування)",
+    "settings.warehouse.shopifyPushHelp":
+      "Перед увімкненням: «Склад → Звірка з Shopify» → «Звірити все» й розв'яжіть розбіжності. Потрібен дозвіл write_inventory. Зміни, зроблені до увімкнення, не надсилаються. Продажі Shopify рахує сам.",
+    "settings.warehouse.pushOnBanner":
+      "Передачу змін у Shopify увімкнено: надходження, брак і коригування змінюють «доступно» в Shopify.",
+    "settings.warehouse.demoBanner":
+      "Демо: Shopify не підключено. «Передачу змін складу в Shopify» і «Зміни залишку, зроблені в Shopify» можна змінити й зберегти для перегляду, але в демо вони не діють: у Shopify нічого не надсилається (зміни складу позначаються «Не надсилалося»), змін залишку з Shopify немає.",
+    "settings.warehouse.shopifyPushDemo": "Демо: не діє — Shopify не підключено, нічого не надсилається.",
+    "settings.warehouse.externalShopifyChangesDemo": "Демо: не діє — Shopify не підключено, змін залишку з Shopify немає.",
+    "settings.warehouse.externalShopifyChanges": "Зміни залишку, зроблені в Shopify",
+    "settings.warehouse.externalShopifyChanges.review": "Показувати як розбіжність (рішення власника)",
+    "settings.warehouse.externalShopifyChanges.apply": "Приймати автоматично, якщо різниця однозначна",
+    "settings.warehouse.externalShopifyChangesHelp":
+      "Рекомендовано «Показувати як розбіжність». Автоматичне прийняття діє лише з передачею змін складу в Shopify і дозволом write_inventory, і лише коли різницю нічим іншим не пояснити (немає змін складу, яких Shopify не отримав, невдалих передач, замовлень і повернень, що ще синхронізуються, одиниць у станах «брак/резерв» Shopify).",
+    "settings.warehouse.applyWithoutPushWarning":
+      "Автоматичне прийняття не діятиме, поки передачу змін складу в Shopify вимкнено: Shopify не знає про надходження, брак і коригування складу, і прийняття його значення скасувало б їх. Усі різниці йтимуть на розгляд власника.",
+    "settings.warehouse.allowNegativeOnHand": "Дозволити від'ємний фактичний залишок при прийнятті значення Shopify",
+    "settings.warehouse.allowNegativeOnHandHelp":
+      "Передача посилки перевізнику списує товар завжди (посилка вже фізично передана). Інші операції ніколи не роблять залишок від'ємним.",
+    "settings.warehouse.savedWithAlerts": "Збережено. Попередження переоцінено: відкрито {opened}, закрито {resolved}.",
+    "settings.warehouse.error.lowStockThreshold": "Ціле число від 0 до 100000.",
+    "settings.warehouse.error.productionLeadDays": "Ціле число від 1 до 365.",
+    "settings.warehouse.error.targetCoverDays": "Ціле число від 1 до 730.",
+    "settings.warehouse.error.batchRounding": "Ціле число від 1 до 10000.",
 
     // 4. Тестовий перевізник (лише демо)
     "settings.testCarrier.title": "Тестовий перевізник",
@@ -207,10 +249,10 @@ const messages: MessageModule = {
     "settings.packaging.description": "The package and volumetric divisor used to calculate waybill weights.",
     "settings.packaging.defaultPackage": "Default package",
     "settings.packaging.defaultPackageHelp":
-      "Used for every new waybill. Choosing a package per order will be part of the “Picking” section (planned).",
+      "Used when no box is chosen for the order: during packing the worker picks a box or the app selects one by dimensions and weight (Warehouse → Packaging materials).",
     "settings.packaging.volumetricDivisor": "Volumetric weight divisor",
     "settings.packaging.volumetricDivisorHelp":
-      "Volumetric weight = L × W × H (cm) / divisor. Chargeable weight is the greater of actual and volumetric. Carrier-specific rules — stage 3.",
+      "Volumetric weight = L × W × H (cm) / divisor. Chargeable weight is the greater of actual and volumetric.",
     "settings.packaging.divisorUnit": "cm³/kg",
     "settings.packaging.packagesTitle": "Available packages",
     "settings.packaging.packagesReadOnly": "The package list is read-only for now.",
@@ -219,6 +261,47 @@ const messages: MessageModule = {
     "settings.packaging.col.tare": "Tare weight",
     "settings.packaging.dimensionsValue": "{length} × {width} × {height} cm",
     "settings.packaging.isDefault": "Default",
+
+    "settings.warehouse.title": "Warehouse",
+    "settings.warehouse.description":
+      "Low-stock warnings, production recommendation parameters and stock exchange with Shopify. Only the owner can change them.",
+    "settings.warehouse.lowStockThreshold": "Low-stock threshold",
+    "settings.warehouse.lowStockThresholdHelp":
+      "Warns when available for sale ≤ threshold. Applies to products and materials without their own threshold; warnings are re-evaluated after saving.",
+    "settings.warehouse.productionLeadDays": "Production lead time",
+    "settings.warehouse.productionLeadDaysHelp": "How many days a batch usually takes to produce (for next-batch recommendations).",
+    "settings.warehouse.targetCoverDays": "Target stock cover",
+    "settings.warehouse.targetCoverDaysHelp": "How many days of sales the stock should cover after a batch arrives.",
+    "settings.warehouse.batchRounding": "Batch quantity rounding",
+    "settings.warehouse.batchRoundingHelp": "The recommended quantity is rounded up to a multiple of this number.",
+    "settings.warehouse.unitDays": "days",
+    "settings.warehouse.unitPieces": "pcs",
+    "settings.warehouse.shopifyPush": "Send warehouse changes to Shopify",
+    "settings.warehouse.shopifyPush.off": "Do not send (reconcile only)",
+    "settings.warehouse.shopifyPush.deltas": "Send changes (receipts, defects, adjustments)",
+    "settings.warehouse.shopifyPushHelp":
+      "Before enabling: «Warehouse → Shopify reconciliation» → «Reconcile all» and resolve the differences. Requires the write_inventory permission. Changes made before enabling are not sent. Shopify counts sales itself.",
+    "settings.warehouse.pushOnBanner":
+      "Sending changes to Shopify is on: receipts, defects and adjustments change «available» in Shopify.",
+    "settings.warehouse.demoBanner":
+      "Demo: Shopify is not connected. «Send warehouse changes to Shopify» and «Stock changes made in Shopify» can be changed and saved for preview, but they have no effect in the demo: nothing is sent to Shopify (warehouse changes are marked «Not sent») and there are no stock changes from Shopify.",
+    "settings.warehouse.shopifyPushDemo": "Demo: no effect — Shopify is not connected, nothing is sent.",
+    "settings.warehouse.externalShopifyChangesDemo": "Demo: no effect — Shopify is not connected, there are no stock changes from Shopify.",
+    "settings.warehouse.externalShopifyChanges": "Stock changes made in Shopify",
+    "settings.warehouse.externalShopifyChanges.review": "Show as a difference (owner decides)",
+    "settings.warehouse.externalShopifyChanges.apply": "Accept automatically when the difference is unambiguous",
+    "settings.warehouse.externalShopifyChangesHelp":
+      "«Show as a difference» is recommended. Automatic acceptance works only while warehouse changes are sent to Shopify with the write_inventory permission, and only when nothing else explains the difference (no warehouse changes Shopify did not receive, no failed sends, no orders or returns still syncing, no units in Shopify «damaged/reserved» states).",
+    "settings.warehouse.applyWithoutPushWarning":
+      "Automatic acceptance will not work while sending warehouse changes to Shopify is off: Shopify does not know about warehouse receipts, defects and adjustments, and accepting its value would cancel them. Every difference goes to owner review.",
+    "settings.warehouse.allowNegativeOnHand": "Allow negative on-hand stock when accepting a Shopify value",
+    "settings.warehouse.allowNegativeOnHandHelp":
+      "Handing a parcel to the carrier always writes the goods off (the parcel has physically left). Other operations never make stock negative.",
+    "settings.warehouse.savedWithAlerts": "Saved. Warnings re-evaluated: {opened} opened, {resolved} resolved.",
+    "settings.warehouse.error.lowStockThreshold": "A whole number from 0 to 100000.",
+    "settings.warehouse.error.productionLeadDays": "A whole number from 1 to 365.",
+    "settings.warehouse.error.targetCoverDays": "A whole number from 1 to 730.",
+    "settings.warehouse.error.batchRounding": "A whole number from 1 to 10000.",
 
     "settings.testCarrier.title": "Test carrier",
     "settings.testCarrier.description":

@@ -16,16 +16,21 @@ import {
   bigserial,
   boolean,
   char,
+  check,
+  date,
   index,
   integer,
   jsonb,
   numeric,
   pgEnum,
   pgTable,
+  primaryKey,
+  smallint,
   text,
   timestamp,
   uniqueIndex,
   uuid,
+  type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 
 const money = (name: string) => numeric(name, { precision: 14, scale: 2 });
@@ -121,18 +126,29 @@ export const legalEntities = pgTable("legal_entities", {
   updatedAt: updatedAt(),
 });
 
-export const warehouses = pgTable("warehouses", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  legalEntityId: uuid("legal_entity_id").references(() => legalEntities.id),
-  name: text("name").notNull(),
-  countryCode: char("country_code", { length: 2 }).notNull(),
-  city: text("city").notNull(),
-  address: text("address"),
-  shopifyLocationId: text("shopify_location_id"),
-  active: boolean("active").notNull().default(true),
-  createdAt: createdAt(),
-  updatedAt: updatedAt(),
-});
+export const warehouses = pgTable(
+  "warehouses",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    legalEntityId: uuid("legal_entity_id").references(() => legalEntities.id),
+    name: text("name").notNull(),
+    countryCode: char("country_code", { length: 2 }).notNull(),
+    city: text("city").notNull(),
+    address: text("address"),
+    shopifyLocationId: text("shopify_location_id"),
+    active: boolean("active").notNull().default(true),
+    /** Етап 5: склад за замовчуванням («Основний склад»), рівно один (частковий унікальний індекс). */
+    isDefault: boolean("is_default").notNull().default(false),
+    /**
+     * Етап 5: момент ініціалізації складського обліку (початкові залишки зі знімка Shopify). До цього резерви
+     * замовлень не ведуться (немає хибних «продано більше, ніж є»); див. modules/inventory/opening.server.ts.
+     */
+    inventoryInitializedAt: timestamp("inventory_initialized_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [uniqueIndex("warehouses_one_default_uq").on(t.isDefault).where(sql`${t.isDefault}`)],
+);
 
 export const countryRules = pgTable("country_rules", {
   countryCode: char("country_code", { length: 2 }).primaryKey(),
@@ -180,6 +196,11 @@ export const products = pgTable("products", {
   imageUrl: text("image_url"),
   status: text("status"),
   shopifyUpdatedAt: timestamp("shopify_updated_at", { withTimezone: true }),
+  /**
+   * Етап 5: момент ПЕРЕД читанням колекцій товару (Product.collections), дані якого застосовано до product_collections.
+   * Старіше читання (паралельне завдання) членство не перезаписує — modules/shopify-sync/collections.server.ts.
+   */
+  collectionsSyncedAt: timestamp("collections_synced_at", { withTimezone: true }),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 });
@@ -217,8 +238,22 @@ export const productVariants = pgTable(
     customsOverrides: jsonb("customs_overrides"),
     imageUrl: text("image_url"),
     inventoryAvailable: integer("inventory_available"),
+    /**
+     * Етап 5: коли застосунок отримав inventory_available із Shopify (час знімка). Замовлення, створені раніше,
+     * уже не входять у «доступно» знімка (Shopify закріпив їх одиниці) — див. modules/inventory/opening.server.ts.
+     * null — невідомо (демо/дані до етапу 5): за час знімка береться момент відкриття позиції.
+     */
+    inventorySyncedAt: timestamp("inventory_synced_at", { withTimezone: true }),
     /** Shopify InventoryItem GID — для оновлення залишків за webhook inventory_levels/update. */
     inventoryItemId: text("inventory_item_id"),
+    /**
+     * Етап 5: коли варіант зник із ПОВНОГО переліку варіантів товару в Shopify (видалено в Shopify). Ставить і знімає
+     * лише upsertProduct (modules/shopify-sync/sync.server.ts): повний перелік без варіанта → час синхронізації; варіант
+     * знову в переліку → null. Неповний перелік нічого не змінює. Рядок не видаляється (на нього посилаються замовлення
+     * й облік складу); сканування в пакуванні не вважає його штрихкод «спільним» (catalogVariantLive). null — наявний
+     * (або невідомо: демо, дані з інших джерел).
+     */
+    removedAt: timestamp("removed_at", { withTimezone: true }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -229,9 +264,53 @@ export const productVariants = pgTable(
   ],
 );
 
+/**
+ * Етап 5: колекції Shopify (ручні й автоматичні — обидва види повертає запит `collections`, read_products).
+ * Видалена в Shopify колекція не видаляється з бази (deleted_at): шаблони комплектації, що на неї посилаються, не
+ * змінюють ціль мовчки — сторінка «Комплектація» показує, що колекцію видалено. Демо-колекції — без shopify_collection_id.
+ */
+export const collections = pgTable(
+  "collections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    shopifyCollectionId: text("shopify_collection_id").unique(),
+    title: text("title").notNull(),
+    handle: text("handle"),
+    shopifyUpdatedAt: timestamp("shopify_updated_at", { withTimezone: true }),
+    /** Коли колекцію востаннє бачили в повному списку Shopify (для виявлення видалених без webhook). */
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index("collections_title_idx").on(t.title)],
+);
+
+/** Етап 5: членство товарів у колекціях (з Product.collections; змінюється лише синхронізацією або демо-даними). */
+export const productCollections = pgTable(
+  "product_collections",
+  {
+    productId: uuid("product_id")
+      .notNull()
+      .references(() => products.id, { onDelete: "cascade" }),
+    collectionId: uuid("collection_id")
+      .notNull()
+      .references(() => collections.id, { onDelete: "cascade" }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.productId, t.collectionId], name: "product_collections_pk" }),
+    index("product_collections_collection_idx").on(t.collectionId),
+  ],
+);
+
 // ---------------------------------------------------------------------------
 // Замовлення
 // ---------------------------------------------------------------------------
+
+/** Етап 5: пріоритет відправлення (orders.priority). */
+export const ORDER_PRIORITIES = { normal: 0, high: 1, urgent: 2 } as const;
+export type OrderPriority = (typeof ORDER_PRIORITIES)[keyof typeof ORDER_PRIORITIES];
 
 export const orders = pgTable(
   "orders",
@@ -269,6 +348,50 @@ export const orders = pgTable(
     lastValidatedAt: timestamp("last_validated_at", { withTimezone: true }),
     placedAt: timestamp("placed_at", { withTimezone: true }).notNull().defaultNow(),
     cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+    // --- Етап 5: підготовка замовлень ---
+    /** Пріоритет відправлення: 0 — звичайний, 1 — високий, 2 — терміновий (ORDER_PRIORITIES). */
+    priority: smallint("priority").notNull().default(0),
+    /**
+     * Ручне коригування посилки (вага, г; габарити, мм; коробка). Якщо задано — має пріоритет над розрахунком
+     * під час створення накладної (buildShipmentRequest). null — розрахунок за товарами й упаковкою.
+     */
+    parcelWeightGrams: integer("parcel_weight_grams"),
+    parcelLengthMm: integer("parcel_length_mm"),
+    parcelWidthMm: integer("parcel_width_mm"),
+    parcelHeightMm: integer("parcel_height_mm"),
+    parcelBoxMaterialId: uuid("parcel_box_material_id").references((): AnyPgColumn => packagingMaterials.id),
+    /**
+     * Етап 5: Shopify повідомив зміну позицій (кількість/видалення/заміна), яку НЕ застосовано — замовлення мало активну
+     * накладну або статус уже не дозволяв змін (modules/shopify-sync/sync.server.ts). Поки значення задане (і замовлення
+     * не передане/не скасоване), позиції застосунку застарілі: створення/переоформлення накладної й ручна передача
+     * перевізнику заблоковані (modules/shopify-sync/pending-lines.server.ts). Скасування накладної ставить у чергу
+     * повторне читання замовлення з Shopify; синхронізація, що застосувала позиції (або побачила, що вони збігаються),
+     * очищає значення. null — розбіжностей позицій із Shopify немає.
+     */
+    shopifyLinesPendingAt: timestamp("shopify_lines_pending_at", { withTimezone: true }),
+    /**
+     * Етап 5: чи виконав Shopify одиниці позицій, що потребують доставки (LineItem.requiresShipping; виконання —
+     * LineItem.unfulfilledQuantity < quantity), — уточнює часткове виконання (partially_fulfilled):
+     * false — виконано лише позиції без доставки (цифрові подарункові картки, цифрові товари, які Shopify виконує
+     * автоматично), фізичні товари не відправлено → це не «виконано поза застосунком», накладна застосунку дозволена;
+     * true — виконано (або могло бути виконано) одиниці фізичних позицій; null — невідомо (дані до етапу 5 / відповідь
+     * без цих полів) → як true (безпечніше). domain/order-status.ts isFulfilledInShopify.
+     */
+    shopifyShippableFulfilled: boolean("shopify_shippable_fulfilled"),
+    /**
+     * Етап 5: коли застосунок востаннє ставив у чергу повторне читання замовлення з Shopify через застарілий статус
+     * виконання (передано перевізнику, а в Shopify ще не «виконано» — webhook міг загубитися;
+     * modules/shopify-sync/fulfillment-refresh.server.ts). Обмежує повтори: не частіше ніж раз на інтервал. null — не ставив.
+     */
+    shopifyFulfillmentCheckedAt: timestamp("shopify_fulfillment_checked_at", { withTimezone: true }),
+    /**
+     * Етап 5: контакти й адреса доставки, якими їх востаннє повідомив Shopify (поле CONTACT_FIELDS у
+     * modules/shopify-sync/sync.server.ts → значення після mapOrder). Синхронізація визначає «змінено в Shopify»,
+     * порівнюючи нові дані Shopify з цим знімком, а не з полями замовлення: ті можуть містити зміни застосунку
+     * (автовиправлення, прийняті пропозиції, підтверджені правки, ще не передані або не прийняті Shopify), які Shopify
+     * не змінював. null — замовлення до міграції 0011 (тоді — за історією змін order_changes).
+     */
+    shopifyContactSnapshot: jsonb("shopify_contact_snapshot").$type<Record<string, string | null>>(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -276,6 +399,15 @@ export const orders = pgTable(
     index("orders_status_idx").on(t.status),
     index("orders_country_idx").on(t.shipCountryCode),
     index("orders_placed_at_idx").on(t.placedAt),
+    index("orders_packing_queue_idx").on(t.status, t.priority, t.placedAt),
+    check("orders_priority_chk", sql`${t.priority} between 0 and 2`),
+    check(
+      "orders_parcel_override_chk",
+      sql`(${t.parcelWeightGrams} is null or ${t.parcelWeightGrams} > 0)
+        and (${t.parcelLengthMm} is null or ${t.parcelLengthMm} > 0)
+        and (${t.parcelWidthMm} is null or ${t.parcelWidthMm} > 0)
+        and (${t.parcelHeightMm} is null or ${t.parcelHeightMm} > 0)`,
+    ),
   ],
 );
 
@@ -291,8 +423,30 @@ export const orderLineItems = pgTable(
     title: text("title").notNull(),
     variantTitle: text("variant_title"),
     sku: text("sku"),
+    /** Замовлена кількість (Shopify LineItem.quantity — разом із поверненими й видаленими одиницями). */
     quantity: integer("quantity").notNull(),
+    /**
+     * Етап 5: кількість до відправлення (Shopify LineItem.currentQuantity — без повернених і видалених одиниць).
+     * Саме її резервує й списує склад (effectiveLineQuantity у modules/inventory/quantities.ts). null — як quantity
+     * (демо-замовлення й позиції, збережені до етапу 5).
+     */
+    currentQuantity: integer("current_quantity"),
+    /**
+     * Етап 5: коли позицію додано в Shopify — LineItem.createdAt (2026-10); для позиції, уперше побаченої під час
+     * ОНОВЛЕННЯ вже збереженого замовлення без цього поля, — updatedAt замовлення в Shopify цієї синхронізації (верхня
+     * межа). Порівнюється з часом знімка складу: позиція, додана редагуванням ПІСЛЯ знімка, — новий продаж (без
+     * корекції opening_line), навіть якщо саме замовлення створене до знімка (modules/inventory/reservations.server.ts).
+     * null — невідомо (демо, позиції до етапу 5): діє правило за orders.placed_at.
+     */
+    shopifyAddedAt: timestamp("shopify_added_at", { withTimezone: true }),
     unitPrice: money("unit_price").notNull(),
+    /**
+     * Етап 5: ціна одиниці після ВСІХ знижок — Shopify LineItem.discountedUnitPriceAfterAllDiscountsSet (shopMoney, та сама
+     * валюта, що й unit_price): «The approximate unit price … includes discounts applied to refunded and removed
+     * quantities» (2026-10). Митна вартість одиниці (modules/customs/invoice.ts). null — позиції до етапу 5 / демо:
+     * вартість розподіляється з subtotal замовлення, як раніше.
+     */
+    discountedUnitPrice: money("discounted_unit_price"),
     currency: char("currency", { length: 3 }).notNull(),
     imageUrl: text("image_url"),
     position: integer("position").notNull().default(0),
@@ -300,6 +454,9 @@ export const orderLineItems = pgTable(
   (t) => [
     index("order_line_items_order_idx").on(t.orderId),
     uniqueIndex("order_line_items_shopify_uq").on(t.orderId, t.shopifyLineItemId),
+    // Етап 5: резерви/аналітика продажів за варіантом.
+    index("order_line_items_variant_idx").on(t.variantId),
+    check("order_line_items_current_quantity_chk", sql`${t.currentQuantity} is null or ${t.currentQuantity} >= 0`),
   ],
 );
 
@@ -511,8 +668,22 @@ export const shopInstallations = pgTable("shop_installations", {
   installedAt: timestamp("installed_at", { withTimezone: true }).notNull().defaultNow(),
   uninstalledAt: timestamp("uninstalled_at", { withTimezone: true }),
   scopes: text("scopes"),
+  /** Остання ПОВНІСТЮ успішна реєстрація підписок на webhooks (modules/shopify-sync/webhook-subscriptions.server.ts). */
   webhooksRegisteredAt: timestamp("webhooks_registered_at", { withTimezone: true }),
+  /**
+   * Етап 5: теми webhooks, підписку на які Shopify підтвердив під час останньої реєстрації (через кому; показ на
+   * сторінці «Синхронізація Shopify»). null — встановлення до етапу 5 (теми не записувалися).
+   */
+  webhookTopics: text("webhook_topics"),
+  /**
+   * Етап 5: відбиток конфігурації підписок (теми, адреси, SHOPIFY_APP_URL) на момент останньої повністю успішної
+   * реєстрації. Відрізняється від поточного (нові теми після оновлення, null — до етапу 5) → фонове завдання
+   * перереєстровує підписки з офлайн-сесією, без повторної авторизації власника.
+   */
+  webhooksConfigKey: text("webhooks_config_key"),
   productsSyncedAt: timestamp("products_synced_at", { withTimezone: true }),
+  /** Етап 5: остання завершена повна синхронізація колекцій і членства товарів (collections.server.ts). */
+  collectionsSyncedAt: timestamp("collections_synced_at", { withTimezone: true }),
   ordersSyncedAt: timestamp("orders_synced_at", { withTimezone: true }),
   /** Стан імпорту старих замовлень: { status, since, imported, skipped, startedAt, finishedAt, error }. */
   importState: jsonb("import_state").$type<Record<string, unknown>>(),
@@ -573,5 +744,528 @@ export const jobs = pgTable(
   (t) => [
     index("jobs_pick_idx").on(t.status, t.runAt),
     uniqueIndex("jobs_queued_dedupe_uq").on(t.dedupeKey).where(sql`${t.status} = 'queued'`),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Етап 5: склад, виробництво, упаковка, підготовка замовлень
+// (docs/stage5-design.md). Журнал руху (inventory_movements) — єдине джерело обліку; баланси змінюються
+// лише разом зі вставкою руху (modules/inventory/ledger.server.ts). Кількості — цілі числа; гроші — numeric(14,2)
+// + валюта; собівартість — лише власник (finance.view).
+// ---------------------------------------------------------------------------
+
+export const STOCK_ITEM_KINDS = ["product", "material"] as const;
+export type StockItemKind = (typeof STOCK_ITEM_KINDS)[number];
+
+export const PACKAGING_MATERIAL_KINDS = ["box", "mailer", "sticker", "instruction", "card", "bolt", "filler", "tape", "other"] as const;
+export type PackagingMaterialKind = (typeof PACKAGING_MATERIAL_KINDS)[number];
+
+export const MATERIAL_UNITS = ["pcs", "m", "kg"] as const;
+export type MaterialUnit = (typeof MATERIAL_UNITS)[number];
+
+export const SHOPIFY_SYNC_STATES = ["none", "pending", "pushed", "failed", "skipped"] as const;
+export type ShopifySyncState = (typeof SHOPIFY_SYNC_STATES)[number];
+
+export const RESERVATION_STATUSES = ["reserved", "consumed", "released", "partial"] as const;
+export type ReservationStatus = (typeof RESERVATION_STATUSES)[number];
+
+export const STOCK_ALERT_KINDS = ["low_stock", "out_of_stock", "negative_on_hand", "oversold"] as const;
+export type StockAlertKind = (typeof STOCK_ALERT_KINDS)[number];
+
+export const INVENTORY_CONFLICT_STATUSES = ["open", "accepted_shopify", "pushed_app", "dismissed"] as const;
+export type InventoryConflictStatus = (typeof INVENTORY_CONFLICT_STATUSES)[number];
+
+export const KIT_APPLIES_TO = ["all", "products", "collections"] as const;
+export type KitAppliesTo = (typeof KIT_APPLIES_TO)[number];
+export const KIT_LINE_PER = ["order", "item"] as const;
+
+export const PRODUCTION_BATCH_STATUSES = ["planned", "in_production", "partially_received", "received", "closed", "cancelled"] as const;
+export type ProductionBatchStatus = (typeof PRODUCTION_BATCH_STATUSES)[number];
+
+export const PACKING_STATUSES = ["queued", "in_progress", "packed", "cancelled"] as const;
+export type PackingStatus = (typeof PACKING_STATUSES)[number];
+
+/** SQL-список значень для CHECK: `in ('a', 'b')` (значення — константи коду, не ввід користувача). */
+const inList = (values: readonly string[]) => sql.raw(`(${values.map((v) => `'${v.replace(/'/g, "''")}'`).join(", ")})`);
+
+/** Пакувальні матеріали й комплектуючі: коробки (внутрішні габарити, макс. вага, тара), наклейки, інструкції, болти… */
+export const packagingMaterials = pgTable(
+  "packaging_materials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    code: text("code").notNull().unique(),
+    name: text("name").notNull(),
+    kind: text("kind", { enum: PACKAGING_MATERIAL_KINDS }).notNull(),
+    unit: text("unit", { enum: MATERIAL_UNITS }).notNull().default("pcs"),
+    innerLengthMm: integer("inner_length_mm"),
+    innerWidthMm: integer("inner_width_mm"),
+    innerHeightMm: integer("inner_height_mm"),
+    maxWeightGrams: integer("max_weight_grams"),
+    tareWeightGrams: integer("tare_weight_grams"),
+    /** Собівартість одиниці — лише власник (finance.view). */
+    unitCost: money("unit_cost"),
+    costCurrency: char("cost_currency", { length: 3 }),
+    active: boolean("active").notNull().default(true),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index("packaging_materials_kind_idx").on(t.kind, t.active),
+    check("packaging_materials_kind_chk", sql`${t.kind} in ${inList(PACKAGING_MATERIAL_KINDS)}`),
+    check("packaging_materials_unit_chk", sql`${t.unit} in ${inList(MATERIAL_UNITS)}`),
+    check(
+      "packaging_materials_dims_chk",
+      sql`(${t.innerLengthMm} is null or ${t.innerLengthMm} > 0)
+        and (${t.innerWidthMm} is null or ${t.innerWidthMm} > 0)
+        and (${t.innerHeightMm} is null or ${t.innerHeightMm} > 0)
+        and (${t.maxWeightGrams} is null or ${t.maxWeightGrams} > 0)
+        and (${t.tareWeightGrams} is null or ${t.tareWeightGrams} >= 0)`,
+    ),
+    check(
+      "packaging_materials_cost_chk",
+      sql`${t.unitCost} is null or (${t.unitCost} >= 0 and ${t.costCurrency} is not null)`,
+    ),
+  ],
+);
+
+/** Позиція обліку: варіант товару АБО пакувальний матеріал (рівно одне, відповідно до kind). */
+export const stockItems = pgTable(
+  "stock_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind", { enum: STOCK_ITEM_KINDS }).notNull(),
+    variantId: uuid("variant_id")
+      .unique()
+      .references(() => productVariants.id),
+    materialId: uuid("material_id")
+      .unique()
+      .references(() => packagingMaterials.id),
+    /** Поріг «мало на складі» для цієї позиції; null — налаштування warehouse.lowStockThreshold. */
+    lowStockThreshold: integer("low_stock_threshold"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    check(
+      "stock_items_kind_chk",
+      sql`(${t.kind} = 'product' and ${t.variantId} is not null and ${t.materialId} is null)
+        or (${t.kind} = 'material' and ${t.materialId} is not null and ${t.variantId} is null)`,
+    ),
+    check("stock_items_threshold_chk", sql`${t.lowStockThreshold} is null or ${t.lowStockThreshold} >= 0`),
+  ],
+);
+
+/**
+ * Поточні залишки за кошиками. Змінюються ЛИШЕ разом зі вставкою руху (applyMovements, блокування FOR UPDATE).
+ * Доступно для продажу = on_hand − reserved. on_hand < 0 — лише після фізичних подій (передача перевізнику,
+ * зміна в Shopify), з попередженням negative_on_hand.
+ */
+export const inventoryBalances = pgTable(
+  "inventory_balances",
+  {
+    warehouseId: uuid("warehouse_id")
+      .notNull()
+      .references(() => warehouses.id),
+    stockItemId: uuid("stock_item_id")
+      .notNull()
+      .references(() => stockItems.id),
+    onHand: integer("on_hand").notNull().default(0),
+    reserved: integer("reserved").notNull().default(0),
+    defective: integer("defective").notNull().default(0),
+    inProduction: integer("in_production").notNull().default(0),
+    /** Збільшується з кожною зміною (оптимістичне блокування для форм). */
+    version: integer("version").notNull().default(0),
+    /**
+     * Етап 5: товар «відкрито» — облік пов'язано зі знімком Shopify (initializeInventory). Лише відкриті позиції
+     * резервуються/списуються під замовлення й надсилаються в Shopify; рухи до відкриття — внутрішні («skipped»).
+     * null — не відкрито (матеріали не відкриваються: Shopify їх не веде).
+     */
+    openedAt: timestamp("opened_at", { withTimezone: true }),
+    /**
+     * Час знімка Shopify, з якого відкрито позицію (product_variants.inventory_synced_at або момент відкриття).
+     * Замовлення, створене раніше, уже враховане знімком: при першому резерві on_hand коригується на його кількість.
+     */
+    openingSnapshotAt: timestamp("opening_snapshot_at", { withTimezone: true }),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.warehouseId, t.stockItemId], name: "inventory_balances_pk" }),
+    index("inventory_balances_item_idx").on(t.stockItemId),
+    check("inventory_balances_reserved_chk", sql`${t.reserved} >= 0`),
+    check("inventory_balances_defective_chk", sql`${t.defective} >= 0`),
+    check("inventory_balances_in_production_chk", sql`${t.inProduction} >= 0`),
+    check("inventory_balances_opened_chk", sql`(${t.openedAt} is null) = (${t.openingSnapshotAt} is null)`),
+  ],
+);
+
+/** Партії виробництва. Номер — PB-<рік>-<0001>. Додаткові витрати — лише власник. */
+export const productionBatches = pgTable(
+  "production_batches",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    number: text("number").notNull().unique(),
+    title: text("title").notNull(),
+    status: text("status", { enum: PRODUCTION_BATCH_STATUSES }).notNull().default("planned"),
+    plannedReadyDate: date("planned_ready_date", { mode: "string" }),
+    manufacturer: text("manufacturer"),
+    notes: text("notes"),
+    extraCost: money("extra_cost"),
+    costCurrency: char("cost_currency", { length: 3 }),
+    createdBy: text("created_by").notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    version: integer("version").notNull().default(1),
+  },
+  (t) => [
+    index("production_batches_status_idx").on(t.status, t.plannedReadyDate),
+    check("production_batches_status_chk", sql`${t.status} in ${inList(PRODUCTION_BATCH_STATUSES)}`),
+    check(
+      "production_batches_cost_chk",
+      sql`${t.extraCost} is null or (${t.extraCost} >= 0 and ${t.costCurrency} is not null)`,
+    ),
+  ],
+);
+
+export const productionBatchLines = pgTable(
+  "production_batch_lines",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    batchId: uuid("batch_id")
+      .notNull()
+      .references(() => productionBatches.id),
+    variantId: uuid("variant_id")
+      .notNull()
+      .references(() => productVariants.id),
+    quantityOrdered: integer("quantity_ordered").notNull(),
+    quantityReceived: integer("quantity_received").notNull().default(0),
+    quantityDefective: integer("quantity_defective").notNull().default(0),
+    /** Собівартість одиниці — лише власник (finance.view). */
+    unitCost: money("unit_cost"),
+    costCurrency: char("cost_currency", { length: 3 }),
+    version: integer("version").notNull().default(1),
+  },
+  (t) => [
+    index("production_batch_lines_batch_idx").on(t.batchId),
+    index("production_batch_lines_variant_idx").on(t.variantId),
+    check("production_batch_lines_ordered_chk", sql`${t.quantityOrdered} > 0`),
+    check("production_batch_lines_received_chk", sql`${t.quantityReceived} >= 0`),
+    check("production_batch_lines_defective_chk", sql`${t.quantityDefective} >= 0`),
+    check(
+      "production_batch_lines_cost_chk",
+      sql`${t.unitCost} is null or (${t.unitCost} >= 0 and ${t.costCurrency} is not null)`,
+    ),
+  ],
+);
+
+/** Надходження з виробництва (часткові). idempotency_key — захист від подвійного натискання/повтору. */
+export const productionReceipts = pgTable(
+  "production_receipts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    batchId: uuid("batch_id")
+      .notNull()
+      .references(() => productionBatches.id),
+    idempotencyKey: text("idempotency_key").notNull().unique(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    receivedBy: text("received_by").notNull(),
+    receivedByName: text("received_by_name").notNull(),
+    note: text("note"),
+  },
+  (t) => [index("production_receipts_batch_idx").on(t.batchId, t.receivedAt)],
+);
+
+export const productionReceiptLines = pgTable(
+  "production_receipt_lines",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    receiptId: uuid("receipt_id")
+      .notNull()
+      .references(() => productionReceipts.id),
+    batchLineId: uuid("batch_line_id")
+      .notNull()
+      .references(() => productionBatchLines.id),
+    goodQty: integer("good_qty").notNull().default(0),
+    defectiveQty: integer("defective_qty").notNull().default(0),
+  },
+  (t) => [
+    index("production_receipt_lines_receipt_idx").on(t.receiptId),
+    index("production_receipt_lines_batch_line_idx").on(t.batchLineId),
+    check("production_receipt_lines_good_chk", sql`${t.goodQty} >= 0`),
+    check("production_receipt_lines_defective_chk", sql`${t.defectiveQty} >= 0`),
+  ],
+);
+
+/**
+ * Пакування замовлення. Одне незавершене/запаковане пакування на замовлення (частковий унікальний індекс);
+ * після скасування — нове покоління. checklist — { [lineItemId]: packedQty }.
+ */
+export const orderPacking = pgTable(
+  "order_packing",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orderId: uuid("order_id")
+      .notNull()
+      .references(() => orders.id),
+    generation: integer("generation").notNull().default(1),
+    status: text("status", { enum: PACKING_STATUSES }).notNull().default("queued"),
+    checklist: jsonb("checklist").$type<Record<string, number>>().notNull().default({}),
+    boxMaterialId: uuid("box_material_id").references(() => packagingMaterials.id),
+    parcelWeightGrams: integer("parcel_weight_grams"),
+    parcelLengthMm: integer("parcel_length_mm"),
+    parcelWidthMm: integer("parcel_width_mm"),
+    parcelHeightMm: integer("parcel_height_mm"),
+    startedBy: text("started_by"),
+    startedByName: text("started_by_name"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    packedBy: text("packed_by"),
+    packedByName: text("packed_by_name"),
+    packedAt: timestamp("packed_at", { withTimezone: true }),
+    version: integer("version").notNull().default(1),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("order_packing_one_active_uq")
+      .on(t.orderId)
+      .where(sql`${t.status} in ('queued', 'in_progress', 'packed')`),
+    uniqueIndex("order_packing_generation_uq").on(t.orderId, t.generation),
+    index("order_packing_status_idx").on(t.status, t.updatedAt),
+    check("order_packing_status_chk", sql`${t.status} in ${inList(PACKING_STATUSES)}`),
+    check(
+      "order_packing_parcel_chk",
+      sql`(${t.parcelWeightGrams} is null or ${t.parcelWeightGrams} > 0)
+        and (${t.parcelLengthMm} is null or ${t.parcelLengthMm} > 0)
+        and (${t.parcelWidthMm} is null or ${t.parcelWidthMm} > 0)
+        and (${t.parcelHeightMm} is null or ${t.parcelHeightMm} > 0)`,
+    ),
+  ],
+);
+
+/**
+ * Журнал руху залишків (append-only). Кожен рядок — подія з дельтами по кошиках і УНІКАЛЬНИМ ключем
+ * ідемпотентності: повтор тієї самої події не створює другого руху (немає подвійного списання/резервування).
+ * note — без персональних даних; unit_cost — лише власник. type — MovementType (modules/inventory/ledger.server.ts).
+ */
+export const inventoryMovements = pgTable(
+  "inventory_movements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    warehouseId: uuid("warehouse_id")
+      .notNull()
+      .references(() => warehouses.id),
+    stockItemId: uuid("stock_item_id")
+      .notNull()
+      .references(() => stockItems.id),
+    type: text("type").notNull(),
+    onHandDelta: integer("on_hand_delta").notNull().default(0),
+    reservedDelta: integer("reserved_delta").notNull().default(0),
+    defectiveDelta: integer("defective_delta").notNull().default(0),
+    inProductionDelta: integer("in_production_delta").notNull().default(0),
+    idempotencyKey: text("idempotency_key").notNull().unique(),
+    orderId: uuid("order_id").references(() => orders.id),
+    /** Без зовнішнього ключа: позиції замовлення можуть бути видалені синхронізацією Shopify. */
+    orderLineItemId: uuid("order_line_item_id"),
+    productionBatchId: uuid("production_batch_id").references(() => productionBatches.id),
+    packingId: uuid("packing_id").references(() => orderPacking.id),
+    unitCost: money("unit_cost"),
+    costCurrency: char("cost_currency", { length: 3 }),
+    /** Короткий код причини (напр. stocktake, damaged, shopify_snapshot). */
+    reason: text("reason"),
+    note: text("note"),
+    actorId: text("actor_id").notNull(),
+    /** Ім'я виконавця на момент дії (знімок для історії). */
+    actorName: text("actor_name").notNull(),
+    shopifySyncState: text("shopify_sync_state", { enum: SHOPIFY_SYNC_STATES }).notNull().default("none"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("inventory_movements_item_idx").on(t.stockItemId, t.createdAt),
+    index("inventory_movements_created_idx").on(t.createdAt),
+    index("inventory_movements_order_idx").on(t.orderId),
+    index("inventory_movements_batch_idx").on(t.productionBatchId),
+    index("inventory_movements_packing_idx").on(t.packingId),
+    index("inventory_movements_shopify_pending_idx")
+      .on(t.createdAt)
+      .where(sql`${t.shopifySyncState} = 'pending'`),
+    check("inventory_movements_sync_state_chk", sql`${t.shopifySyncState} in ${inList(SHOPIFY_SYNC_STATES)}`),
+    check(
+      "inventory_movements_cost_chk",
+      sql`${t.unitCost} is null or (${t.unitCost} >= 0 and ${t.costCurrency} is not null)`,
+    ),
+  ],
+);
+
+/**
+ * Резерв під позицію оплаченого замовлення (стан, який веде syncOrderReservations). seq — версія для ключів
+ * ідемпотентності reserve:/release:<lineItemId>:<seq>. Позиція без варіанта не резервується.
+ */
+export const stockReservations = pgTable(
+  "stock_reservations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** Без зовнішнього ключа: позицію можуть видалити в Shopify — резерв тоді знімається. */
+    orderLineItemId: uuid("order_line_item_id").notNull().unique(),
+    orderId: uuid("order_id")
+      .notNull()
+      .references(() => orders.id),
+    stockItemId: uuid("stock_item_id")
+      .notNull()
+      .references(() => stockItems.id),
+    warehouseId: uuid("warehouse_id")
+      .notNull()
+      .references(() => warehouses.id),
+    reservedQty: integer("reserved_qty").notNull().default(0),
+    consumedQty: integer("consumed_qty").notNull().default(0),
+    status: text("status", { enum: RESERVATION_STATUSES }).notNull().default("reserved"),
+    seq: integer("seq").notNull().default(0),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index("stock_reservations_order_idx").on(t.orderId),
+    index("stock_reservations_item_idx").on(t.stockItemId, t.status),
+    check("stock_reservations_status_chk", sql`${t.status} in ${inList(RESERVATION_STATUSES)}`),
+    check("stock_reservations_qty_chk", sql`${t.reservedQty} >= 0 and ${t.consumedQty} >= 0`),
+  ],
+);
+
+/** Попередження складу (джерело для сповіщень/Telegram). Одне відкрите на (позиція, склад, вид). */
+export const stockAlerts = pgTable(
+  "stock_alerts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    stockItemId: uuid("stock_item_id")
+      .notNull()
+      .references(() => stockItems.id),
+    warehouseId: uuid("warehouse_id")
+      .notNull()
+      .references(() => warehouses.id),
+    kind: text("kind", { enum: STOCK_ALERT_KINDS }).notNull(),
+    status: text("status", { enum: ["open", "resolved"] }).notNull().default("open"),
+    details: jsonb("details").$type<Record<string, number | string | null>>().notNull().default({}),
+    createdAt: createdAt(),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("stock_alerts_open_uq")
+      .on(t.stockItemId, t.warehouseId, t.kind)
+      .where(sql`${t.status} = 'open'`),
+    index("stock_alerts_status_idx").on(t.status, t.createdAt),
+    check("stock_alerts_kind_chk", sql`${t.kind} in ${inList(STOCK_ALERT_KINDS)}`),
+    check("stock_alerts_status_chk", sql`${t.status} in ('open', 'resolved')`),
+  ],
+);
+
+/**
+ * Розбіжність між складом застосунку й Shopify (зміна, зроблена в Shopify не застосунком). Не перезаписується
+ * мовчки: власник обирає «прийняти Shopify» (рух shopify_external) або «надіслати значення складу».
+ */
+export const inventoryConflicts = pgTable(
+  "inventory_conflicts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    stockItemId: uuid("stock_item_id")
+      .notNull()
+      .references(() => stockItems.id),
+    warehouseId: uuid("warehouse_id")
+      .notNull()
+      .references(() => warehouses.id),
+    source: text("source", { enum: ["shopify"] }).notNull().default("shopify"),
+    appOnHand: integer("app_on_hand").notNull(),
+    shopifyOnHand: integer("shopify_on_hand").notNull(),
+    shopifyAvailable: integer("shopify_available"),
+    /** Очікувана різниця, пояснена відомими причинами (напр. неоплачені замовлення в Shopify). */
+    expectedDiff: integer("expected_diff").notNull().default(0),
+    status: text("status", { enum: INVENTORY_CONFLICT_STATUSES }).notNull().default("open"),
+    details: jsonb("details").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: createdAt(),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    resolvedBy: text("resolved_by"),
+  },
+  (t) => [
+    uniqueIndex("inventory_conflicts_open_uq")
+      .on(t.stockItemId, t.warehouseId)
+      .where(sql`${t.status} = 'open'`),
+    index("inventory_conflicts_status_idx").on(t.status, t.createdAt),
+    check("inventory_conflicts_status_chk", sql`${t.status} in ${inList(INVENTORY_CONFLICT_STATUSES)}`),
+    check("inventory_conflicts_source_chk", sql`${t.source} = 'shopify'`),
+  ],
+);
+
+/** Шаблони комплектації: що додається до замовлення (per=order) або до кожної одиниці товару (per=item). */
+export const kitTemplates = pgTable(
+  "kit_templates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    /**
+     * all — усі товари; products — товари з kit_template_products; collections — товари колекцій з
+     * kit_template_collections (членство з Shopify, нові товари колекції — автоматично). Правила — kit-resolution.ts.
+     */
+    appliesTo: text("applies_to", { enum: KIT_APPLIES_TO }).notNull().default("all"),
+    /**
+     * Необов'язковий фільтр за атрибутами варіанта (product_variants.model / color) для будь-якої цілі: порожній —
+     * без фільтра; інакше рахуються лише одиниці варіантів із моделлю (кольором) зі списку.
+     */
+    variantModels: text("variant_models").array().notNull().default(sql`'{}'::text[]`),
+    variantColors: text("variant_colors").array().notNull().default(sql`'{}'::text[]`),
+    /** Більший пріоритет показується пакувальнику першим (застосовуються всі шаблони, що підходять). */
+    priority: integer("priority").notNull().default(0),
+    active: boolean("active").notNull().default(true),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [check("kit_templates_applies_to_chk", sql`${t.appliesTo} in ${inList(KIT_APPLIES_TO)}`)],
+);
+
+export const kitTemplateLines = pgTable(
+  "kit_template_lines",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    templateId: uuid("template_id")
+      .notNull()
+      .references(() => kitTemplates.id, { onDelete: "cascade" }),
+    materialId: uuid("material_id")
+      .notNull()
+      .references(() => packagingMaterials.id),
+    quantity: integer("quantity").notNull(),
+    per: text("per", { enum: KIT_LINE_PER }).notNull().default("order"),
+  },
+  (t) => [
+    uniqueIndex("kit_template_lines_uq").on(t.templateId, t.materialId, t.per),
+    check("kit_template_lines_quantity_chk", sql`${t.quantity} > 0`),
+    check("kit_template_lines_per_chk", sql`${t.per} in ${inList(KIT_LINE_PER)}`),
+  ],
+);
+
+export const kitTemplateProducts = pgTable(
+  "kit_template_products",
+  {
+    templateId: uuid("template_id")
+      .notNull()
+      .references(() => kitTemplates.id, { onDelete: "cascade" }),
+    productId: uuid("product_id")
+      .notNull()
+      .references(() => products.id),
+  },
+  (t) => [
+    primaryKey({ columns: [t.templateId, t.productId], name: "kit_template_products_pk" }),
+    index("kit_template_products_product_idx").on(t.productId),
+  ],
+);
+
+/** Етап 5: колекції шаблону (applies_to = collections). Колекцію не видаляють, лише позначають deleted_at. */
+export const kitTemplateCollections = pgTable(
+  "kit_template_collections",
+  {
+    templateId: uuid("template_id")
+      .notNull()
+      .references(() => kitTemplates.id, { onDelete: "cascade" }),
+    collectionId: uuid("collection_id")
+      .notNull()
+      .references(() => collections.id),
+  },
+  (t) => [
+    primaryKey({ columns: [t.templateId, t.collectionId], name: "kit_template_collections_pk" }),
+    index("kit_template_collections_collection_idx").on(t.collectionId),
   ],
 );

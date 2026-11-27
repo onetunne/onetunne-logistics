@@ -56,7 +56,8 @@ describe("waybills loader", () => {
     expect(carrier).toMatchObject({ code: "test", mode: "test", isDefault: true, configured: true });
     const available = carrier!.capabilities.filter((c) => c.available).map((c) => c.key);
     expect(available).toContain("createShipment");
-    expect(available).not.toContain("documents");
+    // Етап 5: тестовий перевізник видає зразок етикетки з позначкою TEST (перевірка друку етикеток у демо).
+    expect(available).toContain("documents");
   });
 });
 

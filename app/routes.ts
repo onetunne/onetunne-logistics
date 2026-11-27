@@ -20,6 +20,23 @@ const pages = (prefix: "demo" | "app") => [
   route("settings", "pages/settings.tsx", { id: `${prefix}-settings` }),
   route("shopify", "pages/shopify-sync.tsx", { id: `${prefix}-shopify` }),
   route("staff", "pages/staff.tsx", { id: `${prefix}-staff` }),
+  // Етап 5: склад, виробництво, комплектація/пакування.
+  route("warehouse", "pages/warehouse.tsx", { id: `${prefix}-warehouse` }),
+  route("warehouse/movements", "pages/warehouse-movements.tsx", { id: `${prefix}-warehouse-movements` }),
+  route("warehouse/items/:stockItemId", "pages/warehouse-item.tsx", { id: `${prefix}-warehouse-item` }),
+  route("production", "pages/production.tsx", { id: `${prefix}-production` }),
+  route("production/:batchId", "pages/production-batch.tsx", { id: `${prefix}-production-batch` }),
+  route("picking", "pages/picking.tsx", { id: `${prefix}-picking` }),
+  route("picking/print", "pages/print-batch.tsx", { id: `${prefix}-picking-print` }),
+  route("picking/labels", "pages/labels-batch.tsx", { id: `${prefix}-picking-labels` }),
+  route("picking/handover", "pages/handover-list.tsx", { id: `${prefix}-picking-handover` }),
+  route("picking/pick-list", "pages/pick-list.tsx", { id: `${prefix}-picking-pick-list` }),
+  route("picking/:orderId", "pages/packing-order.tsx", { id: `${prefix}-packing-order` }),
+  route("warehouse/materials", "pages/materials.tsx", { id: `${prefix}-materials` }),
+  route("warehouse/kits", "pages/kits.tsx", { id: `${prefix}-kits` }),
+  route("warehouse/shopify", "pages/inventory-sync.tsx", { id: `${prefix}-inventory-sync` }),
+  route("warehouse/analytics", "pages/warehouse-analytics.tsx", { id: `${prefix}-warehouse-analytics` }),
+  route("warehouse/export", "pages/warehouse-export.tsx", { id: `${prefix}-warehouse-export` }),
   route(":section", "pages/planned.tsx", { id: `${prefix}-planned` }),
 ];
 

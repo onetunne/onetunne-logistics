@@ -4,6 +4,7 @@ import {
   buildCountryRuleMap,
   DEFAULT_COUNTRY_RULES,
   ISSUE_CODES,
+  issueCategory,
   issueFingerprint,
   validateOrder,
   type CountryRule,
@@ -213,7 +214,11 @@ describe("validateOrder — issues", () => {
     );
 
     const validatorCodes = ISSUE_CODES.filter(
-      (c) => !c.startsWith("CARRIER_") && !c.startsWith("SHOPIFY_") && c !== "DELIVERY_PROBLEM", // відстеження, не валідатор
+      (c) =>
+        !c.startsWith("CARRIER_") &&
+        !c.startsWith("SHOPIFY_") &&
+        c !== "DELIVERY_PROBLEM" && // відстеження, не валідатор
+        issueCategory(c) !== "warehouse", // попередження пакування (модуль пакування), не валідатор
     );
     expect([...seen].sort()).toEqual([...validatorCodes].sort());
   });

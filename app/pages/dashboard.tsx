@@ -26,6 +26,12 @@ import {
   loadOrderRow,
 } from "~/modules/orders/repository.server";
 import { listOrderIdsByStatus, validateOrders } from "~/modules/orders/workflow.server";
+import { countPackingQueue } from "~/modules/packing/queue.server";
+import { countProductionDue } from "~/modules/production/queries.server";
+import { businessDate } from "~/modules/warehouse/dates";
+import { loadAlertSummary } from "~/modules/warehouse/stock.server";
+import { loadRecommendationSummary } from "~/modules/warehouse-analytics/queries.server";
+import { displayVariantTitle } from "~/modules/warehouse/constants";
 import { getSetting, loadSettings, updateSetting } from "~/modules/settings/settings.server";
 import { processPaidOrder } from "~/modules/shipments/waybill.server";
 import { getRequestContext } from "~/server/context.server";
@@ -54,19 +60,34 @@ type KpiStatus = (typeof KPI_STATUSES)[number];
 
 /** Скільки замовлень validateOrders() перевіряє за один запуск (див. slice у workflow.server.ts). */
 const BULK_VALIDATE_LIMIT = 200;
+/** «Готові найближчим часом» — партії з плановою готовністю в найближчі N днів. */
+const PRODUCTION_DUE_SOON_DAYS = 7;
+/** Порядок видів попереджень складу на головній (найважливіші спершу). */
+const ALERT_KIND_ORDER = ["negative_on_hand", "oversold", "out_of_stock", "low_stock"] as const;
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const ctx = await getRequestContext(request);
   const canViewOrders = can(ctx.actor, "orders.view");
   const canBulk = can(ctx.actor, "orders.bulk");
   const canViewProblems = can(ctx.actor, "problems.view");
+  // Етап 5 на головній — лише за дозволами: склад/виробництво — warehouse.view, черга пакування — packing.perform.
+  const canViewWarehouse = can(ctx.actor, "warehouse.view");
+  const canPack = can(ctx.actor, "packing.perform");
+  // Ризики закінчення й рекомендації нових партій — для того, хто планує виробництво (production.manage), з переглядом
+  // складу (посилання веде на «Аналітику складу»). Лише кількості позицій і одиниць, без собівартості.
+  const canPlanBatches = canViewWarehouse && can(ctx.actor, "production.manage");
+  const today = businessDate(ctx.now());
 
-  const [counts, problemCounts, issueRows, shipmentRows, automation] = await Promise.all([
+  const [counts, problemCounts, issueRows, shipmentRows, automation, stockAlerts, production, packingQueue, recommendations] = await Promise.all([
     canViewOrders || canBulk ? countOrdersByStatus(ctx.db) : null,
     canViewProblems ? countOpenIssues(ctx.db) : null,
     canViewProblems ? listIssues(ctx.db, { status: "open", limit: 5 }) : null,
     canViewOrders ? listShipments(ctx.db, { limit: 5 }) : null,
     getSetting(ctx.db, "automation"),
+    canViewWarehouse ? loadAlertSummary(ctx.db, 3) : null,
+    canViewWarehouse ? countProductionDue(ctx.db, today, PRODUCTION_DUE_SOON_DAYS) : null,
+    canPack ? countPackingQueue(ctx.db) : null,
+    canPlanBatches ? loadRecommendationSummary(ctx.db, today) : null,
   ]);
   const carrier = ctx.carriers.getDefault();
 
@@ -99,6 +120,29 @@ export async function loader({ request }: LoaderFunctionArgs) {
         createdAt: r.shipment.createdAt,
       })) ?? null,
     automation: { mode: automation.mode, globalPause: automation.globalPause },
+    warehouse:
+      stockAlerts || production || packingQueue !== null || recommendations
+        ? {
+            alerts: stockAlerts
+              ? {
+                  total: stockAlerts.total,
+                  byKind: stockAlerts.byKind,
+                  materials: stockAlerts.materials,
+                  top: stockAlerts.top.map((a) => ({
+                    id: a.id,
+                    kind: a.kind,
+                    stockItemId: a.stockItemId,
+                    title: a.title,
+                    variantTitle: displayVariantTitle(a.variantTitle),
+                    sku: a.sku,
+                  })),
+                }
+              : null,
+            production,
+            packingQueue,
+            recommendations,
+          }
+        : null,
     carrier: carrier
       ? { displayName: carrier.displayName, mode: carrier.mode, canCreateShipment: carrier.capabilities.createShipment }
       : null,
@@ -231,6 +275,175 @@ async function setGlobalPause(ctx: RequestContext, value: string): Promise<Actio
 }
 
 type LoaderData = Awaited<ReturnType<typeof loader>>;
+type WarehouseData = NonNullable<LoaderData["warehouse"]>;
+
+/**
+ * Сигнали етапу 5: попередження складу, черга пакування, партії до готовності, ризики закінчення й рекомендації нових
+ * партій (кожен блок — за дозволом).
+ */
+function WarehouseSignals({ data }: { data: WarehouseData }) {
+  const t = useT();
+  const locale = useLocale();
+  const href = useHref();
+  const n = (v: number) => formatNumber(v, locale);
+  const { alerts, production, packingQueue, recommendations } = data;
+  const cards = [alerts, packingQueue !== null, production, recommendations].filter(Boolean).length;
+  return (
+    <Stack gap={3} as="section">
+      <Text as="h2" variant="heading-md">
+        {t("dashboard.stage5.title")}
+      </Text>
+      <Grid columns={{ xs: 1, md: cards >= 4 ? 2 : Math.max(1, cards), lg: Math.max(1, cards) }} gap={3}>
+        {alerts ? (
+          <Card
+            title={t("dashboard.stage5.alerts.title")}
+            titleAs="h3"
+            actions={
+              <Button
+                to={href(alerts.byKind.out_of_stock > 0 ? "warehouse?status=out" : alerts.byKind.low_stock > 0 ? "warehouse?status=low" : "warehouse")}
+                variant="plain"
+                size="sm"
+              >
+                {t("dashboard.stage5.alerts.open")}
+              </Button>
+            }
+          >
+            <Stack gap={2}>
+              <Text as="p" variant="heading-lg" numeric tone={alerts.total > 0 ? "critical" : undefined}>
+                {n(alerts.total)}
+              </Text>
+              {alerts.total === 0 ? (
+                <Text variant="body-sm" tone="subdued">
+                  {/* «Немає» лише коли немає й попереджень матеріалів (вони показані нижче окремим посиланням). */}
+                  {t(alerts.materials > 0 ? "dashboard.stage5.alerts.noneProducts" : "dashboard.stage5.alerts.none")}
+                </Text>
+              ) : (
+                <KeyValueList
+                  items={ALERT_KIND_ORDER.filter((k) => alerts.byKind[k] > 0).map((k) => ({
+                    key: k,
+                    label: t(`stockAlert.${k}`),
+                    value: n(alerts.byKind[k]),
+                  }))}
+                />
+              )}
+              {alerts.top.length > 0 ? (
+                <Stack as="ul" gap={1}>
+                  {alerts.top.map((a) => (
+                    <li key={a.id}>
+                      <Link to={href(`warehouse/items/${a.stockItemId}`)}>
+                        {[a.title, a.variantTitle].filter(Boolean).join(" · ")}
+                      </Link>{" "}
+                      <Text as="span" variant="caption" tone="subdued">
+                        {t(`stockAlert.${a.kind}`)}
+                      </Text>
+                    </li>
+                  ))}
+                </Stack>
+              ) : null}
+              {alerts.materials > 0 ? (
+                <Text variant="body-sm" tone="subdued">
+                  <Link to={href("warehouse/materials")}>{t("dashboard.stage5.alerts.materials", { count: n(alerts.materials) })}</Link>
+                </Text>
+              ) : null}
+            </Stack>
+          </Card>
+        ) : null}
+        {packingQueue !== null ? (
+          <Card
+            title={t("dashboard.stage5.packing.title")}
+            titleAs="h3"
+            description={t("dashboard.stage5.packing.hint")}
+            actions={
+              <Button to={href("picking")} variant="plain" size="sm">
+                {t("dashboard.stage5.packing.open")}
+              </Button>
+            }
+          >
+            <Text as="p" variant="heading-lg" numeric>
+              {n(packingQueue)}
+            </Text>
+          </Card>
+        ) : null}
+        {production ? (
+          <Card
+            title={t("dashboard.stage5.production.title")}
+            titleAs="h3"
+            actions={
+              <Button to={href(production.overdue > 0 ? "production?overdue=1" : "production")} variant="plain" size="sm">
+                {t("dashboard.stage5.production.open")}
+              </Button>
+            }
+          >
+            <Stack gap={2}>
+              <Text as="p" variant="heading-lg" numeric>
+                {n(production.active)}
+              </Text>
+              <Text variant="body-sm" tone="subdued">
+                {t("dashboard.stage5.production.active")}
+              </Text>
+              {production.overdue > 0 ? (
+                <Text variant="body-sm" tone="critical" weight="semibold">
+                  {t("dashboard.stage5.production.overdue", { count: n(production.overdue) })}
+                </Text>
+              ) : null}
+              <Text variant="body-sm" tone="subdued">
+                {t("dashboard.stage5.production.dueSoon", { count: n(production.dueSoon), days: PRODUCTION_DUE_SOON_DAYS })}
+              </Text>
+            </Stack>
+          </Card>
+        ) : null}
+        {recommendations ? <RecommendationsCard data={recommendations} /> : null}
+      </Grid>
+    </Stack>
+  );
+}
+
+/** Ризики закінчення й рекомендації нових партій (production.manage) — посилання на «Аналітику складу». */
+function RecommendationsCard({ data }: { data: NonNullable<WarehouseData["recommendations"]> }) {
+  const t = useT();
+  const locale = useLocale();
+  const href = useHref();
+  const n = (v: number) => formatNumber(v, locale);
+  const nothing = data.atRisk === 0 && data.recommendations === 0;
+  return (
+    <Card
+      title={t("dashboard.stage5.recommendations.title")}
+      titleAs="h3"
+      description={t("dashboard.stage5.recommendations.hint")}
+      actions={
+        <Button to={href("warehouse/analytics")} variant="plain" size="sm">
+          {t("dashboard.stage5.recommendations.open")}
+        </Button>
+      }
+    >
+      {nothing ? (
+        <Text variant="body-sm" tone="subdued">
+          {t("dashboard.stage5.recommendations.none")}
+        </Text>
+      ) : (
+        <Stack gap={2}>
+          <KeyValueList
+            items={[
+              { key: "atRisk", label: t("dashboard.stage5.recommendations.atRisk"), value: n(data.atRisk) },
+              { key: "needBatch", label: t("dashboard.stage5.recommendations.needBatch"), value: n(data.recommendations) },
+            ]}
+          />
+          {data.outOfStock > 0 ? (
+            <Text variant="body-sm" tone="critical" weight="semibold">
+              {t("dashboard.stage5.recommendations.outOfStock", { count: n(data.outOfStock) })}
+            </Text>
+          ) : null}
+          {data.recommendedUnits > 0 ? (
+            <Text variant="body-sm" tone="subdued">
+              {t("dashboard.stage5.recommendations.units", { units: n(data.recommendedUnits) })}
+            </Text>
+          ) : null}
+        </Stack>
+      )}
+    </Card>
+  );
+}
+
 type IssueItem = NonNullable<LoaderData["issues"]>[number];
 type ShipmentItem = NonNullable<LoaderData["shipments"]>[number];
 
@@ -310,6 +523,8 @@ export default function DashboardPage() {
             <Banner tone="success">{t("dashboard.problems.summary.none")}</Banner>
           )
         ) : null}
+
+        {data.warehouse ? <WarehouseSignals data={data.warehouse} /> : null}
 
         <Grid columns={{ xs: 1, lg: 2 }} gap={4}>
           {canBulk || canSimulate ? (

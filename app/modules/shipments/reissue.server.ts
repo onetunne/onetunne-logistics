@@ -13,10 +13,14 @@
  *   додатково гарантує частковий унікальний індекс і блокування рядка замовлення в createWaybill.
  * - Нова накладна проходить свіжу перевірку даних; якщо її створення заблоковано або завершилося помилкою — результат
  *   прямо каже, що стару накладну СКАСОВАНО і що саме блокує нову (ніколи не загальна помилка).
+ * - Етап 5: Shopify змінив позиції, а застосунок їх ще не застосував (orders.shopify_lines_pending_at), або замовлення
+ *   вже виконане (частково) в Shopify → not_started: нова накладна була б зі старими позиціями / повторним
+ *   відправленням. Шлях для змінених позицій — «Скасувати накладну» (застосунок перечитає замовлення з Shopify),
+ *   потім нова накладна.
  */
 import { eq } from "drizzle-orm";
 import { shipmentEvents, shipments } from "~/db/schema";
-import type { OrderStatus } from "~/domain/order-status";
+import { isOrderFulfilledInShopify, type OrderStatus } from "~/domain/order-status";
 import { requirePermission } from "~/domain/permissions";
 import { DomainError, NotFoundError } from "~/lib/errors";
 import { logger } from "~/lib/logger.server";
@@ -31,6 +35,7 @@ import {
 import { validationOptions } from "~/modules/orders/workflow.server";
 import { REQUIRED_SHIPPER_FIELDS } from "~/modules/settings/schema";
 import { getSettings } from "~/modules/settings/settings.server";
+import { shopifyLinesPending } from "~/modules/shopify-sync/pending-lines.server";
 import { validateOrder } from "~/modules/validation";
 import type { ServiceContext } from "~/server/types";
 import {
@@ -64,7 +69,10 @@ export type ReissueResult =
    */
   | {
       kind: "not_started";
-      reason: Extract<BlockedReason, "no_carrier" | "carrier_not_configured" | "shipper_incomplete" | "validation">;
+      reason: Extract<
+        BlockedReason,
+        "no_carrier" | "carrier_not_configured" | "shipper_incomplete" | "validation" | "shopify_lines_pending" | "fulfilled_in_shopify"
+      >;
       params?: Record<string, string | number>;
     }
   /** Цю накладну вже скасовує/переоформлює паралельний запит — цей запит нічого не створював. */
@@ -104,9 +112,18 @@ export async function reissueWaybill(ctx: ServiceContext, shipmentId: string, op
   if (shipment.status !== "created" || !shipment.waybillNumber) throw new DomainError("waybill.notCancellable", 409);
   if (shipment.handedOverAt) throw new DomainError("waybill.alreadyHandedOver", 409);
   if (!REISSUE_ORDER_STATUSES.includes(order.status)) {
+    // Накладну й замовлення прочитано окремо: паралельний запит міг скасувати цю накладну між читаннями (скасування
+    // й «Очікує перевірки» — одна транзакція). Тоді це «паралельний запит», а не відмова за статусом замовлення.
+    const [latest] = await ctx.db.select().from(shipments).where(eq(shipments.id, shipmentId));
+    if (latest && latest.status === "cancelled") return { kind: "concurrent", active: await findActiveShipment(ctx.db, order.id) };
     throw new DomainError("waybill.reissueNotAllowed", 409, { status: order.status });
   }
 
+  // Етап 5: позиції застаріли щодо Shopify / замовлення вже виконане в Shopify — нову не створити, стару не скасовуємо.
+  if (shopifyLinesPending(order)) return { kind: "not_started", reason: "shopify_lines_pending" };
+  if (isOrderFulfilledInShopify(order)) {
+    return { kind: "not_started", reason: "fulfilled_in_shopify", params: { fulfillment: order.fulfillmentStatus ?? "" } };
+  }
   // Попередня перевірка: без перевізника, що створює накладні, чи без даних відправника стару не скасовуємо.
   const carrier = ctx.carriers.getDefault();
   if (!carrier) return { kind: "not_started", reason: "no_carrier" };

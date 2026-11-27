@@ -4,7 +4,9 @@
  */
 import type { Db } from "~/db/client.server";
 import { enqueueJob } from "~/modules/jobs/queue.server";
+import { inventoryItemGidFromLevelPayload } from "~/integrations/shopify/inventory-graphql";
 import { claimWebhook, completeWebhook } from "~/modules/webhooks/dedupe.server";
+import { scheduleCollectionSync } from "./collections.server";
 import { gidFromPayload } from "./mappers";
 import { JOB } from "./sync.server";
 
@@ -18,6 +20,11 @@ export const WEBHOOK_TOPICS = [
   "PRODUCTS_UPDATE",
   "PRODUCTS_DELETE",
   "INVENTORY_LEVELS_UPDATE",
+  // Етап 5: колекції для шаблонів комплектації (read_products). Зміна товару, через яку він потрапляє в автоматичну
+  // колекцію або випадає з неї, collections/update НЕ викликає — це покриває products/update (collections.server.ts).
+  "COLLECTIONS_CREATE",
+  "COLLECTIONS_UPDATE",
+  "COLLECTIONS_DELETE",
 ] as const;
 
 export function normalizeTopic(topic: string): string {
@@ -46,9 +53,19 @@ export async function handleShopifyWebhook(db: Db, event: IncomingWebhook): Prom
     } else if (topic.startsWith("PRODUCTS_")) {
       const productGid = gidFromPayload(event.payload, "Product");
       if (productGid) queued = await enqueueOrQueued(db, JOB.syncProduct, { shop, productGid }, `product:${productGid}`);
+    } else if (topic === "COLLECTIONS_DELETE") {
+      const collectionGid = gidFromPayload(event.payload, "Collection");
+      if (collectionGid) queued = await enqueueOrQueued(db, JOB.deleteCollection, { collectionGid }, `collection-delete:${collectionGid}`);
+    } else if (topic === "COLLECTIONS_CREATE" || topic === "COLLECTIONS_UPDATE") {
+      // Читання зараз + перевірки через 2 і 15 хв: членство за умовами Shopify оновлює асинхронно (collections.server.ts).
+      const collectionGid = gidFromPayload(event.payload, "Collection");
+      if (collectionGid) {
+        await scheduleCollectionSync(db, shop, collectionGid);
+        queued = true;
+      }
     } else if (topic === "INVENTORY_LEVELS_UPDATE") {
-      const id = event.payload.inventory_item_id;
-      const gid = typeof id === "number" || typeof id === "string" ? `gid://shopify/InventoryItem/${id}` : null;
+      // Id з admin_graphql_api_id (рядок): числове inventory_item_id понад 2^53 після JSON.parse неточне.
+      const gid = inventoryItemGidFromLevelPayload(event.payload);
       if (gid) queued = await enqueueOrQueued(db, JOB.syncInventoryItem, { shop, inventoryItemGid: gid }, `inventory:${gid}`);
     }
     await completeWebhook(db, event.webhookId);

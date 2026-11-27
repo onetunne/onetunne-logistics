@@ -3,10 +3,10 @@
  * Webhook лише ставить завдання в чергу; завдання завжди перечитує свіжі дані через GraphQL Admin API,
  * тож порядок і повтори подій не призводять до неузгодженості.
  */
-import { and, desc, eq, inArray, like, notLike, or, sql } from "drizzle-orm";
-import type { Db, DbOrTx } from "~/db/client.server";
+import { and, desc, eq, inArray, isNotNull, isNull, like, ne, notInArray, notLike, or, sql } from "drizzle-orm";
+import type { Db, DbOrTx, Tx } from "~/db/client.server";
 import { issues, jobs, orderChanges, orderLineItems, orders, productVariants, products, shipments, shopInstallations } from "~/db/schema";
-import { isShipped } from "~/domain/order-status";
+import { isFulfilledInShopify, isShipped } from "~/domain/order-status";
 import { SYSTEM_ACTOR, requirePermission } from "~/domain/permissions";
 import { DomainError } from "~/lib/errors";
 import { writeAudit } from "~/modules/audit/audit.server";
@@ -14,19 +14,31 @@ import { enqueueJob } from "~/modules/jobs/queue.server";
 import { loadOrderRow, shippingAddressOf, type OrderRow } from "~/modules/orders/repository.server";
 import { VALIDATABLE_STATUSES, validateOrderInTx } from "~/modules/orders/workflow.server";
 import { cancelOrder, processPaidOrder } from "~/modules/shipments/waybill.server";
-import type { AdminGraphql } from "~/integrations/shopify/admin-client.server";
+import { syncOrderReservations } from "~/modules/inventory/reservations.server";
+import { scheduleReconcileForInventoryWebhook } from "~/modules/inventory-sync/schedule.server";
+import { ShopifyApiError, type AdminGraphql } from "~/integrations/shopify/admin-client.server";
 import type { ShopifyGateway, ShopifySyncResult } from "~/integrations/shopify/types";
 import {
   INVENTORY_ITEM_PRODUCT_QUERY,
+  ORDER_LINE_ITEMS_MAX_PAGES,
+  ORDER_LINE_ITEMS_PAGE_QUERY,
+  ORDER_LINE_ITEMS_PAGE_SIZE,
   ORDER_QUERY,
   ORDER_UPDATE_MUTATION,
+  ORDERS_PAGE_SIZE,
   SHOP_SHIPPING_COUNTRIES_QUERY,
   ORDER_ADDRESS_STATE_QUERY,
   ORDERS_PAGE_QUERY,
   PRODUCT_QUERY,
+  PRODUCT_VARIANTS_MAX_PAGES,
+  PRODUCT_VARIANTS_PAGE_QUERY,
+  PRODUCT_VARIANTS_PAGE_SIZE,
   PRODUCTS_PAGE_QUERY,
+  PRODUCTS_PAGE_SIZE,
   type GqlOrder,
+  type GqlOrderLineItemsPage,
   type GqlProduct,
+  type GqlProductVariantsPage,
   type PageInfo,
 } from "~/integrations/shopify/graphql";
 import type { ServiceContext } from "~/server/types";
@@ -41,42 +53,50 @@ import {
   type OrderUpdateInputLike,
 } from "./diagnostics";
 import { logger } from "~/lib/logger.server";
+import { JOB, orderSyncDedupeKey } from "./jobs";
+import { startCollectionsSync } from "./collections.server";
+
+export { JOB } from "./jobs";
 
 /** Версія GraphQL Admin API (та сама, що в shopify.server.ts). */
 const SHOPIFY_API_VERSION = "2026-10";
-
-export const JOB = {
-  syncOrder: "shopify.sync_order",
-  syncProduct: "shopify.sync_product",
-  syncInventoryItem: "shopify.sync_inventory_item",
-  deleteProduct: "shopify.delete_product",
-  productsPage: "shopify.products_page",
-  importOrdersPage: "shopify.import_orders_page",
-  pushOrder: "shopify.push_order",
-  /** Етап 3: виконання замовлення з трек-номером після передачі перевізнику. */
-  fulfillShipment: "shopify.fulfill_shipment",
-  /** Етап 3: періодичне опитування відстеження перевізників. */
-  trackingPoll: "tracking.poll",
-} as const;
-
-/** Сторінка списку: невелика, щоб запитувана вартість GraphQL не перевищувала ліміт. */
-const PAGE_SIZE = 10;
 
 // ---------------------------------------------------------------------------
 // Товари
 // ---------------------------------------------------------------------------
 
-export async function upsertProduct(db: DbOrTx, p: MappedProduct, currency: string): Promise<"saved" | "stale"> {
+/**
+ * fetchedAt — момент ПЕРЕД запитом до Shopify, яким отримано дані товару (час знімка залишку inventory_synced_at).
+ * Знімок, позначений часом до читання, а не після, зсуває похибку в бік заниження (замовлення між запитом і записом
+ * не рахуються двічі — див. opening.server.ts).
+ *
+ * Етап 5 — варіанти, видалені в Shopify: рядки варіантів не видаляються (на них посилаються позиції замовлень і
+ * облік складу), а позначаються явно — product_variants.removed_at: варіант, якого немає в ПОВНОМУ переліку варіантів
+ * (opts.variantsComplete — прочитано всі сторінки, readAllVariants), отримує час синхронізації; варіант із відповіді —
+ * null (знову з'явився в Shopify). Неповний перелік (читання сторінок не завершилося — readAllVariants) — про відсутні
+ * нічого не відомо: вони вважаються наявними (позначку знято) — у пакуванні їхній спільний штрихкод лишається
+ * «неоднозначним» (безпечніше, ніж мовчки зарахувати сканування не того товару).
+ * Сканування в пакуванні не вважає штрихкод видаленого варіанта «спільним» (catalogVariantLive у
+ * modules/packing/packing.server.ts). Інші зміни варіанта (митні дані, габарити в застосунку) позначку не зачіпають.
+ */
+export async function upsertProduct(
+  db: DbOrTx,
+  p: MappedProduct,
+  currency: string,
+  fetchedAt: Date = new Date(),
+  opts: { variantsComplete?: boolean } = {},
+): Promise<"saved" | "stale"> {
   return db.transaction(async (tx) => {
     const [existing] = await tx.select().from(products).where(eq(products.shopifyProductId, p.shopifyProductId)).for("update");
     if (existing?.shopifyUpdatedAt && existing.shopifyUpdatedAt > p.shopifyUpdatedAt) return "stale";
+    const syncedAt = new Date();
     const values = {
       title: p.title,
       handle: p.handle,
       imageUrl: p.imageUrl,
       status: p.status,
       shopifyUpdatedAt: p.shopifyUpdatedAt,
-      updatedAt: new Date(),
+      updatedAt: syncedAt,
     };
     let productId: string;
     if (existing) {
@@ -87,23 +107,84 @@ export async function upsertProduct(db: DbOrTx, p: MappedProduct, currency: stri
       productId = row!.id;
     }
     for (const v of p.variants) {
-      const data = { ...v, productId, currency, updatedAt: new Date() };
+      // inventorySyncedAt — час знімка залишку Shopify (opening.server.ts порівнює з ним дату замовлень).
+      const data = {
+        ...v,
+        productId,
+        currency,
+        inventorySyncedAt: v.inventoryAvailable === null ? null : fetchedAt,
+        removedAt: null,
+        updatedAt: syncedAt,
+      };
       await tx
         .insert(productVariants)
         .values(data)
         .onConflictDoUpdate({ target: productVariants.shopifyVariantId, set: data });
     }
+    if (opts.variantsComplete) {
+      const present = p.variants.map((v) => v.shopifyVariantId);
+      await tx
+        .update(productVariants)
+        .set({ removedAt: syncedAt, updatedAt: syncedAt })
+        .where(
+          and(
+            eq(productVariants.productId, productId),
+            isNull(productVariants.removedAt),
+            or(isNull(productVariants.shopifyVariantId), notInArray(productVariants.shopifyVariantId, present)),
+          ),
+        );
+    } else {
+      await tx
+        .update(productVariants)
+        .set({ removedAt: null, updatedAt: syncedAt })
+        .where(and(eq(productVariants.productId, productId), isNotNull(productVariants.removedAt)));
+    }
     return "saved";
   });
 }
 
+/**
+ * Усі варіанти товару: перша сторінка вже прочитана (PRODUCT_QUERY), наступні — PRODUCT_VARIANTS_PAGE_QUERY (after).
+ * Shopify: «If querying a single product at the root, you can fetch up to 2048 variants» (Product.variants, 2026-10).
+ * complete = true лише коли прочитано ВСІ сторінки одного стану товару. Відповідь без курсора, понад
+ * PRODUCT_VARIANTS_MAX_PAGES сторінок, товар зник або змінився між сторінками (updatedAt) → перелік неповний: прочитані
+ * варіанти зберігаються, а про відсутні нічого не відомо (upsertProduct вважає їх наявними, а не видаленими); зміна
+ * товару в Shopify надішле products/update — тоді товар перечитується знову.
+ */
+export async function readAllVariants(admin: AdminGraphql, first: GqlProduct): Promise<{ product: GqlProduct; complete: boolean }> {
+  const nodes = [...first.variants.nodes];
+  let info = first.variants.pageInfo;
+  let complete = true;
+  for (let page = 1; info?.hasNextPage; page++) {
+    if (!info.endCursor || page >= PRODUCT_VARIANTS_MAX_PAGES) {
+      complete = false;
+      break;
+    }
+    const data: GqlProductVariantsPage = await admin<GqlProductVariantsPage>(PRODUCT_VARIANTS_PAGE_QUERY, {
+      id: first.id,
+      first: PRODUCT_VARIANTS_PAGE_SIZE,
+      after: info.endCursor,
+    });
+    if (!data.product || data.product.updatedAt !== first.updatedAt) {
+      complete = false;
+      break;
+    }
+    nodes.push(...data.product.variants.nodes);
+    info = data.product.variants.pageInfo;
+  }
+  if (!complete) logger.warn("shopify.product_variants_incomplete", { product: first.id, read: nodes.length });
+  return { product: { ...first, variants: { pageInfo: { hasNextPage: !complete, endCursor: null }, nodes } }, complete };
+}
+
 export async function syncProduct(db: Db, admin: AdminGraphql, productGid: string, currency: string) {
+  const fetchedAt = new Date();
   const data = await admin<{ product: GqlProduct | null }>(PRODUCT_QUERY, { id: productGid });
   if (!data.product) {
     await markProductDeleted(db, productGid);
     return "deleted" as const;
   }
-  return upsertProduct(db, mapProduct(data.product), currency);
+  const { product, complete } = await readAllVariants(admin, data.product);
+  return upsertProduct(db, mapProduct(product), currency, fetchedAt, { variantsComplete: complete });
 }
 
 export async function markProductDeleted(db: DbOrTx, productGid: string) {
@@ -112,23 +193,32 @@ export async function markProductDeleted(db: DbOrTx, productGid: string) {
 
 /** Сторінка повної синхронізації товарів; наступна сторінка — окреме завдання (продовжується після перезапуску). */
 export async function syncProductsPage(db: Db, admin: AdminGraphql, shop: string, after: string | null, currency: string) {
+  const fetchedAt = new Date();
   const data = await admin<{ products: { pageInfo: PageInfo; nodes: GqlProduct[] } }>(PRODUCTS_PAGE_QUERY, {
-    first: PAGE_SIZE,
+    first: PRODUCTS_PAGE_SIZE,
     after,
   });
   for (const p of data.products.nodes) {
-    // Товар із великою кількістю варіантів перечитується окремо (повний список варіантів).
+    // Товар, варіанти якого не вмістилися на сторінку списку, перечитується окремо (усі сторінки варіантів).
     if (p.variants.pageInfo?.hasNextPage) await syncProduct(db, admin, p.id, currency);
-    else await upsertProduct(db, mapProduct(p), currency);
+    else await upsertProduct(db, mapProduct(p), currency, fetchedAt, { variantsComplete: true });
   }
   if (data.products.pageInfo.hasNextPage && data.products.pageInfo.endCursor) {
     await enqueueJob(db, JOB.productsPage, { shop, after: data.products.pageInfo.endCursor }, { dedupeKey: `products:${data.products.pageInfo.endCursor}` });
   } else {
     await db.update(shopInstallations).set({ productsSyncedAt: new Date(), updatedAt: new Date() }).where(eq(shopInstallations.shop, shop));
+    // Етап 5: після повної синхронізації товарів — колекції й членство (шаблони комплектації «на колекцію»).
+    await startCollectionsSync(db, shop);
   }
   return data.products.nodes.length;
 }
 
+/**
+ * Webhook inventory_levels/update: оновлення знімка залишку товару (shopify.sync_product) і — етап 5 — ВІДКЛАДЕНА
+ * звірка цієї позиції зі складом застосунку (~10 хв, щоб замовлення встигло синхронізуватися й зарезервуватися;
+ * повторні події відкладають ту саму звірку, dedupe; лише для товарів, відкритих в обліку складу).
+ * Значення з webhook напряму не застосовується.
+ */
 export async function syncInventoryItem(db: Db, admin: AdminGraphql, shop: string, inventoryItemGid: string) {
   const data = await admin<{ inventoryItem: { variant: { product: { id: string } | null } | null } | null }>(
     INVENTORY_ITEM_PRODUCT_QUERY,
@@ -136,6 +226,7 @@ export async function syncInventoryItem(db: Db, admin: AdminGraphql, shop: strin
   );
   const productGid = data.inventoryItem?.variant?.product?.id;
   if (productGid) await enqueueJob(db, JOB.syncProduct, { shop, productGid }, { dedupeKey: `product:${productGid}` });
+  await scheduleReconcileForInventoryWebhook(db, shop, inventoryItemGid);
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +257,60 @@ const CONTACT_FIELDS: Array<{ field: string; column: keyof OrderRow; get: (o: Ma
   { field: "shipping.phone", column: "shipPhone", get: (o) => o.shipping.phone },
 ];
 
+/** Контакти й адреса так, як їх щойно повідомив Shopify (orders.shopify_contact_snapshot). */
+export function contactSnapshotOf(m: MappedOrder): Record<string, string | null> {
+  return Object.fromEntries(CONTACT_FIELDS.map((f) => [f.field, f.get(m)]));
+}
+
+/** Порожнє значення й null — одне й те саме (автовиправлення в історії записує порожній рядок, поле зберігає null). */
+const sameValue = (a: string | null | undefined, b: string | null | undefined) => (a ?? "") === (b ?? "");
+
+/**
+ * Поля, які відрізняються від замовлення в застосунку, але Shopify їх НЕ змінював: різниця — від змін застосунку
+ * (автовиправлення формату телефону/індексу, копіювання телефону, прийняті пропозиції, підтверджені правки, які ще не
+ * передано або Shopify не прийняв). Автовиправлення в Shopify не передаються (лише підтверджені правки — syncOrderToShopify),
+ * тож без цього кожне наступне читання відправленого замовлення повідомляло б власну зміну застосунку як «змінено в
+ * Shopify» (SHOPIFY_ORDER_CHANGED), а відкрите замовлення — перезаписувало б автовиправлення сирим значенням Shopify.
+ * Знімок (orders.shopify_contact_snapshot) — значення Shopify з попереднього читання; Shopify змінив поле, лише коли
+ * нове значення інше. Замовлення без знімка (до міграції 0011): Shopify не змінював поле, якщо його поточне значення —
+ * початкове значення якоїсь зміни застосунку цього поля (order_changes, джерело не shopify_sync), тобто те, що
+ * застосунок отримав від Shopify і потім змінив. Немає таких змін — поле в застосунку не змінювалося, різниця — від Shopify.
+ */
+async function fieldsUnchangedInShopify(
+  tx: DbOrTx,
+  existing: OrderRow,
+  differing: ReadonlyArray<{ field: string; to: string | null }>,
+): Promise<Set<string>> {
+  const unchanged = new Set<string>();
+  const snapshot = existing.shopifyContactSnapshot;
+  const legacy: Array<{ field: string; to: string | null }> = [];
+  for (const c of differing) {
+    if (snapshot && Object.prototype.hasOwnProperty.call(snapshot, c.field)) {
+      if (sameValue(snapshot[c.field], c.to)) unchanged.add(c.field);
+    } else {
+      legacy.push(c);
+    }
+  }
+  if (legacy.length === 0) return unchanged;
+  const appChanges = await tx
+    .select({ field: orderChanges.field, oldValue: orderChanges.oldValue })
+    .from(orderChanges)
+    .where(
+      and(
+        eq(orderChanges.orderId, existing.id),
+        inArray(
+          orderChanges.field,
+          legacy.map((c) => c.field),
+        ),
+        ne(orderChanges.source, "shopify_sync"),
+      ),
+    );
+  for (const c of legacy) {
+    if (appChanges.some((r) => r.field === c.field && sameValue(r.oldValue, c.to))) unchanged.add(c.field);
+  }
+  return unchanged;
+}
+
 async function resolveVariantIds(tx: DbOrTx, m: MappedOrder): Promise<Map<string, string>> {
   const gids = m.lineItems.map((l) => l.shopifyVariantId).filter((g): g is string => Boolean(g));
   if (gids.length === 0) return new Map();
@@ -176,26 +321,158 @@ async function resolveVariantIds(tx: DbOrTx, m: MappedOrder): Promise<Map<string
   return new Map(rows.map((r) => [r.gid!, r.id]));
 }
 
-async function replaceLineItems(tx: DbOrTx, orderId: string, m: MappedOrder) {
+type StoredLine = {
+  id: string;
+  gid: string | null;
+  variantId: string | null;
+  title: string;
+  sku: string | null;
+  quantity: number;
+  currentQuantity: number | null;
+  shopifyAddedAt: Date | null;
+  discountedUnitPrice: string | null;
+  position: number;
+};
+
+async function loadStoredLines(tx: DbOrTx, orderId: string): Promise<StoredLine[]> {
+  return tx
+    .select({
+      id: orderLineItems.id,
+      gid: orderLineItems.shopifyLineItemId,
+      variantId: orderLineItems.variantId,
+      title: orderLineItems.title,
+      sku: orderLineItems.sku,
+      quantity: orderLineItems.quantity,
+      currentQuantity: orderLineItems.currentQuantity,
+      shopifyAddedAt: orderLineItems.shopifyAddedAt,
+      discountedUnitPrice: orderLineItems.discountedUnitPrice,
+      position: orderLineItems.position,
+    })
+    .from(orderLineItems)
+    .where(eq(orderLineItems.orderId, orderId))
+    .orderBy(orderLineItems.position);
+}
+
+type MappedLine = MappedOrder["lineItems"][number];
+
+/**
+ * Локальний варіант позиції. Shopify повертає `variant: null`, коли варіант (або товар) видалено вже після замовлення:
+ * це НЕ зміна позиції — зв'язок із локальним варіантом (митні дані, вага, резерв складу) зберігається.
+ * Зміною вважається лише інший непорожній GID варіанта.
+ */
+function variantResolver(variantIds: ReadonlyMap<string, string>, stored: readonly StoredLine[]) {
+  const storedByGid = new Map(stored.filter((e) => e.gid).map((e) => [e.gid!, e.variantId]));
+  return (l: MappedLine): string | null =>
+    l.shopifyVariantId ? (variantIds.get(l.shopifyVariantId) ?? null) : (storedByGid.get(l.shopifyLineItemId) ?? null);
+}
+
+/**
+ * Оновлює позиції замовлення за даними Shopify, ЗБЕРІГАЮЧИ id наявних позицій (зіставлення за shopifyLineItemId):
+ * на id позиції посилаються резерви складу (stock_reservations), рухи журналу, чекліст пакування й поля проблем
+ * перевірки (`lineItem.<id>`). Позиції, яких більше немає в Shopify, видаляються (їхні резерви знімає
+ * syncOrderReservations).
+ * addedOnUpdate — замовлення вже було збережене (редагування в Shopify): нова позиція без LineItem.createdAt отримує
+ * shopify_added_at = updatedAt замовлення (позиція, додана після знімка складу, — новий продаж, без корекції знімка).
+ */
+async function replaceLineItems(tx: DbOrTx, orderId: string, m: MappedOrder, opts: { addedOnUpdate: boolean }) {
   const variantIds = await resolveVariantIds(tx, m);
-  await tx.delete(orderLineItems).where(eq(orderLineItems.orderId, orderId));
-  if (m.lineItems.length === 0) return;
-  await tx.insert(orderLineItems).values(
-    m.lineItems.map((l, position) => ({
-      orderId,
-      variantId: l.shopifyVariantId ? (variantIds.get(l.shopifyVariantId) ?? null) : null,
-      shopifyLineItemId: l.shopifyLineItemId,
+  const existing = await loadStoredLines(tx, orderId);
+  const variantOf = variantResolver(variantIds, existing);
+  const byGid = new Map(existing.filter((e) => e.gid).map((e) => [e.gid!, e]));
+  const keep = new Set<string>();
+  for (const [position, l] of m.lineItems.entries()) {
+    const values = {
+      variantId: variantOf(l),
       title: l.title,
       variantTitle: l.variantTitle,
       sku: l.sku,
       quantity: l.quantity,
+      currentQuantity: l.currentQuantity,
       unitPrice: l.unitPrice,
+      discountedUnitPrice: l.discountedUnitPrice,
       currency: l.currency,
       imageUrl: l.imageUrl,
       position,
-    })),
-  );
+    };
+    const current = byGid.get(l.shopifyLineItemId);
+    if (current && !keep.has(current.id)) {
+      await tx
+        .update(orderLineItems)
+        .set({ ...values, shopifyAddedAt: current.shopifyAddedAt ?? l.shopifyCreatedAt })
+        .where(eq(orderLineItems.id, current.id));
+      keep.add(current.id);
+    } else {
+      const [row] = await tx
+        .insert(orderLineItems)
+        .values({
+          ...values,
+          orderId,
+          shopifyLineItemId: l.shopifyLineItemId,
+          shopifyAddedAt: l.shopifyCreatedAt ?? (opts.addedOnUpdate ? m.shopifyUpdatedAt : null),
+        })
+        .returning({ id: orderLineItems.id });
+      keep.add(row!.id);
+    }
+  }
+  const removed = existing.filter((e) => !keep.has(e.id)).map((e) => e.id);
+  if (removed.length > 0) await tx.delete(orderLineItems).where(inArray(orderLineItems.id, removed));
 }
+
+/**
+ * Позиції не змінилися, але збережені до етапу 5 (current_quantity / shopify_added_at = null): тихо заповнює ці
+ * поля значеннями Shopify. Ефективна кількість складу не змінюється (current_quantity дорівнює збереженій quantity —
+ * інакше diffLineItems повідомив би зміну), тож без історії, проблем і руху складу; безпечно й з активною накладною.
+ * Ціна одиниці після всіх знижок (митна вартість) оновлюється так само тихо, як і суми замовлення (subtotal/total):
+ * склад вона не змінює, а вже надісланий перевізнику інвойс береться зі знімка запиту (withSentCustomsData).
+ */
+async function backfillLineDetails(tx: DbOrTx, stored: readonly StoredLine[], m: MappedOrder) {
+  const byGid = new Map(m.lineItems.map((l) => [l.shopifyLineItemId, l]));
+  for (const e of stored) {
+    const l = e.gid ? byGid.get(e.gid) : undefined;
+    if (!l) continue;
+    const patch: { currentQuantity?: number; shopifyAddedAt?: Date; discountedUnitPrice?: string } = {};
+    if (e.currentQuantity === null && l.currentQuantity === e.quantity) patch.currentQuantity = l.currentQuantity;
+    if (e.shopifyAddedAt === null && l.shopifyCreatedAt) patch.shopifyAddedAt = l.shopifyCreatedAt;
+    if (l.discountedUnitPrice !== null && e.discountedUnitPrice !== l.discountedUnitPrice) patch.discountedUnitPrice = l.discountedUnitPrice;
+    if (Object.keys(patch).length > 0) await tx.update(orderLineItems).set(patch).where(eq(orderLineItems.id, e.id));
+  }
+}
+
+/** Рядок позиції для історії змін (без персональних даних): «SKU×кількість; …». */
+function lineSummary(lines: ReadonlyArray<{ sku: string | null; title: string; quantity: number }>): string {
+  return lines
+    .map((l) => `${l.sku ?? l.title}×${l.quantity}`)
+    .join("; ")
+    .slice(0, 500);
+}
+
+/**
+ * Чи змінилися позиції замовлення в Shopify (склад: id позиції Shopify, варіант, кількість до відправлення
+ * currentQuantity, замовлена кількість). Ціни/назви не впливають на склад і оновлюються разом із будь-якою зміною.
+ * Видалений у Shopify варіант (variant: null) зміною не є — див. variantResolver.
+ */
+async function diffLineItems(
+  tx: DbOrTx,
+  orderId: string,
+  m: MappedOrder,
+): Promise<{ changed: boolean; from: string; to: string; stored: StoredLine[] }> {
+  const variantIds = await resolveVariantIds(tx, m);
+  const existing = await loadStoredLines(tx, orderId);
+  const variantOf = variantResolver(variantIds, existing);
+  const key = (gid: string | null, variantId: string | null, quantity: number, current: number) => `${gid}|${variantId}|${quantity}|${current}`;
+  const before = existing.map((e) => key(e.gid, e.variantId, e.quantity, e.currentQuantity ?? e.quantity)).sort();
+  const after = m.lineItems.map((l) => key(l.shopifyLineItemId, variantOf(l), l.quantity, l.currentQuantity)).sort();
+  const changed = before.length !== after.length || before.some((k, i) => k !== after[i]);
+  return {
+    changed,
+    from: lineSummary(existing.map((e) => ({ sku: e.sku, title: e.title, quantity: e.currentQuantity ?? e.quantity }))),
+    to: lineSummary(m.lineItems.map((l) => ({ sku: l.sku, title: l.title, quantity: l.currentQuantity }))),
+    stored: existing,
+  };
+}
+
+/** Shopify показує (часткове) виконання замовлення (див. isFulfilledInShopify). */
+const fulfilledInShopify = isFulfilledInShopify;
 
 async function hasPendingPush(tx: DbOrTx, shopifyOrderId: string): Promise<boolean> {
   const [row] = await tx
@@ -215,10 +492,53 @@ async function hasActiveShipment(tx: DbOrTx, orderId: string): Promise<boolean> 
   return Boolean(row);
 }
 
+/**
+ * Зміни з Shopify застосовано (або Shopify знову збігається із застосунком): прибирає ці поля з відкритої проблеми
+ * SHOPIFY_ORDER_CHANGED; проблема без полів закривається системою (resolution shopify_applied).
+ */
+async function settleShopifyChangedIssue(tx: DbOrTx, orderId: string, appliedFields: readonly string[]) {
+  if (appliedFields.length === 0) return;
+  const fingerprint = `${orderId}:SHOPIFY_ORDER_CHANGED:`;
+  const [open] = await tx
+    .select({ id: issues.id, params: issues.params })
+    .from(issues)
+    .where(and(eq(issues.fingerprint, fingerprint), eq(issues.status, "open")))
+    .for("update");
+  if (!open) return;
+  const applied = new Set(appliedFields);
+  const raw = typeof open.params?.fields === "string" ? open.params.fields : "";
+  const remaining = raw
+    .split(",")
+    .map((f) => f.trim())
+    .filter((f) => f && !applied.has(f));
+  const now = new Date();
+  if (remaining.length > 0) {
+    await tx.update(issues).set({ params: { ...open.params, fields: remaining.join(", ") }, updatedAt: now }).where(eq(issues.id, open.id));
+    return;
+  }
+  await tx
+    .update(issues)
+    .set({ status: "resolved", resolvedAt: now, resolvedBy: SYSTEM_ACTOR.id, resolution: "shopify_applied", updatedAt: now })
+    .where(eq(issues.id, open.id));
+}
+
+async function settleFulfilledOutsideIssue(tx: DbOrTx, orderId: string) {
+  const now = new Date();
+  await tx
+    .update(issues)
+    .set({ status: "resolved", resolvedAt: now, resolvedBy: SYSTEM_ACTOR.id, resolution: "shopify_applied", updatedAt: now })
+    .where(and(eq(issues.orderId, orderId), eq(issues.status, "open"), eq(issues.code, "SHOPIFY_FULFILLED_OUTSIDE_APP")));
+}
+
 async function openSyncIssue(
   tx: DbOrTx,
   orderId: string,
-  code: "SHOPIFY_ORDER_CHANGED" | "SHOPIFY_SYNC_FAILED" | "SHOPIFY_CANCELLED_AFTER_SHIPMENT" | "SHOPIFY_COUNTRY_NOT_SHIPPED",
+  code:
+    | "SHOPIFY_ORDER_CHANGED"
+    | "SHOPIFY_SYNC_FAILED"
+    | "SHOPIFY_CANCELLED_AFTER_SHIPMENT"
+    | "SHOPIFY_COUNTRY_NOT_SHIPPED"
+    | "SHOPIFY_FULFILLED_OUTSIDE_APP",
   params: Record<string, string | number>,
   field: string | null = null,
 ) {
@@ -231,7 +551,7 @@ async function openSyncIssue(
   await tx.insert(issues).values({
     orderId,
     code,
-    severity: code === "SHOPIFY_ORDER_CHANGED" ? "warning" : "error",
+    severity: code === "SHOPIFY_ORDER_CHANGED" || code === "SHOPIFY_FULFILLED_OUTSIDE_APP" ? "warning" : "error",
     field,
     params,
     fingerprint,
@@ -243,7 +563,20 @@ async function openSyncIssue(
  * - Нове неоплачене замовлення не створюється (обробляються лише оплачені).
  * - Застарілі події (updatedAt старіший за збережений) ігноруються.
  * - Контакти/адреса оновлюються лише поки замовлення можна редагувати і немає неперенесених
- *   у Shopify локальних підтверджених змін; інакше — проблема «дані змінено в Shopify».
+ *   у Shopify локальних підтверджених змін; інакше — проблема «дані змінено в Shopify». Зміною Shopify вважається лише
+ *   поле, яке змінив Shopify (порівняння з orders.shopify_contact_snapshot — fieldsUnchangedInShopify), а не різниця від
+ *   змін застосунку (автовиправлення не передаються в Shopify): вона не перезаписується й не повідомляється.
+ * - Позиції (кількість, видалення, заміна — редагування замовлення в Shopify) оновлюються, поки замовлення можна
+ *   редагувати й немає активної накладної (резерв складу змінюється різницею в тій самій транзакції); інакше —
+ *   та сама проблема з полем lineItems (до передачі перевізнику) і позначка orders.shopify_lines_pending_at
+ *   (pending-lines.server.ts: блокує нову накладну, переоформлення й ручну передачу). Скасування накладної ставить у
+ *   чергу повторне читання; синхронізація, що застосувала позиції або побачила, що вони збігаються, знімає позначку й
+ *   частину lineItems проблеми. Рівний updatedAt не вважається застарілим (повторне читання після скасування).
+ * - Видалений у Shopify варіант (variant: null) зміною позиції не є: зв'язок із локальним варіантом зберігається.
+ * - Виконання в Shopify не застосунком (до передачі перевізнику в застосунку) → проблема SHOPIFY_FULFILLED_OUTSIDE_APP:
+ *   резерв лишається, доки менеджер не підтвердить передачу/«Відправлено поза застосунком» (списання) або не скасує
+ *   замовлення. Нове замовлення, вже виконане (частково) в Shopify, автоматично НЕ обробляється (накладна була б
+ *   повторним відправленням).
  */
 export async function upsertOrder(
   ctx: ServiceContext,
@@ -251,86 +584,145 @@ export async function upsertOrder(
   mode: "live" | "import",
 ): Promise<{ result: OrderSyncResult; orderId: string | null }> {
   const outcome = await ctx.db.transaction(async (tx) => {
-    const [existing] = await tx.select().from(orders).where(eq(orders.shopifyOrderId, m.shopifyOrderId)).for("update");
-    const common = {
-      financialStatus: m.financialStatus,
-      fulfillmentStatus: m.fulfillmentStatus,
-      currency: m.currency,
-      subtotal: m.subtotal,
-      shippingPaid: m.shippingPaid,
-      total: m.total,
-      billingCountryCode: m.billingCountryCode,
-      shopifyUpdatedAt: m.shopifyUpdatedAt,
-    };
+    const applied = await applyOrderInTx(tx, ctx, m, mode);
+    // Етап 5: резерви складу — у тій самій транзакції, що й зміна замовлення (скасування — у cancelOrder нижче).
+    if (applied.orderId && applied.result !== "stale") {
+      await syncOrderReservations(tx, applied.orderId, SYSTEM_ACTOR);
+    }
+    return applied;
+  });
+  return finishUpsert(ctx, outcome);
+}
 
-    if (!existing) {
-      if (!isPaid({ displayFinancialStatus: m.financialStatus.toUpperCase() }) && !m.cancelledAt) {
-        return { result: "skipped_unpaid" as const, orderId: null, process: false };
+async function applyOrderInTx(tx: Tx, ctx: ServiceContext, m: MappedOrder, mode: "live" | "import") {
+  // FOR NO KEY UPDATE: не блокує перевірку зовнішніх ключів (вставки рухів складу цього замовлення в ініціалізації).
+  const [existing] = await tx.select().from(orders).where(eq(orders.shopifyOrderId, m.shopifyOrderId)).for("no key update");
+  const common = {
+    financialStatus: m.financialStatus,
+    fulfillmentStatus: m.fulfillmentStatus,
+    shopifyShippableFulfilled: m.shippableFulfilled,
+    currency: m.currency,
+    subtotal: m.subtotal,
+    shippingPaid: m.shippingPaid,
+    total: m.total,
+    billingCountryCode: m.billingCountryCode,
+    shopifyUpdatedAt: m.shopifyUpdatedAt,
+    // Що повідомив Shopify (і за якими значеннями наступне читання визначає зміни в Shopify — fieldsUnchangedInShopify).
+    shopifyContactSnapshot: contactSnapshotOf(m),
+  };
+
+  if (!existing) {
+    if (!isPaid({ displayFinancialStatus: m.financialStatus.toUpperCase() }) && !m.cancelledAt) {
+      return { result: "skipped_unpaid" as const, orderId: null, process: false };
+    }
+    const status = initialStatus(m, mode);
+    const [row] = await tx
+      .insert(orders)
+      .values({
+        ...common,
+        source: "shopify",
+        shopifyOrderId: m.shopifyOrderId,
+        orderNumber: m.orderNumber,
+        status,
+        email: m.email,
+        contactPhone: m.contactPhone,
+        shipFirstName: m.shipping.firstName,
+        shipLastName: m.shipping.lastName,
+        shipCompany: m.shipping.company,
+        shipAddress1: m.shipping.address1,
+        shipAddress2: m.shipping.address2,
+        shipCity: m.shipping.city,
+        shipProvince: m.shipping.province,
+        shipPostalCode: m.shipping.postalCode,
+        shipCountryCode: m.shipping.countryCode,
+        shipPhone: m.shipping.phone,
+        note: m.note,
+        placedAt: m.placedAt,
+        cancelledAt: m.cancelledAt,
+      })
+      .returning({ id: orders.id });
+    await replaceLineItems(tx, row!.id, m, { addedOnUpdate: false });
+    await writeAudit(tx, SYSTEM_ACTOR, mode === "import" ? "shopify.order_imported" : "shopify.order_received", {
+      type: "order",
+      id: row!.id,
+    }, { status, test: m.test });
+    const fulfilledOutside = status !== "cancelled" && !isShipped(status) && fulfilledInShopify(m.fulfillmentStatus, m.shippableFulfilled);
+    if (fulfilledOutside) {
+      await openSyncIssue(tx, row!.id, "SHOPIFY_FULFILLED_OUTSIDE_APP", { status: m.fulfillmentStatus ?? "" });
+    }
+    // Уже виконане (частково) в Shopify — без автоматичної перевірки й накладної: рішення менеджера.
+    return { result: "created" as const, orderId: row!.id, process: mode === "live" && status === "paid" && !fulfilledOutside };
+  }
+
+  if (existing.shopifyUpdatedAt && existing.shopifyUpdatedAt > m.shopifyUpdatedAt) {
+    return { result: "stale" as const, orderId: existing.id, process: false };
+  }
+  await tx.update(orders).set({ ...common, updatedAt: new Date() }).where(eq(orders.id, existing.id));
+
+  if (m.cancelledAt && existing.status !== "cancelled") {
+    return { result: "cancelled" as const, orderId: existing.id, process: false, cancel: true };
+  }
+
+  // Зміни з Shopify — лише поля, які змінив сам Shopify (а не застосунок: автовиправлення тощо, fieldsUnchangedInShopify).
+  const differing = CONTACT_FIELDS.map((f) => ({ ...f, from: (existing[f.column] as string | null) ?? null, to: f.get(m) })).filter(
+    (c) => c.from !== c.to,
+  );
+  const appSide = await fieldsUnchangedInShopify(tx, existing, differing);
+  const changes = differing.filter((c) => !appSide.has(c.field));
+  const lineDiff = await diffLineItems(tx, existing.id, m);
+  const open = existing.status !== "cancelled" && !isShipped(existing.status);
+  // Нове виконання фізичних товарів у Shopify: змінився статус виконання або (за того самого часткового) Shopify уперше
+  // виконав позиції з доставкою (раніше — лише цифрові, напр. подарункову картку).
+  const fulfilledOutside =
+    open &&
+    fulfilledInShopify(m.fulfillmentStatus, m.shippableFulfilled) &&
+    (existing.fulfillmentStatus !== m.fulfillmentStatus || !fulfilledInShopify(existing.fulfillmentStatus, existing.shopifyShippableFulfilled));
+  const pendingBefore = existing.shopifyLinesPendingAt !== null;
+  // Shopify більше не показує виконання фізичних товарів (скасовано виконання; або уточнено, що виконано лише цифрові
+  // позиції, напр. подарункову картку) — попередження «виконано поза застосунком» уже не діє.
+  if (
+    open &&
+    !fulfilledInShopify(m.fulfillmentStatus, m.shippableFulfilled) &&
+    (existing.fulfillmentStatus !== m.fulfillmentStatus || existing.shopifyShippableFulfilled !== m.shippableFulfilled)
+  ) {
+    await settleFulfilledOutsideIssue(tx, existing.id);
+  }
+  if (!lineDiff.changed) await backfillLineDetails(tx, lineDiff.stored, m);
+  if (changes.length === 0 && !lineDiff.changed && !fulfilledOutside) {
+    // Позиції Shopify знову збігаються зі збереженими — неперенесених змін позицій більше немає.
+    if (!pendingBefore) return { result: "unchanged" as const, orderId: existing.id, process: false };
+    await setLinesPending(tx, existing.id, null);
+    await settleShopifyChangedIssue(tx, existing.id, ["lineItems"]);
+    return { result: "updated" as const, orderId: existing.id, process: false };
+  }
+
+  const linesEditable = VALIDATABLE_STATUSES.includes(existing.status) && !(await hasActiveShipment(tx, existing.id));
+  const contactsEditable = linesEditable && !(await hasPendingPush(tx, m.shopifyOrderId));
+  const reported: string[] = [];
+  const history: Array<{ field: string; from: string | null; to: string | null }> = [];
+  const patch: Record<string, string | null> = {};
+  if (changes.length > 0) {
+    if (contactsEditable) {
+      for (const c of changes) {
+        patch[c.column as string] = c.to;
+        history.push({ field: c.field, from: c.from, to: c.to });
       }
-      const status = initialStatus(m, mode);
-      const [row] = await tx
-        .insert(orders)
-        .values({
-          ...common,
-          source: "shopify",
-          shopifyOrderId: m.shopifyOrderId,
-          orderNumber: m.orderNumber,
-          status,
-          email: m.email,
-          contactPhone: m.contactPhone,
-          shipFirstName: m.shipping.firstName,
-          shipLastName: m.shipping.lastName,
-          shipCompany: m.shipping.company,
-          shipAddress1: m.shipping.address1,
-          shipAddress2: m.shipping.address2,
-          shipCity: m.shipping.city,
-          shipProvince: m.shipping.province,
-          shipPostalCode: m.shipping.postalCode,
-          shipCountryCode: m.shipping.countryCode,
-          shipPhone: m.shipping.phone,
-          note: m.note,
-          placedAt: m.placedAt,
-          cancelledAt: m.cancelledAt,
-        })
-        .returning({ id: orders.id });
-      await replaceLineItems(tx, row!.id, m);
-      await writeAudit(tx, SYSTEM_ACTOR, mode === "import" ? "shopify.order_imported" : "shopify.order_received", {
-        type: "order",
-        id: row!.id,
-      }, { status, test: m.test });
-      return { result: "created" as const, orderId: row!.id, process: mode === "live" && status === "paid" };
+    } else {
+      reported.push(...changes.map((c) => c.field));
     }
-
-    if (existing.shopifyUpdatedAt && existing.shopifyUpdatedAt > m.shopifyUpdatedAt) {
-      return { result: "stale" as const, orderId: existing.id, process: false };
-    }
-    await tx.update(orders).set({ ...common, updatedAt: new Date() }).where(eq(orders.id, existing.id));
-
-    if (m.cancelledAt && existing.status !== "cancelled") {
-      return { result: "cancelled" as const, orderId: existing.id, process: false, cancel: true };
-    }
-
-    const changes = CONTACT_FIELDS.map((f) => ({ ...f, from: (existing[f.column] as string | null) ?? null, to: f.get(m) })).filter(
-      (c) => c.from !== c.to,
-    );
-    if (changes.length === 0) return { result: "unchanged" as const, orderId: existing.id, process: false };
-
-    const editable =
-      VALIDATABLE_STATUSES.includes(existing.status) &&
-      !(await hasActiveShipment(tx, existing.id)) &&
-      !(await hasPendingPush(tx, m.shopifyOrderId));
-    if (!editable) {
-      await openSyncIssue(tx, existing.id, "SHOPIFY_ORDER_CHANGED", { fields: changes.map((c) => c.field).join(", ") });
-      return { result: "conflict_reported" as const, orderId: existing.id, process: false };
-    }
-    const patch: Record<string, string | null> = {};
-    for (const c of changes) patch[c.column as string] = c.to;
+  }
+  const replaceLines = linesEditable && (lineDiff.changed || history.length > 0);
+  if (lineDiff.changed) {
+    if (linesEditable) history.push({ field: "lineItems", from: lineDiff.from, to: lineDiff.to });
+    else if (open) reported.push("lineItems");
+  }
+  if (history.length > 0) {
     await tx
       .update(orders)
       .set({ ...patch, version: sql`${orders.version} + 1`, updatedAt: new Date() })
       .where(eq(orders.id, existing.id));
     await tx.insert(orderChanges).values(
-      changes.map((c) => ({
+      history.map((c) => ({
         orderId: existing.id,
         field: c.field,
         oldValue: c.from,
@@ -340,12 +732,32 @@ export async function upsertOrder(
         actorId: SYSTEM_ACTOR.id,
       })),
     );
-    await replaceLineItems(tx, existing.id, m);
-    // Якщо замовлення вже перевірялося — перевіряємо повторно з новими даними.
-    if (existing.status !== "paid") await validateOrderInTx(tx, { ...ctx, actor: SYSTEM_ACTOR }, existing.id, "after_edit");
-    return { result: "updated" as const, orderId: existing.id, process: false };
-  });
+  }
+  // Позиції оновлюються зі збереженням id; резерв складу — різницею (syncOrderReservations у upsertOrder).
+  if (replaceLines) await replaceLineItems(tx, existing.id, m, { addedOnUpdate: true });
+  // Позначка неперенесених позицій: ставиться, поки Shopify і застосунок розходяться, а застосувати не можна;
+  // знімається, коли позиції застосовано або вони знову збігаються.
+  const linesPendingNow = lineDiff.changed && !replaceLines && open;
+  const linesSettled = pendingBefore && (replaceLines || !lineDiff.changed);
+  if (linesPendingNow && !pendingBefore) await setLinesPending(tx, existing.id, new Date());
+  else if (linesSettled) await setLinesPending(tx, existing.id, null);
+  if (reported.length > 0) await openSyncIssue(tx, existing.id, "SHOPIFY_ORDER_CHANGED", { fields: reported.join(", ") });
+  else await settleShopifyChangedIssue(tx, existing.id, [...history.map((h) => h.field), ...(linesSettled ? ["lineItems"] : [])]);
+  if (fulfilledOutside) await openSyncIssue(tx, existing.id, "SHOPIFY_FULFILLED_OUTSIDE_APP", { status: m.fulfillmentStatus ?? "" });
+  // Якщо замовлення вже перевірялося — перевіряємо повторно з новими даними.
+  if (history.length > 0 && existing.status !== "paid") await validateOrderInTx(tx, { ...ctx, actor: SYSTEM_ACTOR }, existing.id, "after_edit");
+  if (reported.length > 0 || fulfilledOutside) return { result: "conflict_reported" as const, orderId: existing.id, process: false };
+  return { result: history.length > 0 || linesSettled ? ("updated" as const) : ("unchanged" as const), orderId: existing.id, process: false };
+}
 
+async function setLinesPending(tx: DbOrTx, orderId: string, at: Date | null) {
+  await tx.update(orders).set({ shopifyLinesPendingAt: at, updatedAt: new Date() }).where(eq(orders.id, orderId));
+}
+
+async function finishUpsert(
+  ctx: ServiceContext,
+  outcome: Awaited<ReturnType<typeof applyOrderInTx>>,
+): Promise<{ result: OrderSyncResult; orderId: string | null }> {
   const systemCtx: ServiceContext = { ...ctx, actor: SYSTEM_ACTOR };
   if ("cancel" in outcome && outcome.cancel && outcome.orderId) {
     const order = await loadOrderRow(ctx.db, outcome.orderId);
@@ -364,20 +776,91 @@ export async function upsertOrder(
   return { result: outcome.result, orderId: outcome.orderId };
 }
 
-/** Перечитує замовлення з Shopify і застосовує. Невідомі варіанти спершу синхронізуються як товари. */
-export async function syncOrder(ctx: ServiceContext, admin: AdminGraphql, orderGid: string, mode: "live" | "import") {
-  const data = await admin<{ order: GqlOrder | null }>(ORDER_QUERY, { id: orderGid });
-  if (!data.order) return { result: "unchanged" as const, orderId: null };
-  return applyOrder(ctx, admin, data.order, mode);
+/**
+ * Усі позиції замовлення: позиції НІКОЛИ не обрізаються. Після першої сторінки (ORDER_QUERY) наступні читаються
+ * ORDER_LINE_ITEMS_PAGE_QUERY (after). Неповне читання — помилка, часткові позиції не зберігаються (склад резервував
+ * би й списував неповні кількості, а зниклі позиції видалялися б):
+ * - замовлення змінилося між сторінками (updatedAt) або зникло → повторювана помилка: завдання повториться зі свіжими даними;
+ * - відповідь без курсора → неповторювана помилка відповіді;
+ * - понад ORDER_LINE_ITEMS_MAX_PAGES сторінок → shopify.tooManyLineItems (замовлення — вручну).
+ */
+export async function readAllLineItems(admin: AdminGraphql, order: GqlOrder): Promise<GqlOrder> {
+  let info = order.lineItems.pageInfo;
+  if (!info?.hasNextPage) return order;
+  const nodes = [...order.lineItems.nodes];
+  for (let page = 1; info?.hasNextPage; page++) {
+    if (page >= ORDER_LINE_ITEMS_MAX_PAGES) {
+      throw new DomainError("shopify.tooManyLineItems", 422, { order: order.name, max: ORDER_LINE_ITEMS_MAX_PAGES * ORDER_LINE_ITEMS_PAGE_SIZE });
+    }
+    if (!info.endCursor) throw new ShopifyApiError("Shopify returned an incomplete line item page (no cursor)", false, "INCOMPLETE_LINE_ITEMS");
+    const data: GqlOrderLineItemsPage = await admin<GqlOrderLineItemsPage>(ORDER_LINE_ITEMS_PAGE_QUERY, {
+      id: order.id,
+      first: ORDER_LINE_ITEMS_PAGE_SIZE,
+      after: info.endCursor,
+    });
+    if (!data.order || data.order.updatedAt !== order.updatedAt) {
+      throw new ShopifyApiError("Shopify order changed while its line items were being read", true, "ORDER_CHANGED_DURING_READ");
+    }
+    nodes.push(...data.order.lineItems.nodes);
+    info = data.order.lineItems.pageInfo;
+  }
+  return { ...order, lineItems: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } };
 }
 
-async function applyOrder(ctx: ServiceContext, admin: AdminGraphql, order: GqlOrder, mode: "live" | "import") {
-  if (order.lineItems.pageInfo?.hasNextPage) {
-    // На сторінці списку не всі позиції — перечитуємо замовлення повністю.
-    const full = await admin<{ order: GqlOrder | null }>(ORDER_QUERY, { id: order.id });
-    if (full.order && !full.order.lineItems.pageInfo?.hasNextPage) order = full.order;
-    else throw new DomainError("shopify.tooManyLineItems", 422, { order: order.name });
+/**
+ * Режим читання замовлення: live — webhook / повторне читання (застосовується завжди, рівний updatedAt теж — напр. після
+ * скасування накладної); import — імпорт історії; refresh — планове страхове читання (fulfillment-refresh.server.ts):
+ * застосовується лише те, що застосунок пропустив.
+ */
+export type OrderSyncMode = "live" | "import" | "refresh";
+
+/**
+ * refresh: чи є в Shopify щось, чого застосунок ще не бачив. Shopify (Order.updatedAt, 2026-10): «The date and time ...
+ * when the order was last modified.»; orders/updated: «Occurs whenever an order is updated.» — загублений webhook означає
+ * новіший updatedAt. Додатково — інший статус виконання (саме його й перевіряє планове читання). Інакше нічого не
+ * застосовується: повторне застосування тих самих даних нічого б не дало (і раніше відтворювало закриті менеджером
+ * проблеми). Замовлення, якого немає в застосунку, плановим читанням не створюється (це не webhook нового замовлення).
+ */
+async function refreshFindsNews(db: DbOrTx, order: GqlOrder): Promise<{ news: boolean; orderId: string | null }> {
+  const [row] = await db
+    .select({ id: orders.id, shopifyUpdatedAt: orders.shopifyUpdatedAt, fulfillmentStatus: orders.fulfillmentStatus })
+    .from(orders)
+    .where(eq(orders.shopifyOrderId, order.id));
+  if (!row) return { news: false, orderId: null };
+  const updatedAt = new Date(order.updatedAt);
+  const newer = !row.shopifyUpdatedAt || Number.isNaN(updatedAt.getTime()) || updatedAt.getTime() > row.shopifyUpdatedAt.getTime();
+  const fulfillment = order.displayFulfillmentStatus?.toLowerCase() ?? null;
+  return { news: newer || fulfillment !== row.fulfillmentStatus, orderId: row.id };
+}
+
+/** Перечитує замовлення з Shopify і застосовує. Невідомі варіанти спершу синхронізуються як товари. */
+export async function syncOrder(
+  ctx: ServiceContext,
+  admin: AdminGraphql,
+  orderGid: string,
+  mode: OrderSyncMode,
+): Promise<{ result: OrderSyncResult; orderId: string | null }> {
+  const data = await admin<{ order: GqlOrder | null }>(ORDER_QUERY, { id: orderGid });
+  if (!data.order) return { result: "unchanged", orderId: null };
+  if (mode === "refresh") {
+    const check = await refreshFindsNews(ctx.db, data.order);
+    if (!check.news) return { result: "unchanged", orderId: check.orderId };
   }
+  return applyOrder(ctx, admin, await readAllLineItems(admin, data.order), mode === "refresh" ? "live" : mode);
+}
+
+/** Замовлення зі сторінки списку (імпорт): позиції, що не вмістилися, — повторне читання замовлення й сторінки позицій. */
+async function applyListedOrder(ctx: ServiceContext, admin: AdminGraphql, order: GqlOrder, mode: "live" | "import") {
+  if (!order.lineItems.pageInfo?.hasNextPage) return applyOrder(ctx, admin, order, mode);
+  // Свіжий знімок замовлення (updatedAt, з яким звіряються наступні сторінки позицій).
+  const full = await admin<{ order: GqlOrder | null }>(ORDER_QUERY, { id: order.id });
+  if (!full.order) return { result: "unchanged" as const, orderId: null };
+  return applyOrder(ctx, admin, await readAllLineItems(admin, full.order), mode);
+}
+
+/** order — з УСІМА позиціями (readAllLineItems). */
+async function applyOrder(ctx: ServiceContext, admin: AdminGraphql, order: GqlOrder, mode: "live" | "import") {
+  if (order.lineItems.pageInfo?.hasNextPage) throw new ShopifyApiError("Order line items were not read completely", false, "INCOMPLETE_LINE_ITEMS");
   const m = mapOrder(order);
   const known = await resolveVariantIds(ctx.db, m);
   const missingProducts = new Set(
@@ -394,7 +877,7 @@ export async function importOrdersPage(
   payload: { shop: string; since: string; after?: string | null; imported?: number; skipped?: number; updated?: number; failed?: string[] },
 ) {
   const data = await admin<{ orders: { pageInfo: PageInfo; nodes: GqlOrder[] } }>(ORDERS_PAGE_QUERY, {
-    first: PAGE_SIZE,
+    first: ORDERS_PAGE_SIZE,
     after: payload.after ?? null,
     query: `created_at:>=${payload.since}`,
   });
@@ -405,13 +888,13 @@ export async function importOrdersPage(
   for (const order of data.orders.nodes) {
     // Помилка одного замовлення не зупиняє імпорт: воно повторюється окремим завданням.
     try {
-      const r = await applyOrder(ctx, admin, order, "import");
+      const r = await applyListedOrder(ctx, admin, order, "import");
       if (r.result === "created") imported++;
       else if (r.result === "skipped_unpaid") skipped++;
       else updated++;
     } catch (e) {
       if (failed.length < 50) failed.push(order.name);
-      await enqueueJob(ctx.db, JOB.syncOrder, { shop: payload.shop, orderGid: order.id, mode: "import" }, { dedupeKey: `order:${order.id}` });
+      await enqueueJob(ctx.db, JOB.syncOrder, { shop: payload.shop, orderGid: order.id, mode: "import" }, { dedupeKey: orderSyncDedupeKey(order.id) });
       if (e instanceof Error && !(e instanceof DomainError) && /ECONN|fetch failed|timeout/i.test(e.message)) throw e;
     }
   }
@@ -885,10 +1368,11 @@ export async function recordInstallation(db: Db, shop: string, scopes: string | 
   if (existing) {
     await db
       .update(shopInstallations)
-      .set({ scopes, uninstalledAt: null, webhooksRegisteredAt: new Date(), updatedAt: new Date() })
+      .set({ scopes, uninstalledAt: null, updatedAt: new Date() })
       .where(eq(shopInstallations.shop, shop));
   } else {
-    await db.insert(shopInstallations).values({ shop, scopes, webhooksRegisteredAt: new Date() });
+    // Час реєстрації підписок записує recordWebhookRegistration (лише після підтвердження Shopify).
+    await db.insert(shopInstallations).values({ shop, scopes });
   }
   const firstSync = !existing?.productsSyncedAt;
   if (firstSync) await enqueueJob(db, JOB.productsPage, { shop, after: null }, { dedupeKey: "products:start" });
@@ -896,7 +1380,11 @@ export async function recordInstallation(db: Db, shop: string, scopes: string | 
 }
 
 export async function recordUninstall(db: DbOrTx, shop: string) {
-  await db.update(shopInstallations).set({ uninstalledAt: new Date(), updatedAt: new Date() }).where(eq(shopInstallations.shop, shop));
+  // Підписки застосунку після видалення недійсні: повторне встановлення перереєструє їх (і завдання перевірки теж).
+  await db
+    .update(shopInstallations)
+    .set({ uninstalledAt: new Date(), webhooksConfigKey: null, updatedAt: new Date() })
+    .where(eq(shopInstallations.shop, shop));
 }
 
 export async function currentShop(db: DbOrTx): Promise<typeof shopInstallations.$inferSelect | null> {

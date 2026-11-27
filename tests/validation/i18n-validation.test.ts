@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import messages from "~/i18n/messages/validation";
+import { issueCategory } from "~/modules/validation/categories";
 import { AUTO_FIX_RULES, ISSUE_CODES, SHIPPING_FIELDS, VARIANT_CUSTOMS_FIELDS } from "~/modules/validation/types";
 
+// Тексти попереджень складу (пакування) — у packing.ts (повнота всіх issue.<код>.* — tests/i18n/completeness.test.ts).
+const VALIDATION_MODULE_CODES = ISSUE_CODES.filter((code) => issueCategory(code) !== "warehouse");
+
 const requiredKeys = [
-  ...ISSUE_CODES.flatMap((code) => [`issue.${code}.title`, `issue.${code}.help`]),
+  ...VALIDATION_MODULE_CODES.flatMap((code) => [`issue.${code}.title`, `issue.${code}.help`]),
   ...AUTO_FIX_RULES.map((rule) => `autofix.${rule}`),
   ...SHIPPING_FIELDS.map((field) => `field.shipping.${field}`),
   "field.email",
