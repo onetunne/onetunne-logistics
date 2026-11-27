@@ -354,3 +354,13 @@ describe("UI kit SSR rendering", () => {
     expect(html).toContain("Завантаження…");
   });
 });
+
+describe("Checkbox submits 'on' when checked (stage 4 regression)", () => {
+  it("renders no value attribute unless a value is given", async () => {
+    const { Checkbox } = await import("~/ui");
+    const plain = renderToString(h(Checkbox, { label: "x", name: "shippingEnabled", defaultChecked: true }));
+    expect(plain).not.toMatch(/value=/);
+    const withValue = renderToString(h(Checkbox, { label: "x", name: "ids", value: "abc" }));
+    expect(withValue).toMatch(/value="abc"/);
+  });
+});

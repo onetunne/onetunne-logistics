@@ -45,7 +45,7 @@ export async function action({ request }: ActionFunctionArgs): Promise<ActionRes
     if (!UUID_RE.test(id)) throw new DomainError("error.notFound", 404);
     const role = formString(form, "role") === "owner" ? "owner" : "staff";
     const displayName = formString(form, "displayName").trim().slice(0, 80);
-    const active = form.get("active") === "on";
+    const active = form.has("active");
     const [member] = await ctx.db.select().from(staffMembers).where(eq(staffMembers.id, id));
     if (!member) throw new DomainError("error.notFound", 404);
     if (`shopify:${member.shopifyUserId}` === ctx.actor.id && (!active || role !== "owner")) {

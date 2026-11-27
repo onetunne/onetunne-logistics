@@ -340,7 +340,7 @@ async function runIntent(ctx: RequestContext, intent: Intent, form: FormData): P
       requirePermission(ctx.actor, "automation.manage");
       const version = expectedVersion(form);
       if (version === null) return { ok: false, error: "error.generic" };
-      const input = { mode: formString(form, "mode"), globalPause: form.get("globalPause") === "on" };
+      const input = { mode: formString(form, "mode"), globalPause: form.has("globalPause") };
       return saved(await updateSetting(ctx.db, ctx.actor, "automation", await withStored(ctx, "automation", input), version));
     }
     case "saveShipper": {
@@ -363,7 +363,7 @@ async function runIntent(ctx: RequestContext, intent: Intent, form: FormData): P
       );
       // Підтвердження (прапорець) надсилається лише формою з полем вибору адреси реєстрації.
       if (form.has("recipientRegistrationAddress")) {
-        const confirmed = form.get("recipientRegistrationAddressConfirmed") === "on";
+        const confirmed = form.has("recipientRegistrationAddressConfirmed");
         if (input.recipientRegistrationAddress === "shipping" && !confirmed) {
           return invalid({ recipientRegistrationAddressConfirmed: "settings.customs.registrationConfirmRequired" });
         }
@@ -408,7 +408,7 @@ async function runIntent(ctx: RequestContext, intent: Intent, form: FormData): P
       const fx = parseFxRateRows(form, values.novaPost.tariffCurrency);
       const input = {
         ...values.checkoutRates,
-        enabled: form.get("enabled") === "on",
+        enabled: form.has("enabled"),
         markupPercent: decimalNumber(formString(form, "markupPercent")),
         markupFixed: decimalString(formString(form, "markupFixed")),
         rounding: formString(form, "rounding"),
@@ -498,10 +498,10 @@ async function runIntent(ctx: RequestContext, intent: Intent, form: FormData): P
       const version = expectedVersion(form);
       if (version === null) return { ok: false, error: "error.generic" };
       const input = {
-        enabled: form.get("enabled") === "on",
+        enabled: form.has("enabled"),
         intervalMinutes: integerNumber(formString(form, "intervalMinutes")),
-        pushToShopify: form.get("pushToShopify") === "on",
-        notifyCustomer: form.get("notifyCustomer") === "on",
+        pushToShopify: form.has("pushToShopify"),
+        notifyCustomer: form.has("notifyCustomer"),
         trackingUrlTemplate: formString(form, "trackingUrlTemplate"),
       };
       return saved(await updateSetting(ctx.db, ctx.actor, "tracking", await withStored(ctx, "tracking", input), version));

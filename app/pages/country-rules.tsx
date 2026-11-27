@@ -197,7 +197,7 @@ function isMutationIntent(value: string): value is MutationIntent {
 
 function ruleInput(form: FormData) {
   return {
-    ...Object.fromEntries(RULE_FLAGS.map((f) => [f, form.get(f) === "on"])),
+    ...Object.fromEntries(RULE_FLAGS.map((f) => [f, form.has(f)])),
     postalCodePattern: formString(form, "postalCodePattern"),
     postalCodeExample: formString(form, "postalCodeExample"),
     dutyPayer: formString(form, "dutyPayer"),
