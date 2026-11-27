@@ -157,7 +157,7 @@ describe("owner-entered postal patterns are safe (stage 4, ReDoS)", () => {
 
   it("rejects unbounded repetition, backreferences and lookarounds; long values are not matched", async () => {
     const { isSafePostalPattern, compilePostalPattern, matchesPostalPattern } = await import("~/modules/validation/postal");
-    for (const p of ["(\\d+)+", "\\d*", "(a|aa)+", "\\d{2,}", "(\\d)\\1", "(?=\\d)\\d{5}", "(?<!x)\\d"]) {
+    for (const p of ["(\\d+)+", "\\d*", "(a|aa)+", "\\d{2,}", "(\\d)\\1", "(?=\\d)\\d{5}", "(?<!x)\\d", "(\\d|[0-9A-Z]|[A-Z0-9 ]){1,20}", "(\\d{2}){2}"]) {
       expect(isSafePostalPattern(p), p).toBe(false);
       expect(compilePostalPattern(p), p).toBeNull();
     }

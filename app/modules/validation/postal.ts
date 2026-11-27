@@ -60,6 +60,9 @@ export function isSafePostalPattern(pattern: string): boolean {
   const withoutClasses = pattern.replace(/\[(?:\\.|[^\]\\])*\]/g, "C").replace(/\\./g, "E");
   if (/[+*]/.test(withoutClasses)) return false;
   if (/\{\d+,\}/.test(withoutClasses)) return false;
+  // Повтор групи ({n}/{n,m} після «)») — навіть обмежений повтор альтернатив, що перекриваються, дає
+  // експоненційний час. Групу можна лише зробити необов'язковою («?»).
+  if (/\)\{/.test(withoutClasses)) return false;
   return true;
 }
 

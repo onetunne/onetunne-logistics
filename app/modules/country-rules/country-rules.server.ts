@@ -6,7 +6,7 @@ import { ConflictError, DomainError, NotFoundError } from "~/lib/errors";
 import { writeAudit } from "~/modules/audit/audit.server";
 import { VALIDATABLE_STATUSES, validateOrderInTx } from "~/modules/orders/workflow.server";
 import { normalizePostalCode, type CountryRule } from "~/modules/validation";
-import { compilePostalPattern } from "~/modules/validation/postal";
+import { compilePostalPattern, MAX_POSTAL_LENGTH } from "~/modules/validation/postal";
 import type { ServiceContext } from "~/server/types";
 import {
   ERR,
@@ -268,5 +268,5 @@ export function testPostalCode(rule: Pick<CountryRule, "countryCode" | "postalCo
     phoneRequired: false,
   };
   const normalized = normalizePostalCode(cleanSample, full).value;
-  return { patternValid: true, normalized, match: re.test(normalized) };
+  return { patternValid: true, normalized, match: normalized.length <= MAX_POSTAL_LENGTH && re.test(normalized) };
 }
