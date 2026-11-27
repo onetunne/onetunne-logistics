@@ -12,9 +12,16 @@
  *    Порушення → DomainError("inventory.insufficient", 409) і відкат до точки збереження (savepoint):
  *    транзакція викликача лишається придатною, жодних частково записаних рухів.
  * 4. Після зміни — оцінка попереджень (stock_alerts) для змінених позицій.
+ * 5. Товар, ще не «відкритий» (inventory_balances.opened_at = null, див. opening.server.ts): рухи, пов'язані з
+ *    Shopify (reserve/release/consume_sale/shopify_external), заборонені — DomainError("inventory.notOpened", 409);
+ *    внутрішні зміни on_hand не надсилаються в Shopify (стан "skipped"): при відкритті вони ДОДАЮТЬСЯ до знімка
+ *    Shopify (і створюється розбіжність для перевірки власником).
  *
  * ВАЖЛИВО для викликачів: одна логічна операція → один виклик applyMovements з усіма рухами (порядок блокувань
- * гарантується в межах виклику). Блокування в коді: замовлення/партія/пакування → склад → баланси; ніколи навпаки.
+ * гарантується в межах виклику). Порядок блокувань у транзакції: замовлення/партія/пакування → склад
+ * (syncOrderReservations / initializeInventory) → баланси; ніколи навпаки. Рядки замовлень блокуйте
+ * FOR NO KEY UPDATE (не FOR UPDATE): FOR UPDATE конфліктує з перевіркою зовнішніх ключів (KEY SHARE) під час
+ * вставки рухів/резервів цього замовлення в іншій транзакції (ініціалізація складу) → взаємоблокування.
  */
 import { and, asc, count, desc, eq, gte, ilike, inArray, lte, or, sql, type SQL } from "drizzle-orm";
 import type { DbOrTx, Tx } from "~/db/client.server";
@@ -91,6 +98,8 @@ export interface BalanceState {
   /** on_hand − reserved */
   available: number;
   version: number;
+  /** Товар відкрито (облік пов'язано зі знімком Shopify); null — не відкрито / матеріал. */
+  openedAt: Date | null;
 }
 
 export interface AppliedMovement {
@@ -120,6 +129,14 @@ export interface ApplyMovementsOptions {
 }
 
 export const MAX_MOVEMENTS_PER_CALL = 2000;
+
+/** Типи руху, пов'язані з Shopify: лише для ВІДКРИТИХ товарів (див. п. 5 вгорі файлу). */
+export const OPENED_ONLY_MOVEMENT_TYPES: ReadonlySet<MovementType> = new Set<MovementType>([
+  "reserve",
+  "release",
+  "consume_sale",
+  "shopify_external",
+]);
 const REASON_RE = /^[a-z0-9_.-]{1,64}$/;
 const CURRENCY_RE = /^[A-Z]{3}$/;
 
@@ -213,6 +230,7 @@ function toBalanceState(b: typeof inventoryBalances.$inferSelect, kind: StockIte
     inProduction: b.inProduction,
     available: availableOf(b),
     version: b.version,
+    openedAt: b.openedAt,
   };
 }
 
@@ -240,7 +258,13 @@ export async function applyMovements(
   return tx.transaction(async (sp) => {
     const locked = await lockBalances(sp, normalized);
     const settings = await getSetting(sp, "warehouse");
-    for (const m of normalized) assertMovementShape(m.type, locked.get(pairKey(m.warehouseId, m.stockItemId))!.kind, m.deltas);
+    for (const m of normalized) {
+      const b = locked.get(pairKey(m.warehouseId, m.stockItemId))!;
+      assertMovementShape(m.type, b.kind, m.deltas);
+      if (b.kind === "product" && b.openedAt === null && OPENED_ONLY_MOVEMENT_TYPES.has(m.type)) {
+        throw new DomainError("inventory.notOpened", 409, { type: m.type, stockItemId: m.stockItemId });
+      }
+    }
 
     const applied: AppliedMovement[] = [];
     const skipped: ApplyMovementsResult["skipped"] = [];
@@ -248,8 +272,10 @@ export async function applyMovements(
     const decreasingTypes = new Map<string, Set<MovementType>>();
     for (const m of normalized) {
       const pk = pairKey(m.warehouseId, m.stockItemId);
-      const kind = locked.get(pk)!.kind;
-      const syncState = m.shopifySyncState ?? defaultShopifySyncState(m.type, kind, m.deltas.onHand, settings.shopifyPush);
+      const { kind, openedAt } = locked.get(pk)!;
+      let syncState = m.shopifySyncState ?? defaultShopifySyncState(m.type, kind, m.deltas.onHand, settings.shopifyPush);
+      // Невідкритий товар не синхронізується з Shopify: його внутрішні рухи додаються до знімка при відкритті.
+      if (kind === "product" && openedAt === null && syncState === "pending") syncState = "skipped";
       const [row] = await sp
         .insert(inventoryMovements)
         .values({
@@ -585,6 +611,8 @@ export interface BalanceView {
   status: StockLevelStatus;
   /** Shopify «доступно» з останньої синхронізації товару (лише для порівняння; не джерело обліку). */
   shopifyAvailable: number | null;
+  /** Товар відкрито (облік пов'язано зі знімком Shopify; резерви ведуться). null — не відкрито / матеріал. */
+  openedAt: Date | null;
   version: number;
   updatedAt: Date | null;
 }
@@ -633,6 +661,7 @@ export async function getBalances(
     threshold: sql<number>`${threshold}`.mapWith(Number),
     status,
     version: sql<number>`coalesce(${inventoryBalances.version}, 0)`.mapWith(Number),
+    openedAt: inventoryBalances.openedAt,
     updatedAt: inventoryBalances.updatedAt,
   };
   const statusFilter = filters.statuses?.length ? sql`(${status}) in ${filters.statuses}` : undefined;
@@ -690,6 +719,7 @@ export async function getBalances(
         threshold: r.threshold,
         status: r.status,
         shopifyAvailable: null,
+        openedAt: null,
         version: r.version,
         updatedAt: r.updatedAt,
       })),
@@ -758,6 +788,7 @@ export async function getBalances(
       threshold: r.threshold,
       status: r.status,
       shopifyAvailable: r.variant.inventoryAvailable,
+      openedAt: r.openedAt,
       version: r.version,
       updatedAt: r.updatedAt,
     })),
@@ -775,7 +806,7 @@ export async function getBalance(db: DbOrTx, stockItemId: string, warehouseId?: 
     .where(and(eq(inventoryBalances.warehouseId, wid), eq(inventoryBalances.stockItemId, stockItemId)));
   return b
     ? toBalanceState(b, item.kind)
-    : { warehouseId: wid, stockItemId, kind: item.kind, onHand: 0, reserved: 0, defective: 0, inProduction: 0, available: 0, version: 0 };
+    : { warehouseId: wid, stockItemId, kind: item.kind, onHand: 0, reserved: 0, defective: 0, inProduction: 0, available: 0, version: 0, openedAt: null };
 }
 
 export interface MovementFilters {

@@ -120,6 +120,9 @@ const messages: MessageModule = {
     "issue.CARRIER_CANCEL_CONFLICT.title": "Накладну скасовано, а посилку вже передано",
     "issue.CARRIER_CANCEL_CONFLICT.help":
       "{carrier} СКАСУВАВ накладну {waybill}, але під час скасування посилку позначено переданою перевізнику. Накладна в застосунку лишається активною, проте її номер у перевізника більше не діє. Терміново зв’яжіться з перевізником і з’ясуйте долю посилки; після вирішення закрийте цю проблему.",
+    "issue.SHOPIFY_FULFILLED_OUTSIDE_APP.title": "Замовлення виконано в Shopify не застосунком",
+    "issue.SHOPIFY_FULFILLED_OUTSIDE_APP.help":
+      "Shopify показує замовлення виконаним (повністю або частково), але в застосунку передачу посилки перевізнику не зафіксовано. Товар лишається зарезервованим на складі. Якщо посилку справді відправлено — підтвердіть передачу перевізнику (товар буде списано); якщо ні — перевірте виконання в Shopify.",
     "issue.SHOPIFY_FULFILLMENT_FAILED.title": "Трек-номер не передано в Shopify",
     "issue.SHOPIFY_FULFILLMENT_FAILED.help":
       "Посилку передано перевізнику, але виконання з трек-номером у Shopify не створено після кількох спроб ({message}). Перевірте дозволи застосунку (write_merchant_managed_fulfillment_orders) і повторіть на сторінці «Синхронізація Shopify».",
@@ -169,6 +172,7 @@ const messages: MessageModule = {
     "field.shipping.phone": "Телефон одержувача",
     "field.email": "Email",
     "field.contactPhone": "Контактний телефон",
+    "field.lineItems": "Позиції замовлення (кількість)",
     "field.variant.weightGrams": "Вага, г",
     "field.variant.hsCode": "HS-код",
     "field.variant.countryOfOrigin": "Країна походження",
@@ -290,6 +294,9 @@ const messages: MessageModule = {
     "issue.CARRIER_CANCEL_CONFLICT.title": "Waybill cancelled, but the parcel is already handed over",
     "issue.CARRIER_CANCEL_CONFLICT.help":
       "{carrier} CANCELLED waybill {waybill}, but during the cancellation the parcel was marked as handed to the carrier. The waybill stays active in the app, but its number is no longer valid at the carrier. Contact the carrier urgently to clarify what happens to the parcel; close this problem once resolved.",
+    "issue.SHOPIFY_FULFILLED_OUTSIDE_APP.title": "Order fulfilled in Shopify outside the app",
+    "issue.SHOPIFY_FULFILLED_OUTSIDE_APP.help":
+      "Shopify shows the order as fulfilled (fully or partially), but the handover to the carrier is not recorded in the app. The items stay reserved in the warehouse. If the parcel was really shipped, confirm the handover to the carrier (stock will be written off); otherwise check the fulfillment in Shopify.",
     "issue.SHOPIFY_FULFILLMENT_FAILED.title": "Tracking number not sent to Shopify",
     "issue.SHOPIFY_FULFILLMENT_FAILED.help":
       "The parcel was handed to the carrier, but a Shopify fulfillment with the tracking number was not created after several attempts ({message}). Check the app permissions (write_merchant_managed_fulfillment_orders) and retry on the “Shopify sync” page.",
@@ -339,6 +346,7 @@ const messages: MessageModule = {
     "field.shipping.phone": "Recipient phone",
     "field.email": "Email",
     "field.contactPhone": "Contact phone",
+    "field.lineItems": "Order line items (quantities)",
     "field.variant.weightGrams": "Weight, g",
     "field.variant.hsCode": "HS code",
     "field.variant.countryOfOrigin": "Country of origin",

@@ -58,6 +58,7 @@ const CATEGORY_BY_CODE = {
   SHOPIFY_CANCELLED_AFTER_SHIPMENT: "shopify",
   SHOPIFY_COUNTRY_NOT_SHIPPED: "shopify",
   SHOPIFY_FULFILLMENT_FAILED: "shopify",
+  SHOPIFY_FULFILLED_OUTSIDE_APP: "shopify",
   // Доставка (після передачі перевізнику)
   DELIVERY_PROBLEM: "delivery",
 } as const satisfies Record<IssueCode, IssueCategory>;

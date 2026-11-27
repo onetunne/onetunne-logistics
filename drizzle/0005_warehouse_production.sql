@@ -6,11 +6,14 @@ CREATE TABLE "inventory_balances" (
 	"defective" integer DEFAULT 0 NOT NULL,
 	"in_production" integer DEFAULT 0 NOT NULL,
 	"version" integer DEFAULT 0 NOT NULL,
+	"opened_at" timestamp with time zone,
+	"opening_snapshot_at" timestamp with time zone,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "inventory_balances_pk" PRIMARY KEY("warehouse_id","stock_item_id"),
 	CONSTRAINT "inventory_balances_reserved_chk" CHECK ("inventory_balances"."reserved" >= 0),
 	CONSTRAINT "inventory_balances_defective_chk" CHECK ("inventory_balances"."defective" >= 0),
-	CONSTRAINT "inventory_balances_in_production_chk" CHECK ("inventory_balances"."in_production" >= 0)
+	CONSTRAINT "inventory_balances_in_production_chk" CHECK ("inventory_balances"."in_production" >= 0),
+	CONSTRAINT "inventory_balances_opened_chk" CHECK (("inventory_balances"."opened_at" is null) = ("inventory_balances"."opening_snapshot_at" is null))
 );
 --> statement-breakpoint
 CREATE TABLE "inventory_conflicts" (
@@ -239,12 +242,14 @@ CREATE TABLE "stock_reservations" (
 	CONSTRAINT "stock_reservations_qty_chk" CHECK ("stock_reservations"."reserved_qty" >= 0 and "stock_reservations"."consumed_qty" >= 0)
 );
 --> statement-breakpoint
+ALTER TABLE "order_line_items" ADD COLUMN "current_quantity" integer;--> statement-breakpoint
 ALTER TABLE "orders" ADD COLUMN "priority" smallint DEFAULT 0 NOT NULL;--> statement-breakpoint
 ALTER TABLE "orders" ADD COLUMN "parcel_weight_grams" integer;--> statement-breakpoint
 ALTER TABLE "orders" ADD COLUMN "parcel_length_mm" integer;--> statement-breakpoint
 ALTER TABLE "orders" ADD COLUMN "parcel_width_mm" integer;--> statement-breakpoint
 ALTER TABLE "orders" ADD COLUMN "parcel_height_mm" integer;--> statement-breakpoint
 ALTER TABLE "orders" ADD COLUMN "parcel_box_material_id" uuid;--> statement-breakpoint
+ALTER TABLE "product_variants" ADD COLUMN "inventory_synced_at" timestamp with time zone;--> statement-breakpoint
 ALTER TABLE "warehouses" ADD COLUMN "is_default" boolean DEFAULT false NOT NULL;--> statement-breakpoint
 ALTER TABLE "warehouses" ADD COLUMN "inventory_initialized_at" timestamp with time zone;--> statement-breakpoint
 ALTER TABLE "inventory_balances" ADD CONSTRAINT "inventory_balances_warehouse_id_warehouses_id_fk" FOREIGN KEY ("warehouse_id") REFERENCES "public"."warehouses"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
@@ -303,8 +308,12 @@ ALTER TABLE "orders" ADD CONSTRAINT "orders_parcel_box_material_id_packaging_mat
 CREATE INDEX "order_line_items_variant_idx" ON "order_line_items" USING btree ("variant_id");--> statement-breakpoint
 CREATE INDEX "orders_packing_queue_idx" ON "orders" USING btree ("status","priority","placed_at");--> statement-breakpoint
 CREATE UNIQUE INDEX "warehouses_one_default_uq" ON "warehouses" USING btree ("is_default") WHERE "warehouses"."is_default";--> statement-breakpoint
+ALTER TABLE "order_line_items" ADD CONSTRAINT "order_line_items_current_quantity_chk" CHECK ("order_line_items"."current_quantity" is null or "order_line_items"."current_quantity" >= 0);--> statement-breakpoint
 ALTER TABLE "orders" ADD CONSTRAINT "orders_priority_chk" CHECK ("orders"."priority" between 0 and 2);--> statement-breakpoint
 ALTER TABLE "orders" ADD CONSTRAINT "orders_parcel_override_chk" CHECK (("orders"."parcel_weight_grams" is null or "orders"."parcel_weight_grams" > 0)
         and ("orders"."parcel_length_mm" is null or "orders"."parcel_length_mm" > 0)
         and ("orders"."parcel_width_mm" is null or "orders"."parcel_width_mm" > 0)
-        and ("orders"."parcel_height_mm" is null or "orders"."parcel_height_mm" > 0));
+        and ("orders"."parcel_height_mm" is null or "orders"."parcel_height_mm" > 0));--> statement-breakpoint
+-- Етап 5 (дані): у базах, заповнених до етапу 5, наявний активний склад (найстаріший) стає складом за замовчуванням,
+-- а не створюється другий (див. ensureDefaultWarehouse).
+UPDATE "warehouses" SET "is_default" = true WHERE "id" = (SELECT "w"."id" FROM "warehouses" "w" WHERE "w"."active" ORDER BY "w"."created_at", "w"."id" LIMIT 1) AND NOT EXISTS (SELECT 1 FROM "warehouses" "d" WHERE "d"."is_default");

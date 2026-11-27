@@ -1,5 +1,5 @@
 {
-  "id": "63e943e7-7da7-4d47-9063-769215e7369d",
+  "id": "e6779bfd-3a14-4227-9365-dc96f7e8dcf0",
   "prevId": "e3b040e1-5e08-464d-b93c-75616a7c11a9",
   "version": "7",
   "dialect": "postgresql",
@@ -334,6 +334,18 @@
           "notNull": true,
           "default": 0
         },
+        "opened_at": {
+          "name": "opened_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "opening_snapshot_at": {
+          "name": "opening_snapshot_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "updated_at": {
           "name": "updated_at",
           "type": "timestamp with time zone",
@@ -410,6 +422,10 @@
         "inventory_balances_in_production_chk": {
           "name": "inventory_balances_in_production_chk",
           "value": "\"inventory_balances\".\"in_production\" >= 0"
+        },
+        "inventory_balances_opened_chk": {
+          "name": "inventory_balances_opened_chk",
+          "value": "(\"inventory_balances\".\"opened_at\" is null) = (\"inventory_balances\".\"opening_snapshot_at\" is null)"
         }
       },
       "isRLSEnabled": false
@@ -1708,6 +1724,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "current_quantity": {
+          "name": "current_quantity",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
         "unit_price": {
           "name": "unit_price",
           "type": "numeric(14, 2)",
@@ -1818,7 +1840,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "order_line_items_current_quantity_chk": {
+          "name": "order_line_items_current_quantity_chk",
+          "value": "\"order_line_items\".\"current_quantity\" is null or \"order_line_items\".\"current_quantity\" >= 0"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.order_packing": {
@@ -2709,6 +2736,12 @@
         "inventory_available": {
           "name": "inventory_available",
           "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "inventory_synced_at": {
+          "name": "inventory_synced_at",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },

@@ -13,7 +13,9 @@ import {
   movementHistory,
   setLowStockThreshold,
 } from "~/modules/inventory/ledger.server";
-import { getDefaultWarehouse } from "~/modules/inventory/warehouse.server";
+import { ensureDefaultWarehouse, getDefaultWarehouse } from "~/modules/inventory/warehouse.server";
+import { ensureDefaultSettings } from "~/modules/settings/settings.server";
+import { warehouses } from "~/db/schema";
 import { updateSetting } from "~/modules/settings/settings.server";
 import { OWNER, openTestDatabase } from "../helpers";
 import { ACTOR, apply, balance, insertMaterial, insertProduct, movementCount, openAlertKinds, stockItemFor } from "./helpers";
@@ -50,6 +52,18 @@ describe("default warehouse", () => {
     expect(again.name).toBe("Основний склад");
     expect(again.isDefault).toBe(true);
     expect(again.active).toBe(true);
+  });
+
+  it("concurrent creation on a fresh database yields one default warehouse", async () => {
+    const fresh = await openTestDatabase();
+    try {
+      await ensureDefaultSettings(fresh.db);
+      const created = await Promise.all([1, 2, 3].map(() => ensureDefaultWarehouse(fresh.db)));
+      expect(new Set(created.map((w) => w.id)).size).toBe(1);
+      expect(await fresh.db.select().from(warehouses)).toHaveLength(1);
+    } finally {
+      await fresh.close();
+    }
   });
 });
 

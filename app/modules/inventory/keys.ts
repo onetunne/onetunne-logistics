@@ -19,6 +19,11 @@ function key(...parts: Array<string | number>): string {
 export const inventoryKeys = {
   /** Початковий залишок позиції на складі — один раз назавжди. */
   opening: (warehouseId: string, stockItemId: string) => key("opening", warehouseId, stockItemId),
+  /**
+   * Корекція знімка для позиції замовлення, створеного ДО знімка Shopify, але вперше зарезервованого після відкриття
+   * (пізній webhook, імпорт): Shopify уже вилучив її одиниці з «доступно» знімка → on_hand + q. Один раз на позицію.
+   */
+  openingLine: (lineItemId: string) => key("opening_line", lineItemId),
   /** Резерв позиції замовлення, версія seq (stock_reservations.seq після зміни). */
   reserve: (lineItemId: string, seq: number) => key("reserve", lineItemId, seq),
   /** Зняття резерву позиції, версія seq. */

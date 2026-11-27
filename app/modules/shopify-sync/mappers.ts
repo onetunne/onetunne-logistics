@@ -100,7 +100,10 @@ export function mapProduct(p: GqlProduct): MappedProduct {
   };
 }
 
-/** Оплачені (у т. ч. частково повернені) замовлення потрапляють в обробку; неоплачені — ні. */
+/**
+ * Оплачені (у т. ч. частково/повністю повернені) замовлення потрапляють в обробку; неоплачені — ні.
+ * Склад резервує лише currentQuantity, тож повернені одиниці (і повністю повернене замовлення) не резервуються.
+ */
 const PAID_STATUSES = new Set(["PAID", "PARTIALLY_REFUNDED", "REFUNDED"]);
 
 export function isPaid(order: Pick<GqlOrder, "displayFinancialStatus">): boolean {
@@ -143,7 +146,10 @@ export interface MappedOrder {
     title: string;
     variantTitle: string | null;
     sku: string | null;
+    /** Замовлено (разом із поверненими/видаленими одиницями). */
     quantity: number;
+    /** До відправлення: Shopify currentQuantity (без повернених і видалених); резервує й списує склад. */
+    currentQuantity: number;
     unitPrice: string;
     currency: string;
     imageUrl: string | null;
@@ -192,6 +198,8 @@ export function mapOrder(o: GqlOrder): MappedOrder {
       variantTitle: blank(li.variantTitle),
       sku: blank(li.sku),
       quantity: li.quantity,
+      // Старі відповіді/тести без currentQuantity → quantity.
+      currentQuantity: typeof li.currentQuantity === "number" ? Math.max(0, li.currentQuantity) : li.quantity,
       unitPrice: normalizeAmount(li.originalUnitPriceSet.shopMoney.amount),
       currency: li.originalUnitPriceSet.shopMoney.currencyCode,
       imageUrl: li.image?.url ?? null,

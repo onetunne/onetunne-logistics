@@ -1,7 +1,14 @@
-import { and, count, eq } from "drizzle-orm";
+import { and, count, eq, isNull } from "drizzle-orm";
 import type { Db } from "~/db/client.server";
 import { inventoryBalances, inventoryMovements, packagingMaterials, productVariants, products, stockAlerts } from "~/db/schema";
-import { applyMovements, ensureStockItemForMaterial, ensureStockItemForVariant, type MovementActor, type MovementInput } from "~/modules/inventory/ledger.server";
+import {
+  applyMovements,
+  ensureStockItemForMaterial,
+  ensureStockItemForVariant,
+  lockBalances,
+  type MovementActor,
+  type MovementInput,
+} from "~/modules/inventory/ledger.server";
 import { getDefaultWarehouse } from "~/modules/inventory/warehouse.server";
 
 export const ACTOR: MovementActor = { id: "test-owner", displayName: "Owner" };
@@ -34,8 +41,22 @@ export async function insertMaterial(db: Db, code: string) {
   return { materialId: m!.id, stockItemId: await ensureStockItemForMaterial(db, m!.id) };
 }
 
+/**
+ * Позиція обліку варіанта, ВІДКРИТА для тестів ядра (резерви/списання дозволені лише для відкритих товарів).
+ * Уже відкриту (ініціалізація складу) не змінює. Для невідкритих товарів — ensureStockItemForVariant.
+ */
 export async function stockItemFor(db: Db, variantId: string) {
-  return ensureStockItemForVariant(db, variantId);
+  const stockItemId = await ensureStockItemForVariant(db, variantId);
+  const w = await getDefaultWarehouse(db);
+  await db.transaction(async (tx) => {
+    await lockBalances(tx, [{ warehouseId: w.id, stockItemId }]);
+    const at = new Date();
+    await tx
+      .update(inventoryBalances)
+      .set({ openedAt: at, openingSnapshotAt: at })
+      .where(and(eq(inventoryBalances.warehouseId, w.id), eq(inventoryBalances.stockItemId, stockItemId), isNull(inventoryBalances.openedAt)));
+  });
+  return stockItemId;
 }
 
 export async function balance(db: Db, stockItemId: string) {

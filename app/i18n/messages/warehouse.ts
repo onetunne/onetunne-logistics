@@ -11,6 +11,8 @@ const messages: MessageModule = {
     "warehouse.placeholder.initialized": "Облік запущено",
     "warehouse.placeholder.notInitialized": "Ні — початкові залишки ще не завантажено",
     "warehouse.placeholder.openAlerts": "Відкриті попередження",
+    "warehouse.placeholder.unopened": "Нові варіанти, ще не відкриті в обліку (потрібна повторна ініціалізація)",
+    "warehouse.placeholder.untracked": "Варіанти без обліку залишку в Shopify (не резервуються)",
     "production.placeholder.subtitle": "Виробничі партії, надходження та брак",
     "production.placeholder.activeBatches": "Активні партії",
     "picking.placeholder.subtitle": "Черга пакування й контроль комплектації",
@@ -18,6 +20,8 @@ const messages: MessageModule = {
     // Помилки ядра обліку
     "inventory.insufficient": "Недостатньо залишку: операція зробила б кількість від’ємною (зараз {current}, зміна {change}).",
     "inventory.invalidMovement": "Недопустима складська операція. Оновіть сторінку й спробуйте ще раз.",
+    "inventory.notOpened":
+      "Товар ще не відкрито в обліку складу (немає знімка залишку Shopify). Власник: «Склад» → «Ініціалізувати облік».",
     // Кошики
     "inventory.bucket.onHand": "Фактично",
     "inventory.bucket.reserved": "Зарезервовано",
@@ -104,12 +108,15 @@ const messages: MessageModule = {
     "warehouse.placeholder.initialized": "Accounting started",
     "warehouse.placeholder.notInitialized": "No — opening balances have not been loaded yet",
     "warehouse.placeholder.openAlerts": "Open alerts",
+    "warehouse.placeholder.unopened": "New variants not yet opened in accounting (re-run initialization)",
+    "warehouse.placeholder.untracked": "Variants without stock tracking in Shopify (not reserved)",
     "production.placeholder.subtitle": "Production batches, receipts and defects",
     "production.placeholder.activeBatches": "Active batches",
     "picking.placeholder.subtitle": "Packing queue and kit control",
     "picking.placeholder.queued": "Orders in the packing queue",
     "inventory.insufficient": "Not enough stock: the operation would make a quantity negative (now {current}, change {change}).",
     "inventory.invalidMovement": "Invalid warehouse operation. Refresh the page and try again.",
+    "inventory.notOpened": "This product is not opened in warehouse accounting yet (no Shopify stock snapshot). Owner: Warehouse → Initialize accounting.",
     "inventory.bucket.onHand": "On hand",
     "inventory.bucket.reserved": "Reserved",
     "inventory.bucket.available": "Available to sell",

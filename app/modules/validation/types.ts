@@ -58,6 +58,8 @@ export const ISSUE_CODES = [
   "SHOPIFY_CANCELLED_AFTER_SHIPMENT",
   "SHOPIFY_COUNTRY_NOT_SHIPPED",
   "SHOPIFY_FULFILLMENT_FAILED",
+  /** Етап 5: Shopify показує виконання, але передачу перевізнику в застосунку не зафіксовано (резерв складу лишається). */
+  "SHOPIFY_FULFILLED_OUTSIDE_APP",
   // Відстеження (створюються сервісом відстеження)
   "DELIVERY_PROBLEM",
   "CARRIER_SHIPMENT_DELETED",

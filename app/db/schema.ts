@@ -233,6 +233,12 @@ export const productVariants = pgTable(
     customsOverrides: jsonb("customs_overrides"),
     imageUrl: text("image_url"),
     inventoryAvailable: integer("inventory_available"),
+    /**
+     * Етап 5: коли застосунок отримав inventory_available із Shopify (час знімка). Замовлення, створені раніше,
+     * уже не входять у «доступно» знімка (Shopify закріпив їх одиниці) — див. modules/inventory/opening.server.ts.
+     * null — невідомо (демо/дані до етапу 5): за час знімка береться момент відкриття позиції.
+     */
+    inventorySyncedAt: timestamp("inventory_synced_at", { withTimezone: true }),
     /** Shopify InventoryItem GID — для оновлення залишків за webhook inventory_levels/update. */
     inventoryItemId: text("inventory_item_id"),
     createdAt: createdAt(),
@@ -248,6 +254,10 @@ export const productVariants = pgTable(
 // ---------------------------------------------------------------------------
 // Замовлення
 // ---------------------------------------------------------------------------
+
+/** Етап 5: пріоритет відправлення (orders.priority). */
+export const ORDER_PRIORITIES = { normal: 0, high: 1, urgent: 2 } as const;
+export type OrderPriority = (typeof ORDER_PRIORITIES)[keyof typeof ORDER_PRIORITIES];
 
 export const orders = pgTable(
   "orders",
@@ -328,7 +338,14 @@ export const orderLineItems = pgTable(
     title: text("title").notNull(),
     variantTitle: text("variant_title"),
     sku: text("sku"),
+    /** Замовлена кількість (Shopify LineItem.quantity — разом із поверненими й видаленими одиницями). */
     quantity: integer("quantity").notNull(),
+    /**
+     * Етап 5: кількість до відправлення (Shopify LineItem.currentQuantity — без повернених і видалених одиниць).
+     * Саме її резервує й списує склад (effectiveLineQuantity у modules/inventory/quantities.ts). null — як quantity
+     * (демо-замовлення й позиції, збережені до етапу 5).
+     */
+    currentQuantity: integer("current_quantity"),
     unitPrice: money("unit_price").notNull(),
     currency: char("currency", { length: 3 }).notNull(),
     imageUrl: text("image_url"),
@@ -339,6 +356,7 @@ export const orderLineItems = pgTable(
     uniqueIndex("order_line_items_shopify_uq").on(t.orderId, t.shopifyLineItemId),
     // Етап 5: резерви/аналітика продажів за варіантом.
     index("order_line_items_variant_idx").on(t.variantId),
+    check("order_line_items_current_quantity_chk", sql`${t.currentQuantity} is null or ${t.currentQuantity} >= 0`),
   ],
 );
 
@@ -741,6 +759,17 @@ export const inventoryBalances = pgTable(
     inProduction: integer("in_production").notNull().default(0),
     /** Збільшується з кожною зміною (оптимістичне блокування для форм). */
     version: integer("version").notNull().default(0),
+    /**
+     * Етап 5: товар «відкрито» — облік пов'язано зі знімком Shopify (initializeInventory). Лише відкриті позиції
+     * резервуються/списуються під замовлення й надсилаються в Shopify; рухи до відкриття — внутрішні («skipped»).
+     * null — не відкрито (матеріали не відкриваються: Shopify їх не веде).
+     */
+    openedAt: timestamp("opened_at", { withTimezone: true }),
+    /**
+     * Час знімка Shopify, з якого відкрито позицію (product_variants.inventory_synced_at або момент відкриття).
+     * Замовлення, створене раніше, уже враховане знімком: при першому резерві on_hand коригується на його кількість.
+     */
+    openingSnapshotAt: timestamp("opening_snapshot_at", { withTimezone: true }),
     updatedAt: updatedAt(),
   },
   (t) => [
@@ -749,6 +778,7 @@ export const inventoryBalances = pgTable(
     check("inventory_balances_reserved_chk", sql`${t.reserved} >= 0`),
     check("inventory_balances_defective_chk", sql`${t.defective} >= 0`),
     check("inventory_balances_in_production_chk", sql`${t.inProduction} >= 0`),
+    check("inventory_balances_opened_chk", sql`(${t.openedAt} is null) = (${t.openingSnapshotAt} is null)`),
   ],
 );
 

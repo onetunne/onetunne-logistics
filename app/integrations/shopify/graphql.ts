@@ -24,7 +24,7 @@ const orderFields = (lineItemsFirst: number) => `
   lineItems(first: ${lineItemsFirst}) {
     pageInfo { hasNextPage }
     nodes {
-      id title variantTitle sku quantity
+      id title variantTitle sku quantity currentQuantity
       originalUnitPriceSet { ${MONEY} }
       image { url }
       variant { id product { id } }
@@ -149,7 +149,10 @@ export interface GqlOrder {
       title: string;
       variantTitle: string | null;
       sku: string | null;
+      /** Замовлено, разом із поверненими й видаленими одиницями. */
       quantity: number;
+      /** Без повернених і видалених одиниць (LineItem.currentQuantity, 2026-10). Відсутнє в старих тестових даних. */
+      currentQuantity?: number;
       originalUnitPriceSet: GqlMoney;
       image: { url: string } | null;
       variant: { id: string; product: { id: string } | null } | null;

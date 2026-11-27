@@ -83,10 +83,15 @@ export async function loadLineItems(db: DbOrTx, orderId: string): Promise<LineIt
   }));
 }
 
-/** Завантажує замовлення; з `forUpdate` — блокує рядок до кінця транзакції (контроль одночасної обробки). */
+/**
+ * Завантажує замовлення; з `forUpdate` — блокує рядок до кінця транзакції (контроль одночасної обробки).
+ * Блокування FOR NO KEY UPDATE (як у звичайного UPDATE): одночасні зміни замовлення виключені, але вставки
+ * пов'язаних рядків іншими транзакціями (перевірка зовнішнього ключа — KEY SHARE, напр. рухи/резерви складу в
+ * initializeInventory) не блокуються → без взаємоблокувань «замовлення ↔ склад».
+ */
 export async function loadOrderRow(db: DbOrTx, orderId: string, opts: { forUpdate?: boolean } = {}): Promise<OrderRow> {
   const query = db.select().from(orders).where(eq(orders.id, orderId));
-  const [row] = opts.forUpdate ? await query.for("update") : await query;
+  const [row] = opts.forUpdate ? await query.for("no key update") : await query;
   if (!row) throw new NotFoundError("order");
   return row;
 }

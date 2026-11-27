@@ -3,6 +3,7 @@ import { can } from "~/domain/permissions";
 import { useLocale, useT } from "~/i18n";
 import { formatDateTime } from "~/lib/format";
 import { listOpenAlerts } from "~/modules/inventory/ledger.server";
+import { getInventoryOpeningStatus } from "~/modules/inventory/opening.server";
 import { getDefaultWarehouse } from "~/modules/inventory/warehouse.server";
 import { getRequestContext } from "~/server/context.server";
 import { Banner, Card, KeyValueList, Page, Stack } from "~/ui";
@@ -16,10 +17,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
   if (!can(ctx.actor, "warehouse.view")) throw new Response("Forbidden", { status: 403 });
   const warehouse = await getDefaultWarehouse(ctx.db);
   const alerts = await listOpenAlerts(ctx.db, { limit: 500 });
+  const opening = await getInventoryOpeningStatus(ctx.db);
   return {
     warehouseName: warehouse.name,
     initializedAt: warehouse.inventoryInitializedAt ? warehouse.inventoryInitializedAt.toISOString() : null,
     openAlerts: alerts.length,
+    unopenedTracked: opening.unopenedTracked,
+    untrackedVariants: opening.untrackedVariants,
   };
 }
 
@@ -41,6 +45,8 @@ export default function WarehousePage() {
                 value: data.initializedAt ? formatDateTime(data.initializedAt, locale) : t("warehouse.placeholder.notInitialized"),
               },
               { key: "alerts", label: t("warehouse.placeholder.openAlerts"), value: String(data.openAlerts) },
+              { key: "unopened", label: t("warehouse.placeholder.unopened"), value: String(data.unopenedTracked) },
+              { key: "untracked", label: t("warehouse.placeholder.untracked"), value: String(data.untrackedVariants) },
             ]}
           />
         </Card>
