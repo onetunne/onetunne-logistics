@@ -13,16 +13,15 @@
  * - Нова накладна проходить свіжу перевірку даних; якщо її створення заблоковано — результат прямо каже,
  *   що стару накладну СКАСОВАНО і що саме блокує нову.
  */
-import type { ShipmentRow } from "~/modules/orders/repository.server";
-import { loadOrderRow } from "~/modules/orders/repository.server";
+import { eq } from "drizzle-orm";
+import { shipmentEvents, shipments } from "~/db/schema";
 import type { OrderStatus } from "~/domain/order-status";
 import { requirePermission } from "~/domain/permissions";
 import { DomainError, NotFoundError } from "~/lib/errors";
 import { writeAudit } from "~/modules/audit/audit.server";
+import { loadOrderRow, type ShipmentRow } from "~/modules/orders/repository.server";
 import { REQUIRED_SHIPPER_FIELDS } from "~/modules/settings/schema";
 import { getSettings } from "~/modules/settings/settings.server";
-import { shipmentEvents, shipments } from "~/db/schema";
-import { eq } from "drizzle-orm";
 import type { ServiceContext } from "~/server/types";
 import {
   cancelWaybillDetailed,

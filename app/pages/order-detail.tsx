@@ -11,6 +11,8 @@ import {
 } from "react-router";
 import { ActionBanner, type ActionResult } from "~/components/action-banner";
 import { CarrierDocumentButtons } from "~/components/carrier-documents";
+import { CustomerRequestPanel, type CustomerRequestDraftView } from "~/components/customer-request-panel";
+import { buildCustomerRequestDraft, type IssueLike } from "~/modules/customer-requests/requests";
 import { useCan, useHref } from "~/components/shell";
 import { OverriddenBadge, VariantCustomsForm } from "~/components/variant-customs-form";
 import { OrderStatusBadge, SeverityBadge, ShipmentStatusBadge, TestBadge } from "~/components/status-badge";
@@ -160,6 +162,21 @@ function actorKind(actorId: string, ctx: RequestContext): "system" | "owner" | "
 // Loader
 // ---------------------------------------------------------------------------
 
+/** Лише для замовлень до передачі перевізнику й не скасованих; лише якщо є що запитати в клієнта. */
+function customerRequestDrafts(
+  issues: readonly IssueLike[],
+  order: { status: OrderStatus; orderNumber: string },
+): { uk: CustomerRequestDraftView | null; en: CustomerRequestDraftView | null } | null {
+  if (isShipped(order.status) || order.status === "cancelled") return null;
+  const view = (locale: "uk" | "en"): CustomerRequestDraftView | null => {
+    const d = buildCustomerRequestDraft(issues, locale, { orderNumber: order.orderNumber });
+    return d ? { text: d.text, fields: d.requests.map((r) => r.field) } : null;
+  };
+  const uk = view("uk");
+  const en = view("en");
+  return uk || en ? { uk, en } : null;
+}
+
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const ctx = await getRequestContext(request);
   try {
@@ -293,6 +310,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         : null,
     })),
     openIssues,
+    /** Чернетки запиту даних у клієнта (лише шаблони + номер замовлення; нічого не надсилається). */
+    customerRequestDrafts: customerRequestDrafts(agg.openIssues, order),
     shipments: agg.shipments.map((s, index) => {
       const adapter = ctx.carriers.get(s.carrierCode);
       const events = trackingEvents[index] ?? [];
@@ -891,6 +910,12 @@ export default function OrderDetailPage() {
         <Grid columns={{ xs: 1, lg: 2 }} gap={4}>
           <Stack gap={4}>
             <IssuesCard data={data} />
+            {data.customerRequestDrafts ? (
+              <CustomerRequestPanel
+                drafts={data.customerRequestDrafts}
+                defaultLocale={data.order.countryCode === "UA" ? "uk" : "en"}
+              />
+            ) : null}
             <AddressCard data={data} fieldErrors={fieldErrors} />
             <ShopifySyncCard data={data} />
             <ItemsCard data={data} fieldErrors={fieldErrors} />

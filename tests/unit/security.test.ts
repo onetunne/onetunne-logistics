@@ -59,3 +59,13 @@ describe("webhook retries after a failed processing", () => {
     await close();
   });
 });
+
+describe("redact keeps identifiers intact (stage 4)", () => {
+  it("does not mask parts of UUIDs but still masks phones", () => {
+    const id = "a0c8ef99-2560-4c1e-9b11-123456789012";
+    expect(redact(`order ${id}`)).toBe(`order ${id}`);
+    expect(redact("call +380 67 123 45 67 now")).toBe("call [phone] now");
+    expect(redact("tel:0671234567")).toBe("tel:[phone]");
+    expect(redact("(067) 123-45-67")).toBe("([phone]");
+  });
+});

@@ -5,7 +5,9 @@
 const SENSITIVE_KEY_RE =
   /(phone|email|name|address|city|postal|zip|street|company|token|secret|password|authorization|cookie|apikey|api_key|access|refresh)/i;
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
-const PHONE_RE = /\+?\d[\d\s().-]{6,}\d/g;
+// Межі: не всередині ідентифікаторів (UUID, hex, номери з дефісами між буквено-цифровими частинами) —
+// інакше частини UUID маскувалися як телефони й ідентифікатори в журналі ставали непридатними.
+const PHONE_RE = /(?<![\w-])\+?\d[\d\s().-]{6,}\d(?![\w-])/g;
 
 /**
  * Повідомлення помилки без даних запиту: помилки БД (Drizzle) містять текст SQL і значення параметрів

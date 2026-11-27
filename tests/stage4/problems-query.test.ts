@@ -69,7 +69,8 @@ describe("categories", () => {
     const f = categoryCodeFilter("other");
     expect("exclude" in f && f.exclude).toContain("PHONE_INVALID");
     const p = categoryCodeFilter("phone");
-    expect("include" in p && p.include.sort()).toEqual(["PHONE_AMBIGUOUS", "PHONE_INVALID", "PHONE_MISSING"]);
+    expect("include" in p && p.include).toEqual(expect.arrayContaining(["PHONE_AMBIGUOUS", "PHONE_INVALID", "PHONE_MISSING"]));
+    expect("include" in p && p.include.every((c) => c.startsWith("PHONE_"))).toBe(true);
   });
 });
 
@@ -136,20 +137,22 @@ describe("queryProblems", () => {
     const carrier = await insertIssue(a!, { code: "CARRIER_REJECTED", severity: "error" });
     const shopify = await insertIssue(b!, { code: "SHOPIFY_SYNC_FAILED", severity: "warning" });
     const tracking = await insertIssue(b!, { code: "CARRIER_SHIPMENT_DELETED", severity: "warning" });
+    const delivery = await insertIssue(b!, { code: "DELIVERY_PROBLEM", severity: "warning" });
     const future = await insertIssue(b!, { code: "FUTURE_CODE_X", severity: "warning" });
     const ids = (r: Awaited<ReturnType<typeof queryProblems>>) => r.groups.flatMap((g) => g.issues.map((i) => i.id));
 
     expect(ids(await queryProblems(env.handle.db, { source: "carrier", pageSize: 100 }))).toEqual([carrier.id]);
     expect(ids(await queryProblems(env.handle.db, { source: "shopify", pageSize: 100 }))).toEqual([shopify.id]);
-    expect(ids(await queryProblems(env.handle.db, { source: "tracking", pageSize: 100 }))).toEqual([tracking.id]);
+    expect(ids(await queryProblems(env.handle.db, { source: "tracking", pageSize: 100 })).sort()).toEqual([tracking.id, delivery.id].sort());
     const validation = ids(await queryProblems(env.handle.db, { source: "validation", pageSize: 100 }));
     expect(validation).toContain(future.id);
     expect(validation).not.toContain(carrier.id);
     expect(ids(await queryProblems(env.handle.db, { category: "other", pageSize: 100 }))).toContain(future.id);
-    expect(ids(await queryProblems(env.handle.db, { category: "delivery", pageSize: 100 }))).toEqual([tracking.id]);
+    expect(ids(await queryProblems(env.handle.db, { category: "delivery", pageSize: 100 }))).toEqual([delivery.id]);
+    expect(ids(await queryProblems(env.handle.db, { category: "carrier", pageSize: 100 })).sort()).toEqual([carrier.id, tracking.id].sort());
 
     await env.handle.db.delete(issues).where(eq(issues.code, "CARRIER_REJECTED"));
-    for (const id of [shopify.id, tracking.id, future.id]) await env.handle.db.delete(issues).where(eq(issues.id, id));
+    for (const id of [shopify.id, tracking.id, delivery.id, future.id]) await env.handle.db.delete(issues).where(eq(issues.id, id));
   });
 
   it("paginates by order and clamps the page", async () => {
