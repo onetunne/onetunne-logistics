@@ -1,6 +1,6 @@
 import type { Db } from "~/db/client.server";
 import { enqueueJob } from "~/modules/jobs/queue.server";
-import { JOB } from "~/modules/shopify-sync/sync.server";
+import { JOB, pushDedupeKey } from "~/modules/shopify-sync/sync.server";
 import type { ShopifyGateway, ShopifySyncResult } from "./types";
 
 /** dedupeKey завдання передачі трек-номера: `fulfill:<shipmentId>`. */
@@ -21,7 +21,7 @@ export class QueueingShopifyGateway implements ShopifyGateway {
     if (!shopifyOrderId) return { status: "skipped", reason: "not_linked" };
     const shop = await this.shop();
     if (!shop) return { status: "skipped", reason: "not_linked" };
-    await enqueueJob(this.db, JOB.pushOrder, { shop, shopifyOrderId }, { dedupeKey: `push:${shopifyOrderId}` });
+    await enqueueJob(this.db, JOB.pushOrder, { shop, shopifyOrderId }, { dedupeKey: pushDedupeKey(shopifyOrderId) });
     return { status: "queued" };
   }
 

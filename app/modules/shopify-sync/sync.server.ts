@@ -3,11 +3,11 @@
  * Webhook лише ставить завдання в чергу; завдання завжди перечитує свіжі дані через GraphQL Admin API,
  * тож порядок і повтори подій не призводять до неузгодженості.
  */
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, like, notLike, or, sql } from "drizzle-orm";
 import type { Db, DbOrTx } from "~/db/client.server";
 import { issues, jobs, orderChanges, orderLineItems, orders, productVariants, products, shipments, shopInstallations } from "~/db/schema";
 import { isShipped } from "~/domain/order-status";
-import { SYSTEM_ACTOR } from "~/domain/permissions";
+import { SYSTEM_ACTOR, requirePermission } from "~/domain/permissions";
 import { DomainError } from "~/lib/errors";
 import { writeAudit } from "~/modules/audit/audit.server";
 import { enqueueJob } from "~/modules/jobs/queue.server";
@@ -15,6 +15,7 @@ import { loadOrderRow, shippingAddressOf, type OrderRow } from "~/modules/orders
 import { VALIDATABLE_STATUSES, validateOrderInTx } from "~/modules/orders/workflow.server";
 import { cancelOrder, processPaidOrder } from "~/modules/shipments/waybill.server";
 import type { AdminGraphql } from "~/integrations/shopify/admin-client.server";
+import type { ShopifyGateway, ShopifySyncResult } from "~/integrations/shopify/types";
 import {
   INVENTORY_ITEM_PRODUCT_QUERY,
   ORDER_QUERY,
@@ -606,7 +607,7 @@ async function recordPushSuccess(db: Db, orderId: string, shopifyOrderId: string
     await tx
       .update(jobs)
       .set({ status: "failed", lastError: "superseded_by_successful_sync", updatedAt: new Date() })
-      .where(and(eq(jobs.type, JOB.pushOrder), eq(jobs.dedupeKey, `push:${shopifyOrderId}`), eq(jobs.status, "dead")));
+      .where(and(eq(jobs.type, JOB.pushOrder), eq(jobs.dedupeKey, pushDedupeKey(shopifyOrderId)), eq(jobs.status, "dead")));
     await writeAudit(tx, SYSTEM_ACTOR, "shopify.order_pushed", { type: "order", id: orderId });
   });
 }
@@ -695,6 +696,184 @@ export async function reportPushFailure(db: Db, shopifyOrderId: string, error: s
     .limit(1);
   // Помилки полів уже зафіксовано під час відповіді Shopify; загальна — лише для збоїв без деталей.
   if (!existing) await openSyncIssue(db, order.id, "SHOPIFY_SYNC_FAILED", { message: error.slice(0, 200) });
+}
+
+// ---------------------------------------------------------------------------
+// Етап 4: стан передачі підтверджених змін у Shopify і повторне надсилання
+// ---------------------------------------------------------------------------
+
+/** dedupeKey завдання передачі змін замовлення в Shopify (одне очікуване завдання на замовлення). */
+export function pushDedupeKey(shopifyOrderId: string): string {
+  return `push:${shopifyOrderId}`;
+}
+
+/** Поля, підтверджені зміни яких передаються в Shopify (контакти й адреса доставки). */
+const PUSHED_CHANGE_SOURCES = ["manual", "suggestion_accepted"] as const;
+const PUSH_FAILURE_CODES = ["SHOPIFY_SYNC_FAILED", "SHOPIFY_COUNTRY_NOT_SHIPPED"] as const;
+
+export interface PushFailure {
+  code: (typeof PUSH_FAILURE_CODES)[number];
+  field: string | null;
+  /** Текст помилки Shopify (як повернув Shopify) або null (напр. країна поза зонами доставки — див. params). */
+  message: string | null;
+  params: Record<string, string | number>;
+}
+
+export type ShopifyPushState =
+  /** Демо: у Shopify нічого не надсилається. */
+  | { state: "demo"; hasChanges: boolean }
+  /** Замовлення не пов'язане з Shopify (немає shopifyOrderId). */
+  | { state: "not_linked"; hasChanges: boolean }
+  /** Підтверджених локальних змін контактів/адреси немає — передавати нічого. */
+  | { state: "none" }
+  /** Завдання в черзі або виконується; retrying — попередня спроба не вдалася й буде повторена. */
+  | { state: "queued"; at: Date; retrying: boolean; lastError: string | null; failures: PushFailure[] }
+  /** Shopify прийняв поточні дані (після останньої підтвердженої зміни). */
+  | { state: "synced"; at: Date }
+  /** Shopify відхилив зміни або спроби вичерпано: текст Shopify у failures / lastError. */
+  | { state: "failed"; at: Date | null; lastError: string | null; failures: PushFailure[] }
+  /** Є підтверджені зміни, але завдання не ставилося (напр. дані з помилками перевірки) або змінено після синхронізації. */
+  | { state: "not_sent"; lastChangeAt: Date };
+
+export interface PushStateInput {
+  gateway: ShopifyGateway["kind"];
+  shopifyOrderId: string | null;
+  /** Час останньої підтвердженої (ручної/прийнятої) зміни контактів або адреси. */
+  lastConfirmedChangeAt: Date | null;
+  /** Завдання shopify.push_order з dedupeKey цього замовлення (будь-який порядок). */
+  jobs: Array<{ status: JobRowStatus; attempts: number; lastError: string | null; updatedAt: Date }>;
+  /** Відкриті проблеми синхронізації (SHOPIFY_SYNC_FAILED / SHOPIFY_COUNTRY_NOT_SHIPPED). */
+  failures: PushFailure[];
+}
+
+type JobRowStatus = (typeof jobs.$inferSelect)["status"];
+
+/** Чиста функція: стан передачі змін у Shopify за завданнями черги та відкритими проблемами. */
+export function derivePushState(input: PushStateInput): ShopifyPushState {
+  const hasChanges = input.lastConfirmedChangeAt !== null;
+  if (input.gateway === "demo") return { state: "demo", hasChanges };
+  if (!input.shopifyOrderId) return { state: "not_linked", hasChanges };
+  // «failed» у черзі — завдання, замінене новішим або закрите успішною синхронізацією: не враховуємо.
+  const relevant = input.jobs.filter((j) => j.status !== "failed").sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+  const latest = relevant[0] ?? null;
+  if (latest && (latest.status === "queued" || latest.status === "running")) {
+    return {
+      state: "queued",
+      at: latest.updatedAt,
+      retrying: latest.attempts > 0 && Boolean(latest.lastError),
+      lastError: latest.lastError,
+      failures: input.failures,
+    };
+  }
+  if (input.failures.length > 0 || latest?.status === "dead") {
+    return {
+      state: "failed",
+      at: latest?.updatedAt ?? null,
+      lastError: latest?.status === "dead" ? latest.lastError : null,
+      failures: input.failures,
+    };
+  }
+  if (latest?.status === "succeeded") {
+    if (input.lastConfirmedChangeAt && input.lastConfirmedChangeAt.getTime() > latest.updatedAt.getTime()) {
+      return { state: "not_sent", lastChangeAt: input.lastConfirmedChangeAt };
+    }
+    return { state: "synced", at: latest.updatedAt };
+  }
+  return input.lastConfirmedChangeAt ? { state: "not_sent", lastChangeAt: input.lastConfirmedChangeAt } : { state: "none" };
+}
+
+/** Стан передачі підтверджених змін замовлення в Shopify (для сторінки замовлення). */
+export async function loadShopifyPushState(
+  db: DbOrTx,
+  gateway: ShopifyGateway["kind"],
+  order: Pick<OrderRow, "id" | "shopifyOrderId">,
+): Promise<ShopifyPushState> {
+  const [lastChange] = await db
+    .select({ at: orderChanges.createdAt })
+    .from(orderChanges)
+    .where(
+      and(
+        eq(orderChanges.orderId, order.id),
+        inArray(orderChanges.source, [...PUSHED_CHANGE_SOURCES]),
+        or(like(orderChanges.field, "shipping.%"), inArray(orderChanges.field, ["email", "contactPhone"])),
+      ),
+    )
+    .orderBy(desc(orderChanges.createdAt))
+    .limit(1);
+  const jobRows = order.shopifyOrderId
+    ? await db
+        .select({ status: jobs.status, attempts: jobs.attempts, lastError: jobs.lastError, updatedAt: jobs.updatedAt })
+        .from(jobs)
+        .where(and(eq(jobs.type, JOB.pushOrder), eq(jobs.dedupeKey, pushDedupeKey(order.shopifyOrderId))))
+        .orderBy(desc(jobs.updatedAt))
+        .limit(20)
+    : [];
+  const failureRows = await db
+    .select({ code: issues.code, field: issues.field, params: issues.params })
+    .from(issues)
+    .where(and(eq(issues.orderId, order.id), eq(issues.status, "open"), inArray(issues.code, [...PUSH_FAILURE_CODES])));
+  const failures: PushFailure[] = failureRows.map((r) => {
+    const params = (r.params ?? {}) as Record<string, string | number>;
+    return {
+      code: r.code as PushFailure["code"],
+      field: r.field,
+      message: typeof params.message === "string" ? params.message : null,
+      params,
+    };
+  });
+  return derivePushState({
+    gateway,
+    shopifyOrderId: order.shopifyOrderId,
+    lastConfirmedChangeAt: lastChange?.at ?? null,
+    jobs: jobRows,
+    failures,
+  });
+}
+
+/**
+ * «Повторно надіслати в Shopify»: ставить у чергу передачу ПОТОЧНИХ підтверджених контактів і адреси
+ * (те саме завдання shopify.push_order, дедуплікація за push:<shopifyOrderId> — повтор не дублює очікуване завдання).
+ * Демо: нічого не надсилається. Дані з відкритими помилками перевірки не надсилаються (спершу виправлення).
+ */
+export async function resendOrderToShopify(ctx: ServiceContext, orderId: string): Promise<ShopifySyncResult> {
+  requirePermission(ctx.actor, "orders.edit");
+  const order = await loadOrderRow(ctx.db, orderId);
+  if (order.status === "cancelled") throw new DomainError("order.notEditable", 409, { status: order.status });
+  let result: ShopifySyncResult;
+  if (ctx.shopify.kind === "demo") {
+    result = { status: "skipped", reason: "demo_mode" };
+  } else if (!order.shopifyOrderId) {
+    result = { status: "skipped", reason: "not_linked" };
+  } else {
+    const [invalid] = await ctx.db
+      .select({ id: issues.id })
+      .from(issues)
+      .where(
+        and(
+          eq(issues.orderId, order.id),
+          eq(issues.status, "open"),
+          eq(issues.severity, "error"),
+          or(like(issues.field, "shipping.%"), inArray(issues.field, ["email", "contactPhone"])),
+          notLike(issues.code, "SHOPIFY_%"),
+        ),
+      )
+      .limit(1);
+    if (invalid) {
+      result = { status: "skipped", reason: "invalid_data" };
+    } else {
+      try {
+        // Одне завдання передає контакти й адресу повністю (QueueingShopifyGateway → shopify.push_order).
+        result = await ctx.shopify.updateOrderShippingAddress(order.shopifyOrderId, shippingAddressOf(order));
+      } catch {
+        result = { status: "failed", error: "shopify.syncFailed" };
+      }
+    }
+  }
+  await writeAudit(ctx.db, ctx.actor, "order.shopify_resend", { type: "order", id: order.id }, {
+    status: result.status,
+    ...(result.status === "skipped" ? { reason: result.reason } : {}),
+  });
+  return result;
 }
 
 // ---------------------------------------------------------------------------

@@ -3,7 +3,7 @@ import type { MessageModule } from "../types";
 /**
  * Повідомлення модуля перевірки даних замовлення.
  * Ключі: issue.<CODE>.title / issue.<CODE>.help, autofix.<ruleId>, field.<path>.
- * Параметри: {country}, {example}, {title}, {sku}.
+ * Параметри: {country}, {example}, {title}, {sku}, {max}, {phoneCountry}, {prefix}, {province}, {expected}.
  */
 const messages: MessageModule = {
   uk: {
@@ -17,19 +17,46 @@ const messages: MessageModule = {
     "issue.PHONE_AMBIGUOUS.title": "Телефон можна прочитати по-різному",
     "issue.PHONE_AMBIGUOUS.help":
       "Цифри номера підходять до кількох варіантів: як місцевий номер країни доставки і як номер з кодом іншої країни. Виберіть правильний варіант із запропонованих або уточніть номер у клієнта.",
+    "issue.PHONE_NOT_MOBILE.title": "Стаціонарний телефон",
+    "issue.PHONE_NOT_MOBILE.help":
+      "Номер одержувача — стаціонарний, тож SMS-сповіщення від перевізника не дійдуть, а кур'єр може не додзвонитися. Попросіть у клієнта мобільний номер; якщо його немає — відхиліть попередження.",
+    "issue.PHONE_COUNTRY_MISMATCH.title": "Телефон іншої країни",
+    "issue.PHONE_COUNTRY_MISMATCH.help":
+      "Номер належить країні {phoneCountry}, а доставка — у {country}. Для адресної доставки перевізники (напр. Nova Post) потребують мобільний номер країни одержувача. Уточніть місцевий номер у клієнта або відхиліть попередження, якщо номер правильний.",
     "issue.EMAIL_INVALID.title": "Некоректний email",
     "issue.EMAIL_INVALID.help":
       "Адреса електронної пошти має неправильний формат. Відправлення це не блокує, але клієнт може не отримати сповіщень від перевізника. Виправте адресу або уточніть її в клієнта.",
+    "issue.EMAIL_MISSING.title": "Немає email одержувача",
+    "issue.EMAIL_MISSING.help":
+      "Для міжнародного відправлення перевізник і митниця використовують email одержувача для сповіщень і митних запитів. Попросіть email у клієнта та додайте його до замовлення.",
 
     // --- Адреса ---
     "issue.NAME_MISSING.title": "Немає імені одержувача",
     "issue.NAME_MISSING.help":
       "В адресі доставки не вказано ні ім'я, ні прізвище, а без одержувача перевізник посилку не прийме. Додайте ім'я та прізвище одержувача.",
+    "issue.NAME_INCOMPLETE.title": "Неповне ім'я одержувача",
+    "issue.NAME_INCOMPLETE.help":
+      "Вказано лише ім'я або лише прізвище, а перевізнику потрібне повне ім'я одержувача. Додайте відсутню частину; якщо ім'я й прізвище записано в одне поле — розділіть їх.",
     "issue.ADDRESS_MISSING.title": "Немає адреси",
     "issue.ADDRESS_MISSING.help":
       "Не заповнено рядок адреси (вулиця, будинок). Додайте адресу доставки; за потреби уточніть її в клієнта.",
+    "issue.ADDRESS_LINE1_EMPTY_LINE2_FILLED.title": "Адресу записано в другий рядок",
+    "issue.ADDRESS_LINE1_EMPTY_LINE2_FILLED.help":
+      "Перший рядок адреси порожній, а адресу вказано в другому рядку. Перевізник бере вулицю й будинок з першого рядка. Підтвердьте перенесення адреси в перший рядок і перевірте, щоб другий рядок не повторював перший.",
+    "issue.ADDRESS_NO_HOUSE_NUMBER.title": "Немає номера будинку",
+    "issue.ADDRESS_NO_HOUSE_NUMBER.help":
+      "В адресі немає жодної цифри, тож, імовірно, не вказано номер будинку чи квартири. Уточніть номер у клієнта; якщо адреса без номера правильна (напр. назва будівлі) — відхиліть попередження.",
+    "issue.ADDRESS_FIELD_TOO_LONG.title": "Задовге поле адреси",
+    "issue.ADDRESS_FIELD_TOO_LONG.help":
+      "Поле довше за {max} символів — перевізник не прийме таку накладну. Скоротіть текст або перенесіть частину адреси в інший рядок.",
+    "issue.ADDRESS_DUPLICATED_FIELDS.title": "Поля адреси повторюються",
+    "issue.ADDRESS_DUPLICATED_FIELDS.help":
+      "Це поле дублює перший рядок адреси (напр. місто записано замість вулиці або другий рядок повторює перший). Перевірте адресу та виправте або очистьте зайве поле.",
     "issue.CITY_MISSING.title": "Немає міста",
     "issue.CITY_MISSING.help": "Не вказано місто доставки. Додайте місто з адреси клієнта.",
+    "issue.CITY_CONTAINS_POSTAL_CODE.title": "Індекс у полі «Місто»",
+    "issue.CITY_CONTAINS_POSTAL_CODE.help":
+      "У назві міста є поштовий індекс. Підтвердьте запропоновану назву міста без індексу. Якщо запропонованого варіанта немає, індекс у місті відрізняється від поля «Індекс» — з'ясуйте правильний індекс у клієнта.",
     "issue.COUNTRY_MISSING.title": "Немає країни",
     "issue.COUNTRY_MISSING.help":
       "Не вказано країну доставки, тому неможливо перевірити індекс і правила доставки. Вкажіть дволітерний код країни ISO 3166-1, напр. DE.",
@@ -41,13 +68,19 @@ const messages: MessageModule = {
       "Доставку до країни {country} вимкнено в правилах країн, тому накладну створити не можна. Узгодьте з клієнтом іншу адресу доставки або скасуйте замовлення.",
     "issue.POSTAL_CODE_MISSING.title": "Немає поштового індексу",
     "issue.POSTAL_CODE_MISSING.help":
-      "Для цієї країни поштовий індекс обов'язковий. Уточніть індекс у клієнта та внесіть його у форматі {example}. Автоматичний пошук індексу за адресою заплановано на наступних етапах.",
+      "Для цієї країни поштовий індекс обов'язковий. Якщо індекс знайдено в полі «Місто», його запропоновано — перевірте й підтвердьте. Інакше уточніть індекс у клієнта та внесіть його у форматі {example}. Пошук індексу в адресних довідниках заплановано на наступних етапах.",
     "issue.POSTAL_CODE_INVALID.title": "Неправильний формат індексу",
     "issue.POSTAL_CODE_INVALID.help":
       "Індекс не відповідає формату країни доставки (приклад: {example}). Перевірте індекс і країну в адресі та виправте помилку — цифри й літери індексу система автоматично не змінює.",
+    "issue.POSTAL_CODE_REGION_MISMATCH.title": "Індекс не відповідає регіону",
+    "issue.POSTAL_CODE_REGION_MISMATCH.help":
+      "Індекс, що починається з «{prefix}», належить регіонам {expected}, а вказано регіон {province}. Помилка може бути в індексі або в регіоні — уточніть адресу в клієнта та виправте потрібне поле.",
     "issue.PROVINCE_MISSING.title": "Немає регіону",
     "issue.PROVINCE_MISSING.help":
       "Для цієї країни потрібно вказати штат, провінцію або регіон. Додайте регіон з адреси клієнта (напр. код штату).",
+    "issue.PROVINCE_INVALID.title": "Невідомий регіон",
+    "issue.PROVINCE_INVALID.help":
+      "Значення в полі «Регіон / штат» не є кодом регіону країни {country}. Якщо запропоновано код — перевірте й підтвердьте його; інакше введіть код регіону (напр. NY, ON, NSW).",
 
     // --- Товари / митниця ---
     "issue.ORDER_NO_ITEMS.title": "Немає товарів",
@@ -109,6 +142,7 @@ const messages: MessageModule = {
     // --- Автовиправлення ---
     "autofix.text.trim_whitespace": "Прибрано зайві пробіли",
     "autofix.country.uppercase": "Код країни записано великими літерами",
+    "autofix.province.uppercase": "Код регіону записано великими літерами",
     "autofix.phone.normalize_format": "Прибрано форматування телефону (пробіли, дужки, дефіси)",
     "autofix.phone.international_prefix_00": "Префікс 00 замінено на +",
     "autofix.phone.add_plus": "Додано + перед кодом країни",
@@ -147,19 +181,46 @@ const messages: MessageModule = {
     "issue.PHONE_AMBIGUOUS.title": "Phone number is ambiguous",
     "issue.PHONE_AMBIGUOUS.help":
       "The digits fit more than one reading: a local number of the shipping country and a number with another country code. Choose the correct option from the suggestions or confirm the number with the customer.",
+    "issue.PHONE_NOT_MOBILE.title": "Landline phone number",
+    "issue.PHONE_NOT_MOBILE.help":
+      "The recipient's number is a landline, so carrier SMS notifications will not arrive and the courier may not get through. Ask the customer for a mobile number; if there is none, dismiss the warning.",
+    "issue.PHONE_COUNTRY_MISMATCH.title": "Phone from another country",
+    "issue.PHONE_COUNTRY_MISMATCH.help":
+      "The number belongs to {phoneCountry}, but the parcel goes to {country}. For address delivery, carriers (e.g. Nova Post) need a mobile number of the recipient's country. Ask the customer for a local number or dismiss the warning if the number is correct.",
     "issue.EMAIL_INVALID.title": "Invalid email",
     "issue.EMAIL_INVALID.help":
       "The email address is malformed. This does not block shipping, but the customer may not receive carrier notifications. Fix the address or confirm it with the customer.",
+    "issue.EMAIL_MISSING.title": "Recipient email missing",
+    "issue.EMAIL_MISSING.help":
+      "For an international shipment, the carrier and customs use the recipient's email for notifications and customs queries. Ask the customer for an email address and add it to the order.",
 
     // --- Address ---
     "issue.NAME_MISSING.title": "Recipient name missing",
     "issue.NAME_MISSING.help":
       "The shipping address has neither a first name nor a last name, and the carrier will not accept a parcel without a recipient. Add the recipient's first and last name.",
+    "issue.NAME_INCOMPLETE.title": "Recipient name incomplete",
+    "issue.NAME_INCOMPLETE.help":
+      "Only the first name or only the last name is given, but the carrier needs the recipient's full name. Add the missing part; if both are written in one field, split them.",
     "issue.ADDRESS_MISSING.title": "Address missing",
     "issue.ADDRESS_MISSING.help":
       "The address line (street, house number) is empty. Add the shipping address; confirm it with the customer if needed.",
+    "issue.ADDRESS_LINE1_EMPTY_LINE2_FILLED.title": "Address is in line 2",
+    "issue.ADDRESS_LINE1_EMPTY_LINE2_FILLED.help":
+      "Address line 1 is empty while the address is in line 2. The carrier takes the street and house number from line 1. Confirm moving the address to line 1 and make sure line 2 does not repeat line 1.",
+    "issue.ADDRESS_NO_HOUSE_NUMBER.title": "No house number",
+    "issue.ADDRESS_NO_HOUSE_NUMBER.help":
+      "The address contains no digits, so the house or apartment number is probably missing. Confirm the number with the customer; if the address is correct without a number (e.g. a building name), dismiss the warning.",
+    "issue.ADDRESS_FIELD_TOO_LONG.title": "Address field too long",
+    "issue.ADDRESS_FIELD_TOO_LONG.help":
+      "The field is longer than {max} characters, and the carrier will not accept such a waybill. Shorten the text or move part of the address to another line.",
+    "issue.ADDRESS_DUPLICATED_FIELDS.title": "Address fields repeat",
+    "issue.ADDRESS_DUPLICATED_FIELDS.help":
+      "This field duplicates address line 1 (e.g. the city was entered instead of the street, or line 2 repeats line 1). Check the address and correct or clear the extra field.",
     "issue.CITY_MISSING.title": "City missing",
     "issue.CITY_MISSING.help": "The shipping city is empty. Add the city from the customer's address.",
+    "issue.CITY_CONTAINS_POSTAL_CODE.title": "Postal code in the City field",
+    "issue.CITY_CONTAINS_POSTAL_CODE.help":
+      "The city name contains a postal code. Confirm the suggested city name without the code. If no suggestion is offered, the code in the city differs from the Postal code field — confirm the correct postal code with the customer.",
     "issue.COUNTRY_MISSING.title": "Country missing",
     "issue.COUNTRY_MISSING.help":
       "The shipping country is empty, so the postal code and shipping rules cannot be checked. Enter the two-letter ISO 3166-1 country code, e.g. DE.",
@@ -171,13 +232,19 @@ const messages: MessageModule = {
       "Shipping to {country} is disabled in the country rules, so no waybill can be created. Agree on a different shipping address with the customer or cancel the order.",
     "issue.POSTAL_CODE_MISSING.title": "Postal code missing",
     "issue.POSTAL_CODE_MISSING.help":
-      "A postal code is required for this country. Ask the customer for it and enter it in the format {example}. Automatic postal code lookup by address is planned for a later stage.",
+      "A postal code is required for this country. If a postal code was found in the City field, it is suggested — check and confirm it. Otherwise ask the customer for it and enter it in the format {example}. Postal code lookup in address directories is planned for a later stage.",
     "issue.POSTAL_CODE_INVALID.title": "Invalid postal code format",
     "issue.POSTAL_CODE_INVALID.help":
       "The postal code does not match the shipping country's format (example: {example}). Check the postal code and the country in the address and correct the mistake — the system never changes postal code digits or letters automatically.",
+    "issue.POSTAL_CODE_REGION_MISMATCH.title": "Postal code does not match the region",
+    "issue.POSTAL_CODE_REGION_MISMATCH.help":
+      "A postal code starting with “{prefix}” belongs to {expected}, but the region is {province}. Either the postal code or the region is wrong — confirm the address with the customer and fix the right field.",
     "issue.PROVINCE_MISSING.title": "Region missing",
     "issue.PROVINCE_MISSING.help":
       "This country requires a state, province or region. Add the region from the customer's address (e.g. the state code).",
+    "issue.PROVINCE_INVALID.title": "Unknown region",
+    "issue.PROVINCE_INVALID.help":
+      "The Region / state value is not a region code of {country}. If a code is suggested, check and confirm it; otherwise enter the region code (e.g. NY, ON, NSW).",
 
     // --- Products / customs ---
     "issue.ORDER_NO_ITEMS.title": "No items",
@@ -239,6 +306,7 @@ const messages: MessageModule = {
     // --- Auto-fixes ---
     "autofix.text.trim_whitespace": "Removed extra spaces",
     "autofix.country.uppercase": "Country code converted to upper case",
+    "autofix.province.uppercase": "Region code converted to upper case",
     "autofix.phone.normalize_format": "Removed phone formatting (spaces, brackets, dashes)",
     "autofix.phone.international_prefix_00": "Replaced 00 prefix with +",
     "autofix.phone.add_plus": "Added + before the country code",

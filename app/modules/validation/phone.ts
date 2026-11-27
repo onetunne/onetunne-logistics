@@ -140,5 +140,49 @@ export function validateShippingPhone(
       },
     ];
   }
-  return [];
+  return phoneQualityIssues(result.e164, countryCode, rules);
+}
+
+/**
+ * Номери, які libphonenumber відносить до іншої країни ISO, але з тим самим планом нумерації
+ * та поштою країни доставки (території США, коронні володіння Великої Британії тощо).
+ * Для таких номерів попередження про іншу країну не показується.
+ */
+const SAME_NUMBERING_AREA: Readonly<Record<string, readonly string[]>> = {
+  US: ["PR", "GU", "VI", "AS", "MP"],
+  GB: ["GG", "JE", "IM"],
+  FI: ["AX"],
+  NO: ["SJ"],
+  AU: ["CX", "CC"],
+};
+
+/** Країна та тип ДІЙСНОГО номера в E.164 (метадані libphonenumber «max»). */
+export function describePhone(e164: string): { country: string | null; type: string | null } {
+  const parsed = parseSafe(e164);
+  if (!parsed || !parsed.isValid()) return { country: null, type: null };
+  return { country: parsed.country ?? null, type: parsed.getType() ?? null };
+}
+
+/**
+ * Попередження для дійсного номера одержувача:
+ * - PHONE_NOT_MOBILE — стаціонарний номер (FIXED_LINE): перевізник надсилає SMS лише на мобільний;
+ *   MOBILE і FIXED_LINE_OR_MOBILE (напр. США/Канада) вважаються придатними;
+ * - PHONE_COUNTRY_MISMATCH — номер іншої країни, ніж країна доставки (перевізники, як-от Nova Post,
+ *   для адресної доставки потребують мобільного номера країни одержувача).
+ * Номер ніколи не змінюється.
+ */
+export function phoneQualityIssues(e164: string, countryCode: string | null, rules: CountryRules): ValidationIssue[] {
+  const field = "shipping.phone";
+  const issues: ValidationIssue[] = [];
+  const { country: phoneCountry, type } = describePhone(e164);
+  if (type === "FIXED_LINE") {
+    issues.push({ code: "PHONE_NOT_MOBILE", severity: "warning", field, params: {}, suggestion: null });
+  }
+  const country = countryCode?.trim().toUpperCase() ?? "";
+  if (phoneCountry && country && rules.has(country) && phoneCountry !== country) {
+    if (!(SAME_NUMBERING_AREA[country] ?? []).includes(phoneCountry)) {
+      issues.push({ code: "PHONE_COUNTRY_MISMATCH", severity: "warning", field, params: { phoneCountry, country }, suggestion: null });
+    }
+  }
+  return issues;
 }

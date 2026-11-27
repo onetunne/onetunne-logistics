@@ -38,7 +38,7 @@ describe("validation i18n messages", () => {
   });
 
   it("help texts use only params that validators provide", () => {
-    const allowed = new Set(["country", "example", "title", "sku"]);
+    const allowed = new Set(["country", "example", "title", "sku", "max", "phoneCountry", "prefix", "province", "expected"]);
     for (const locale of ["uk", "en"] as const) {
       for (const [key, value] of Object.entries(messages[locale])) {
         // Проблеми синхронізації Shopify створює сервіс синхронізації з власними параметрами.

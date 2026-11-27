@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   Form,
   useActionData,
@@ -249,6 +249,41 @@ export async function action({ request }: ActionFunctionArgs): Promise<ActionRes
 
 type Row = Awaited<ReturnType<typeof loader>>["rows"][number];
 
+const MOBILE_QUERY = "(max-width: 767.98px)";
+/** До гідратації на телефоні вміст розкривного блока прихований (щоб фільтри не «блимали»). */
+const DISCLOSURE_CSS =
+  "@media (max-width: 767.98px){details[data-filters-disclosure]:not([data-ready])>:not(summary){display:none}}" +
+  "details[data-filters-disclosure]>summary{cursor:pointer;padding:2px 0}";
+
+/**
+ * Розкривний блок фільтрів: на телефоні згорнутий за замовчуванням (прохання власника), на ширших екранах — відкритий.
+ * TODO: перенести в UI-кіт (app/ui) разом зі стилем; зараз однакова копія є в app/pages/problems.tsx.
+ */
+function FiltersDisclosure({ label, children }: { label: ReactNode; children: ReactNode }) {
+  const [open, setOpen] = useState(true);
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    if (window.matchMedia?.(MOBILE_QUERY).matches) setOpen(false);
+    setReady(true);
+  }, []);
+  return (
+    <details
+      data-filters-disclosure=""
+      data-ready={ready ? "" : undefined}
+      open={open}
+      onToggle={(e) => setOpen(e.currentTarget.open)}
+    >
+      <style dangerouslySetInnerHTML={{ __html: DISCLOSURE_CSS }} />
+      <summary>
+        <Text as="span" variant="body-sm" weight="semibold">
+          {label}
+        </Text>
+      </summary>
+      <div style={{ paddingTop: "var(--ot-space-3)" }}>{children}</div>
+    </details>
+  );
+}
+
 function countCheckedOrders(): number {
   return document.querySelectorAll(`input[name="${SELECTION_NAME}"][form="${BULK_FORM_ID}"]:checked`).length;
 }
@@ -406,6 +441,7 @@ export default function OrdersPage() {
   );
 
   const bulkBusy = busyIntent === "bulkValidate" || busyIntent === "bulkWaybills";
+  const activeFilters = [filters.q, filters.country, filters.status, filters.problems].filter(Boolean).length;
 
   return (
     <Page title={t("nav.orders")} subtitle={t("orders.subtitle")}>
@@ -414,55 +450,59 @@ export default function OrdersPage() {
 
         <Tabs items={tabs} selected={selectedTab} ariaLabel={t("orders.tabs.label")} />
 
-        <Card title={t("common.filters")}>
-          <Form key={listKey} method="get" role="search">
-            <Stack gap={4}>
-              <Grid columns={{ xs: 1, md: 2, lg: 3 }} gap={3}>
-                <TextField
-                  id="orders-filter-q"
-                  type="search"
-                  name="q"
-                  label={t("common.search")}
-                  placeholder={t("orders.filters.searchPlaceholder")}
-                  defaultValue={filters.q}
-                  maxLength={MAX_QUERY_LENGTH}
-                  autoComplete="off"
-                  spellCheck={false}
+        <Card>
+          <FiltersDisclosure
+            label={activeFilters > 0 ? t("orders.filters.titleActive", { count: activeFilters }) : t("common.filters")}
+          >
+            <Form key={listKey} method="get" role="search">
+              <Stack gap={4}>
+                <Grid columns={{ xs: 1, md: 2, lg: 3 }} gap={3}>
+                  <TextField
+                    id="orders-filter-q"
+                    type="search"
+                    name="q"
+                    label={t("common.search")}
+                    placeholder={t("orders.filters.searchPlaceholder")}
+                    defaultValue={filters.q}
+                    maxLength={MAX_QUERY_LENGTH}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <Select
+                    id="orders-filter-country"
+                    name="country"
+                    label={t("orders.filters.country")}
+                    placeholder={t("orders.filters.allCountries")}
+                    options={data.countries.map((c) => ({ value: c.code, label: c.name }))}
+                    defaultValue={filters.country ?? ""}
+                  />
+                  <Select
+                    id="orders-filter-status"
+                    name="status"
+                    label={t("orders.filters.status")}
+                    placeholder={t("orders.filters.allStatuses")}
+                    options={ORDER_STATUSES.map((s) => ({ value: s, label: t(`status.${s}`) }))}
+                    defaultValue={filters.status ?? ""}
+                  />
+                </Grid>
+                <Checkbox
+                  id="orders-filter-problems"
+                  name="problems"
+                  value="1"
+                  label={t("orders.filters.problemsOnly")}
+                  defaultChecked={filters.problems}
                 />
-                <Select
-                  id="orders-filter-country"
-                  name="country"
-                  label={t("orders.filters.country")}
-                  placeholder={t("orders.filters.allCountries")}
-                  options={data.countries.map((c) => ({ value: c.code, label: c.name }))}
-                  defaultValue={filters.country ?? ""}
-                />
-                <Select
-                  id="orders-filter-status"
-                  name="status"
-                  label={t("orders.filters.status")}
-                  placeholder={t("orders.filters.allStatuses")}
-                  options={ORDER_STATUSES.map((s) => ({ value: s, label: t(`status.${s}`) }))}
-                  defaultValue={filters.status ?? ""}
-                />
-              </Grid>
-              <Checkbox
-                id="orders-filter-problems"
-                name="problems"
-                value="1"
-                label={t("orders.filters.problemsOnly")}
-                defaultChecked={filters.problems}
-              />
-              <Stack direction="horizontal" gap={2}>
-                <Button type="submit" variant="primary" loading={isFiltering}>
-                  {t("common.apply")}
-                </Button>
-                <Button to={ordersPath} disabled={!data.isFiltered}>
-                  {t("common.reset")}
-                </Button>
+                <Stack direction="horizontal" gap={2}>
+                  <Button type="submit" variant="primary" loading={isFiltering}>
+                    {t("common.apply")}
+                  </Button>
+                  <Button to={ordersPath} disabled={!data.isFiltered}>
+                    {t("common.reset")}
+                  </Button>
+                </Stack>
               </Stack>
-            </Stack>
-          </Form>
+            </Form>
+          </FiltersDisclosure>
         </Card>
 
         {canBulk && rows.length > 0 ? (

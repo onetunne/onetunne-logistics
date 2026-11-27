@@ -35,7 +35,7 @@ export const VALIDATABLE_STATUSES: readonly OrderStatus[] = ["paid", "awaiting_r
  * after_edit — ручна зміна даних САМЕ цього замовлення (закриває відмову перевізника);
  * variant_edit — повторна перевірка після зміни даних товару (відмову перевізника не закриває).
  */
-export type ValidationTrigger = "manual" | "bulk" | "after_edit" | "variant_edit" | "automation" | "seed";
+export type ValidationTrigger = "manual" | "bulk" | "after_edit" | "variant_edit" | "automation" | "country_rule_edit" | "seed";
 
 export interface ValidationSummary {
   orderId: string;
@@ -406,7 +406,7 @@ async function syncOrderToShopify(ctx: ServiceContext, order: OrderRow, changedF
 /** Підтвердження менеджером одного з запропонованих варіантів виправлення. */
 export async function acceptSuggestion(ctx: ServiceContext, issueId: string, candidate: string): Promise<ValidationSummary> {
   requirePermission(ctx.actor, "orders.edit");
-  const { summary, field } = await ctx.db.transaction(async (tx) => {
+  const { summary, fields } = await ctx.db.transaction(async (tx) => {
     const [issue] = await tx.select().from(issues).where(eq(issues.id, issueId)).for("update");
     if (!issue || !issue.orderId) throw new NotFoundError("issue");
     if (issue.status !== "open" || !issue.suggestion) throw new DomainError("issue.notActionable", 409);
@@ -426,16 +426,32 @@ export async function acceptSuggestion(ctx: ServiceContext, issueId: string, can
       reason: `issue.${issue.code}.title`,
       actorId: ctx.actor.id,
     });
-    await bumpOrder(tx, order, { [column]: candidate }, ctx.now());
+    const patch: Partial<OrderRow> = { [column]: candidate };
+    const fields = [issue.suggestion.field];
+    // Перенесення рядка 2 в рядок 1: рядок 2 очищається (інакше адреса дублюється), з окремим записом в історії.
+    if (issue.code === "ADDRESS_LINE1_EMPTY_LINE2_FILLED" && order.shipAddress2 === candidate) {
+      patch.shipAddress2 = null;
+      fields.push("shipping.address2");
+      await tx.insert(orderChanges).values({
+        orderId: order.id,
+        field: "shipping.address2",
+        oldValue: order.shipAddress2,
+        newValue: null,
+        source: "suggestion_accepted",
+        reason: `issue.${issue.code}.title`,
+        actorId: ctx.actor.id,
+      });
+    }
+    await bumpOrder(tx, order, patch, ctx.now());
     await tx
       .update(issues)
       .set({ status: "resolved", resolvedAt: ctx.now(), resolvedBy: ctx.actor.id, resolution: "suggestion_accepted" })
       .where(eq(issues.id, issue.id));
     await writeAudit(tx, ctx.actor, "issue.suggestion_accepted", { type: "issue", id: issue.id }, { code: issue.code });
-    return { summary: await validateOrderInTx(tx, ctx, order.id, "after_edit"), field: issue.suggestion.field };
+    return { summary: await validateOrderInTx(tx, ctx, order.id, "after_edit"), fields };
   });
   // Підтверджене виправлення передається в Shopify так само, як ручне (у демо — пропускається).
-  await syncOrderToShopify(ctx, await loadOrderRow(ctx.db, summary.orderId), [field]);
+  await syncOrderToShopify(ctx, await loadOrderRow(ctx.db, summary.orderId), fields);
   return summary;
 }
 

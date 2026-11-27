@@ -2,6 +2,7 @@ import { collapseWhitespace, countryKey, isBlank, validateAddress } from "./addr
 import { normalizePhone, validateShippingPhone } from "./phone";
 import { matchesPostalPattern, normalizePostalCode } from "./postal";
 import { validateProducts } from "./products";
+import { findRegionByCode } from "./regions";
 import {
   SHIPPING_FIELDS,
   type AutoFix,
@@ -20,6 +21,12 @@ export { normalizePhone, isDigitPreserving, type PhoneNormalization } from "./ph
 export { normalizePostalCode, isFormatOnlyPostalChange, type PostalNormalization } from "./postal";
 export { normalizeHsCode } from "./products";
 export { DEFAULT_COUNTRY_RULES, type DefaultCountryRule, type DutyPayer } from "./default-country-rules";
+export { issueCategory, isIssueCategory, ISSUE_CATEGORIES, type IssueCategory } from "./categories";
+export { REGIONS, regionsOf, findRegionByCode, regionCandidates, type Region, type RegionKind } from "./regions";
+export { checkPostalRegion, type PostalRegionCheck } from "./postal-region";
+export { extractPostalFromCity, type CityPostalExtraction } from "./city-postal";
+export { ADDRESS_FIELD_LIMITS } from "./address";
+export { describePhone } from "./phone";
 
 /** Важливість правил автовиправлення: для поля зберігається найважливіше з застосованих. */
 export const AUTO_FIX_SIGNIFICANCE: readonly AutoFixRuleId[] = [
@@ -30,6 +37,7 @@ export const AUTO_FIX_SIGNIFICANCE: readonly AutoFixRuleId[] = [
   "phone.normalize_format",
   "postal.normalize_format",
   "country.uppercase",
+  "province.uppercase",
   "text.trim_whitespace",
 ];
 
@@ -118,6 +126,14 @@ export function computeAutoFixes(
 
   const country = countryKey(state("shipping.countryCode").value);
 
+  // Код регіону: верхній регістр, лише якщо результат — точний відомий код країни ("ny" → "NY").
+  // Назви регіонів ("New York") не замінюються автоматично — це пропозиція для менеджера.
+  const province = state("shipping.province").value;
+  if (province !== null && province !== "") {
+    const upper = province.toUpperCase();
+    if (upper !== province && findRegionByCode(country, upper)) apply("shipping.province", upper, "province.uppercase");
+  }
+
   // 2. Телефон одержувача: копія з контактного телефону, якщо порожній.
   const contact = state("contactPhone").value;
   if (isBlank(state("shipping.phone").value) && !isBlank(contact) && contact !== null) {
@@ -174,8 +190,19 @@ export function applyAutoFixes(input: OrderValidationInput, fixes: readonly Auto
 
 const EMAIL_PATTERN = /^[^\s@]+@(?:[^\s@.]+\.)+[^\s@.]{2,}$/;
 
-function validateEmail(email: string | null): ValidationIssue[] {
-  if (isBlank(email) || email === null) return [];
+/**
+ * Email: некоректний формат — попередження. Порожній email для міжнародного відправлення
+ * (країна доставки ≠ країна відправлення) — попередження EMAIL_MISSING: перевізникам і митниці
+ * потрібен email одержувача. Без відомої країни відправлення порожній email не повідомляється.
+ */
+function validateEmail(email: string | null, country: string | null, rules: CountryRules, options: ValidationOptions): ValidationIssue[] {
+  if (isBlank(email) || email === null) {
+    const origin = countryKey(options.originCountry ?? null);
+    if (origin && country && rules.has(country) && country !== origin) {
+      return [{ code: "EMAIL_MISSING", severity: "warning", field: "email", params: {}, suggestion: null }];
+    }
+    return [];
+  }
   if (EMAIL_PATTERN.test(email.trim())) return [];
   return [{ code: "EMAIL_INVALID", severity: "warning", field: "email", params: {}, suggestion: null }];
 }
@@ -194,7 +221,7 @@ export function validateOrder(
   const issues: ValidationIssue[] = [
     ...validateAddress(fixed.shipping, rules),
     ...validateShippingPhone(fixed.shipping.phone, country, rules, alternateCountries(options)),
-    ...validateEmail(fixed.email),
+    ...validateEmail(fixed.email, country, rules, options),
     ...validateProducts(fixed.items),
   ];
   return { issues, autoFixes, blocking: issues.some((i) => i.severity === "error") };

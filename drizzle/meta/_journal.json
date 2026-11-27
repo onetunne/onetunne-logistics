@@ -29,6 +29,13 @@
       "when": 1795737546388,
       "tag": "0003_variant_customs_overrides",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1795739262167,
+      "tag": "0004_country_rules_history",
+      "breakpoints": true
     }
   ]
 }

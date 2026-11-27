@@ -15,6 +15,9 @@ import shopify from "./messages/shopify";
 import tracking from "./messages/tracking";
 import carrierSettings from "./messages/carrier-settings";
 import products from "./messages/products";
+import orderStage4 from "./messages/order-stage4";
+import customerRequests from "./messages/customer-requests";
+import countryRules from "./messages/country-rules";
 
 export * from "./types";
 
@@ -34,6 +37,9 @@ export const MESSAGE_MODULES: Record<string, MessageModule> = {
   tracking,
   carrierSettings,
   products,
+  orderStage4,
+  customerRequests,
+  countryRules,
 };
 
 function merge(locale: Locale): Messages {

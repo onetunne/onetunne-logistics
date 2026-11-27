@@ -74,3 +74,58 @@ export interface AiBudget {
   monthlyLimitUsd: string;
   spentUsd: string;
 }
+
+// ---------------------------------------------------------------------------
+// Виконання інструментів асистента (етап 4: реалізовано виконавця без моделі —
+// app/modules/assistant/tools.server.ts). Модель ще НЕ підключена: виклики надходять лише з коду/тестів.
+// ---------------------------------------------------------------------------
+
+export interface AiToolExecutionOptions {
+  /**
+   * true — людина (менеджер/власник) явно підтвердила САМЕ цей виклик з цими параметрами.
+   * Модель не може встановити це значення: його передає серверний маршрут після натискання кнопки.
+   */
+  confirmed?: boolean;
+  /**
+   * Бажаний режим. Фактичний режим — суворіший з бажаного і налаштування власника (`automation.mode`),
+   * тобто виклик не може підвищити рівень автоматизації понад дозволений власником.
+   */
+  mode?: AiAutomationMode;
+}
+
+export type AiToolRefusalReason =
+  | "unknown_tool"
+  | "invalid_input"
+  | "forbidden"
+  | "global_pause"
+  | "order_paused";
+
+/** Чому потрібне підтвердження: режим manual, інструмент позначено як небезпечний, критична/фінансова дія. */
+export type AiConfirmationReason = "manual_mode" | "tool_requires_confirmation" | "critical_or_financial";
+
+export interface AiToolInputIssue {
+  path: string;
+  message: string;
+}
+
+export type AiToolExecutionResult =
+  | { status: "ok"; tool: string; risk: AiToolRisk; data: unknown }
+  | {
+      status: "confirmation_required";
+      tool: string;
+      risk: AiToolRisk;
+      reason: AiConfirmationReason;
+      /** Нормалізовані параметри, які буде виконано після підтвердження (показати людині). */
+      input: unknown;
+      /** Попередній перегляд наслідків (якщо інструмент його надає), напр. різниця «було → стане». */
+      preview: unknown;
+    }
+  | {
+      status: "refused";
+      tool: string;
+      reason: AiToolRefusalReason;
+      /** Для forbidden — відсутній дозвіл; для invalid_input — помилки полів (без значень). */
+      permission?: Permission;
+      issues?: AiToolInputIssue[];
+    }
+  | { status: "error"; tool: string; risk: AiToolRisk; code: string; params: Record<string, string | number> };

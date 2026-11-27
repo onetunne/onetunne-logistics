@@ -57,6 +57,8 @@ import {
   reconcileShipment,
   type CreateWaybillResult,
 } from "~/modules/shipments/waybill.server";
+import { isReissuable, reissueWaybill, type ReissueResult } from "~/modules/shipments/reissue.server";
+import { loadShopifyPushState, resendOrderToShopify } from "~/modules/shopify-sync/sync.server";
 import { markHandedOver, refreshShipmentTracking } from "~/modules/tracking/tracking.server";
 import { SHIPPING_FIELDS, type ShippingField } from "~/modules/validation/types";
 import { getRequestContext } from "~/server/context.server";
@@ -171,7 +173,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     throw e;
   });
   const variantIds = [...new Set(agg.items.flatMap((i) => (i.variant ? [i.variant.id] : [])))];
-  const [history, ruleRows, settings, trackingEvents, variantParts] = await Promise.all([
+  const [history, ruleRows, settings, trackingEvents, variantParts, shopifyPush] = await Promise.all([
     loadOrderHistory(ctx.db, orderId),
     loadCountryRuleRows(ctx.db),
     getSettings(ctx.db),
@@ -197,6 +199,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     ),
     // Значення Shopify і збережені в застосунку — для форми митних даних товару.
     loadVariantCustomsParts(ctx.db, variantIds),
+    // Етап 4: стан передачі підтверджених змін контактів/адреси в Shopify (черга + відкриті помилки синхронізації).
+    loadShopifyPushState(ctx.db, ctx.shopify.kind, agg.order),
   ]);
   const { order } = agg;
   const now = ctx.now().getTime();
@@ -333,6 +337,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         /** Стан дозволяє вручну підтвердити фактичну передачу (право waybills.manage перевіряє сервер і UI). */
         handoverAvailable:
           s.status === "created" && !s.handedOverAt && !deletedAtCarrier(s) && HANDOVER_ORDER_STATUSES.includes(order.status),
+        /** Етап 4: можна «Переоформити» (created, не передано, статус замовлення дозволяє); дозволи — сервер і UI. */
+        reissuable: isReissuable(s, order.status),
         trackingEvents: events.map((e) => ({
           id: e.id,
           status: isTrackingStatus(e.status) ? e.status : ("unknown" as const),
@@ -393,6 +399,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
       : null,
     /** Передача трек-номера в Shopify після фактичної передачі (налаштування «Відстеження»). */
     shopifyPushEnabled: settings.tracking.pushToShopify,
+    /** Етап 4: стан передачі виправлених контактів/адреси в Shopify (без персональних даних, лише тексти Shopify). */
+    shopifyPush,
     /** Лише назви незаповнених полів відправника — без значень. */
     missingShipperFields: REQUIRED_SHIPPER_FIELDS.filter((f) => !String(settings.shipper[f] ?? "").trim()),
   };
@@ -447,6 +455,53 @@ function waybillResult(r: CreateWaybillResult, t: TFunction): ActionResult {
     };
   }
   return { ok: true, message: `result.waybill.${r.kind}`, params, tone: WAYBILL_TONE[r.kind] };
+}
+
+/** Результат «Переоформити накладну» → повідомлення. Якщо нову не створено — прямо кажемо, що стару СКАСОВАНО. */
+function reissueResult(r: ReissueResult, t: TFunction): ActionResult {
+  if (r.kind === "concurrent") return { ok: true, message: "order.reissue.result.concurrent", tone: "info" };
+  if (r.kind === "not_started") {
+    const inner = waybillResult({ kind: "blocked", reason: r.reason, params: r.params }, t);
+    return {
+      ok: true,
+      message: "order.reissue.result.notStarted",
+      params: inner.ok ? inner.params : undefined,
+      extra: inner.ok ? [inner.message] : [],
+      tone: "warning",
+    };
+  }
+  const old = r.cancelled.waybillNumber ?? "";
+  if (r.kind === "reissued") {
+    return {
+      ok: true,
+      message: r.recovered ? "order.reissue.result.recovered" : "order.reissue.result.reissued",
+      params: { old, number: r.created.waybillNumber ?? "" },
+      extra: ["order.result.notShipped"],
+      tone: "success",
+    };
+  }
+  const inner = waybillResult(r.next, t);
+  const innerParams = inner.ok ? (inner.params ?? {}) : {};
+  const unknown = r.next.kind === "unknown";
+  return {
+    ok: true,
+    message: "order.reissue.result.cancelledOnly",
+    params: { ...innerParams, old },
+    extra: [
+      ...(inner.ok ? [inner.message, ...(inner.extra ?? [])] : []),
+      unknown ? "order.reissue.result.unknownNext" : "order.reissue.result.fixAndCreate",
+    ],
+    tone: unknown || r.next.kind === "rejected" ? "critical" : "warning",
+  };
+}
+
+/** Результат «Повторно надіслати в Shopify». */
+function resendResult(r: Awaited<ReturnType<typeof resendOrderToShopify>>): ActionResult {
+  if (r.status === "queued") return { ok: true, message: "order.shopifySync.result.queued", tone: "success" };
+  if (r.status === "synced") return { ok: true, message: "order.shopifySync.result.synced", tone: "success" };
+  if (r.status === "failed") return { ok: true, message: "order.shopifySync.result.failed", tone: "critical" };
+  const key = r.reason === "demo_mode" ? "demo" : r.reason;
+  return { ok: true, message: `order.shopifySync.result.${key}`, tone: r.reason === "invalid_data" ? "warning" : "info" };
 }
 
 export async function action({ request, params }: ActionFunctionArgs): Promise<ActionResult> {
@@ -593,9 +648,23 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<A
       case "cancelWaybill": {
         const shipmentId = await ownShipmentId();
         if (!shipmentId) return { ok: false, error: "error.notFound" };
-        await cancelWaybill(ctx, shipmentId);
-        return { ok: true, message: "result.waybill.cancelled" };
+        // «Скасувати й виправити дані»: лише скасування (нове покоління — вручну після виправлення).
+        const correction = formString(form, "purpose") === "correction";
+        await cancelWaybill(ctx, shipmentId, { purpose: "correction" });
+        return correction
+          ? { ok: true, message: "result.waybill.cancelled", extra: ["order.correct.result"] }
+          : { ok: true, message: "result.waybill.cancelled" };
       }
+
+      case "reissueWaybill": {
+        const shipmentId = await ownShipmentId();
+        if (!shipmentId) return { ok: false, error: "error.notFound" };
+        const trigger = formString(form, "trigger") === "shopify_changed" ? "shopify_changed" : "order_page";
+        return reissueResult(await reissueWaybill(ctx, shipmentId, { trigger }), t);
+      }
+
+      case "resendShopify":
+        return resendResult(await resendOrderToShopify(ctx, orderId));
 
       case "refreshTracking": {
         const shipmentId = await ownShipmentId();
@@ -823,6 +892,7 @@ export default function OrderDetailPage() {
           <Stack gap={4}>
             <IssuesCard data={data} />
             <AddressCard data={data} fieldErrors={fieldErrors} />
+            <ShopifySyncCard data={data} />
             <ItemsCard data={data} fieldErrors={fieldErrors} />
           </Stack>
           <Stack gap={4}>
@@ -1381,8 +1451,20 @@ function WaybillCard({ data }: { data: Data }) {
   const active = data.shipments.find((s) => s.active) ?? null;
   const previous = data.shipments.filter((s) => !s.active);
   let body: ReactNode;
+  // Етап 4: дані змінено в Shopify після створення накладної — підказка, що застосувати їх можна лише переоформленням.
+  const shopifyChange = active?.status === "created" ? data.openIssues.find((i) => i.code === "SHOPIFY_ORDER_CHANGED") : undefined;
   if (active?.status === "created") {
-    body = <CreatedWaybill shipment={active} order={data.order} shopifyPushEnabled={data.shopifyPushEnabled} />;
+    body = (
+      <>
+        {shopifyChange ? <ShopifyChangedHint issue={shopifyChange} shipment={active} data={data} /> : null}
+        <CreatedWaybill
+          shipment={active}
+          order={data.order}
+          shopifyPushEnabled={data.shopifyPushEnabled}
+          shopifyChanged={Boolean(shopifyChange)}
+        />
+      </>
+    );
   }
   else if (active && (active.status === "unknown" || active.stale)) body = <UnknownWaybill shipment={active} />;
   else if (active) body = <CreatingWaybill order={data.order} />;
@@ -1402,10 +1484,12 @@ function CreatedWaybill({
   shipment: s,
   order,
   shopifyPushEnabled,
+  shopifyChanged,
 }: {
   shipment: Shipment;
   order: OrderData;
   shopifyPushEnabled: boolean;
+  shopifyChanged: boolean;
 }) {
   const t = useT();
   const locale = useLocale();
@@ -1515,24 +1599,7 @@ function CreatedWaybill({
       {canCancel && (s.manual || s.canCancel) ? (
         <>
           <Divider />
-          <Form method="post">
-            <Hidden intent="cancelWaybill" fields={{ shipmentId: s.id }} />
-            <ConfirmSubmitButton
-              variant="critical"
-              loading={busy("cancelWaybill")}
-              title={t("order.waybill.cancel.title", { number: s.waybillNumber ?? "" })}
-              confirmLabel={t("order.waybill.cancel.confirm")}
-              cancelLabel={t("order.dialog.keep")}
-              message={
-                <Stack gap={2}>
-                  <Text>{t(s.manual ? "order.waybill.cancel.bodyManual" : "order.waybill.cancel.body")}</Text>
-                  <Text weight="semibold">{t("order.waybill.cancel.regenerate")}</Text>
-                </Stack>
-              }
-            >
-              {t("order.waybill.cancel.button")}
-            </ConfirmSubmitButton>
-          </Form>
+          <ChangeWaybillSection shipment={s} order={order} shopifyChanged={shopifyChanged} />
         </>
       ) : null}
       {canCancel && !s.manual && !s.canCancel ? (
@@ -1662,6 +1729,201 @@ function DocumentsSection({ shipment: s, orderId }: { shipment: Shipment; orderI
         </Button>
       </Stack>
     </Stack>
+  );
+}
+
+/**
+ * Етап 4: «Переоформити накладну» (скасування + нове покоління одразу) і «Скасувати й виправити дані»
+ * (лише скасування). Обидві дії — з підтвердженням: реальну накладну буде скасовано у перевізника.
+ */
+function ChangeWaybillSection({ shipment: s, order, shopifyChanged }: { shipment: Shipment; order: OrderData; shopifyChanged: boolean }) {
+  const t = useT();
+  const can = useCan();
+  const busy = useBusy();
+  const params = { number: s.waybillNumber ?? "", carrier: s.carrierName };
+  const kind = s.manual ? "Manual" : s.mode === "test" ? "Test" : "Live";
+  const canReissue = s.reissuable && can("waybills.create");
+  let reissueNote: string | null = null;
+  if (!s.reissuable) reissueNote = t("order.reissue.unavailable.status");
+  else if (!can("waybills.create")) reissueNote = t("order.reissue.unavailable.permission");
+
+  return (
+    <Stack gap={3}>
+      <Stack gap={1}>
+        <Text as="h3" variant="heading-sm">
+          {t("order.reissue.section")}
+        </Text>
+        <Text variant="body-sm" tone="subdued">
+          {t("order.reissue.sectionHelp")}
+        </Text>
+      </Stack>
+      {/* Кнопки переносяться на новий рядок на вузькому екрані (без горизонтальної прокрутки). */}
+      <Stack direction="horizontal" gap={2} wrap>
+        {canReissue ? (
+          <Form method="post">
+            <Hidden
+              intent="reissueWaybill"
+              fields={{ shipmentId: s.id, trigger: shopifyChanged ? "shopify_changed" : "order_page" }}
+            />
+            <ConfirmSubmitButton
+              variant="primary"
+              loading={busy("reissueWaybill")}
+              title={t("order.reissue.title", params)}
+              confirmLabel={t("order.reissue.confirm")}
+              cancelLabel={t("order.dialog.keep")}
+              message={
+                <Stack gap={2}>
+                  <Text weight={kind === "Live" ? "semibold" : undefined}>{t(`order.reissue.body${kind}`, params)}</Text>
+                  <Text>{t("order.reissue.dataNote")}</Text>
+                  <Text variant="body-sm" tone="subdued">
+                    {t("order.reissue.labelsNote")}
+                  </Text>
+                </Stack>
+              }
+            >
+              {t("order.reissue.button")}
+            </ConfirmSubmitButton>
+          </Form>
+        ) : null}
+        <Form method="post">
+          <Hidden intent="cancelWaybill" fields={{ shipmentId: s.id, purpose: "correction" }} />
+          <ConfirmSubmitButton
+            variant="critical"
+            loading={busy("cancelWaybill")}
+            title={t("order.correct.title", params)}
+            confirmLabel={t("order.correct.confirm")}
+            cancelLabel={t("order.dialog.keep")}
+            message={
+              <Stack gap={2}>
+                <Text weight={kind === "Live" ? "semibold" : undefined}>{t(`order.correct.body${kind}`, params)}</Text>
+                <Text>{t("order.correct.next")}</Text>
+                <Text variant="body-sm" tone="subdued">
+                  {t("order.reissue.labelsNote")}
+                </Text>
+              </Stack>
+            }
+          >
+            {t("order.correct.button")}
+          </ConfirmSubmitButton>
+        </Form>
+      </Stack>
+      {reissueNote ? (
+        <Text variant="body-sm" tone="subdued">
+          {reissueNote}
+        </Text>
+      ) : null}
+    </Stack>
+  );
+}
+
+/** Дані змінено в Shopify, коли накладна вже існує: як застосувати (лише через переоформлення). */
+function ShopifyChangedHint({ issue, shipment: s, data }: { issue: Issue; shipment: Shipment; data: Data }) {
+  const t = useT();
+  const raw = typeof issue.params.fields === "string" ? issue.params.fields : "";
+  const fields = raw
+    .split(",")
+    .map((f) => f.trim())
+    .filter(Boolean)
+    .map((f) => fieldLabel(f, data.items, t) ?? f)
+    .join(", ");
+  const shipped = isShipped(data.order.status) || Boolean(s.handedOverAt);
+  return (
+    <Banner tone="warning" title={t("order.shopifyChanged.title")}>
+      <p>{t("order.shopifyChanged.body", { fields: fields || "—" })}</p>
+      <p>{t(shipped ? "order.shopifyChanged.shipped" : "order.shopifyChanged.how")}</p>
+    </Banner>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Синхронізація виправлених даних із Shopify (етап 4)
+// ---------------------------------------------------------------------------
+
+function ShopifySyncCard({ data }: { data: Data }) {
+  const t = useT();
+  const locale = useLocale();
+  const can = useCan();
+  const busy = useBusy();
+  const p = data.shopifyPush;
+  if (p.state === "none") return null;
+  if ((p.state === "demo" || p.state === "not_linked") && !p.hasChanges) return null;
+
+  const time = (d: Date | null) => formatDateTime(d, locale);
+  const lines: { key: string; text: string; tone?: "critical" | "subdued" }[] = [];
+  let tone: "info" | "success" | "warning" | "critical" = "info";
+  switch (p.state) {
+    case "demo":
+      lines.push({ key: "state", text: t("order.shopifySync.state.demo") });
+      break;
+    case "not_linked":
+      lines.push({ key: "state", text: t("order.shopifySync.state.not_linked") });
+      break;
+    case "queued":
+      lines.push({ key: "state", text: t(p.retrying ? "order.shopifySync.state.retrying" : "order.shopifySync.state.queued", { time: time(p.at) }) });
+      if (p.lastError) lines.push({ key: "err", text: t("order.shopifySync.lastError", { message: p.lastError }), tone: "subdued" });
+      tone = p.retrying ? "warning" : "info";
+      break;
+    case "synced":
+      lines.push({ key: "state", text: t("order.shopifySync.state.synced", { time: time(p.at) }) });
+      tone = "success";
+      break;
+    case "failed":
+      lines.push({ key: "state", text: t("order.shopifySync.state.failed") });
+      if (p.failures.length === 0 && p.lastError) {
+        lines.push({ key: "err", text: t("order.shopifySync.lastError", { message: p.lastError }), tone: "critical" });
+      }
+      tone = "critical";
+      break;
+    case "not_sent":
+      lines.push({ key: "state", text: t("order.shopifySync.state.not_sent", { time: time(p.lastChangeAt) }) });
+      lines.push({ key: "help", text: t("order.shopifySync.state.not_sentHelp"), tone: "subdued" });
+      tone = "warning";
+      break;
+  }
+  const failures = p.state === "failed" || p.state === "queued" ? p.failures : [];
+  for (const [index, f] of failures.entries()) {
+    const label = fieldLabel(f.field, data.items, t);
+    let text: string;
+    if (f.code === "SHOPIFY_COUNTRY_NOT_SHIPPED") {
+      text = t("order.shopifySync.countryNotShipped", { country: String(f.params.country ?? "—") });
+    } else {
+      // Текст Shopify показуємо як є (без перекладу) — так власник бачить точну причину.
+      const message = f.message ?? t("issue.SHOPIFY_SYNC_FAILED.title");
+      text = label ? t("order.shopifySync.fieldMessage", { field: label, message }) : t("order.shopifySync.shopifyMessage", { message });
+    }
+    lines.push({ key: `f${index}`, text, tone: "critical" });
+  }
+
+  const resendable = p.state === "failed" || p.state === "not_sent" || p.state === "demo";
+  const canResend = resendable && can("orders.edit") && data.order.status !== "cancelled";
+  return (
+    <Card title={t("order.shopifySync.title")}>
+      <Stack gap={3}>
+        <Text variant="body-sm" weight="semibold">
+          {t("order.shopifySync.label")}
+        </Text>
+        <Banner tone={tone}>
+          {lines.map((l) => (
+            <p key={l.key}>{l.text}</p>
+          ))}
+        </Banner>
+        {canResend ? (
+          <Form method="post">
+            <Hidden intent="resendShopify" />
+            <Stack gap={2}>
+              <Stack direction="horizontal" gap={2} wrap>
+                <Button type="submit" loading={busy("resendShopify")}>
+                  {t("order.shopifySync.resend")}
+                </Button>
+              </Stack>
+              <Text variant="body-sm" tone="subdued">
+                {t(p.state === "demo" ? "order.shopifySync.resendDemoHelp" : "order.shopifySync.resendHelp")}
+              </Text>
+            </Stack>
+          </Form>
+        ) : null}
+      </Stack>
+    </Card>
   );
 }
 
