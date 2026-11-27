@@ -1353,10 +1353,13 @@ function CustomsEditor({
 }) {
   const t = useT();
   const prefix = `variant.${variant.id}.`;
+  // Назви відкритих проблем за полями варіанта (OVERRIDE_FIELDS не імпортуємо в клієнтський код — там zod і перевірки).
   const issueErrors: Partial<Record<OverrideField, string>> = {};
-  for (const field of OVERRIDE_FIELDS) {
-    const titles = openIssues.filter((i) => i.field === `${prefix}${field}`).map((i) => t(`issue.${i.code}.title`));
-    if (titles.length > 0) issueErrors[field] = titles.join("; ");
+  for (const issue of openIssues) {
+    if (!issue.field?.startsWith(prefix)) continue;
+    const field = issue.field.slice(prefix.length) as OverrideField;
+    const title = t(`issue.${issue.code}.title`);
+    issueErrors[field] = issueErrors[field] ? `${issueErrors[field]}; ${title}` : title;
   }
   return (
     <VariantCustomsForm

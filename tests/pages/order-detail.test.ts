@@ -265,6 +265,42 @@ describe("order detail actions", () => {
     if (res.ok) return;
     expect(res.error).toBe("error.validation");
     expect(Object.keys(res.fieldErrors ?? {})).toEqual([`variant.${variantId}.weightGrams`]);
+
+    // Нові поля (габарити, матеріал) теж прив'язуються до варіанта.
+    const dims = await act(id, { intent: "updateVariant", variantId, lengthMm: "-5", material: "x".repeat(51) });
+    expect(dims.ok).toBe(false);
+    if (dims.ok) return;
+    expect(Object.keys(dims.fieldErrors ?? {}).sort()).toEqual([`variant.${variantId}.lengthMm`, `variant.${variantId}.material`]);
+  });
+
+  it("staff saves all customs fields as app overrides; empty fields revert to the product values", async () => {
+    const id = await orderIdOf("#1001");
+    const variant = (await load(id, "staff")).items.find((i) => i.variant)?.variant;
+    expect(variant).toMatchObject({ overriddenFields: [], overrides: {}, material: null, lengthMm: null });
+    const variantId = variant?.id ?? "";
+    const fields = {
+      intent: "updateVariant",
+      variantId,
+      hsCode: "87141000",
+      countryOfOrigin: "",
+      customsDescription: "",
+      customsDescriptionLocal: "Тримач телефону",
+      material: "Aluminium",
+      weightGrams: "",
+      lengthMm: "120",
+      widthMm: "80",
+      heightMm: "40",
+    };
+    expect(await act(id, fields, "staff")).toMatchObject({ ok: true, message: "result.product.updated" });
+    const saved = (await load(id)).items.find((i) => i.variant?.id === variantId)?.variant;
+    expect(saved).toMatchObject({ hsCode: "87141000", material: "Aluminium", lengthMm: 120, weightGrams: variant?.weightGrams });
+    expect(saved?.shopify?.hsCode).toBe(variant?.hsCode);
+    expect(saved?.overriddenFields.sort()).toEqual(["customsDescriptionLocal", "heightMm", "hsCode", "lengthMm", "material", "widthMm"]);
+
+    const cleared = Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, k === "intent" || k === "variantId" ? v : ""]));
+    expect(await act(id, cleared, "staff")).toMatchObject({ ok: true });
+    const reverted = (await load(id)).items.find((i) => i.variant?.id === variantId)?.variant;
+    expect(reverted).toMatchObject({ hsCode: variant?.hsCode, material: null, lengthMm: null, overriddenFields: [] });
   });
 });
 
@@ -277,6 +313,11 @@ describe("order detail rendering (E2E contracts)", () => {
     expect(before).toContain('name="shipping.countryCode"');
     expect(before).toContain("Зберегти");
     expect(before).toContain("Дані ще не перевірено");
+    // Форма митних даних товару (спільна з розділом «Товари») і посилання на розділ.
+    expect(before).toContain('name="customsDescriptionLocal"');
+    expect(before).toContain('name="heightMm"');
+    expect(before).toContain('href="/demo/products"');
+    expect(before).not.toContain("(демо)");
 
     // #1003: однозначне автовиправлення індексу GB → без проблем.
     expect(await act(id, { intent: "validate" })).toMatchObject({ ok: true, tone: "success" });
