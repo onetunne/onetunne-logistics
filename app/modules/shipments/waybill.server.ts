@@ -35,6 +35,7 @@ import { computeParcelWeights } from "~/modules/shipments/weight";
 import { validateOrder } from "~/modules/validation";
 import { buildCommercialInvoice, toCustomsDeclaration, toCustomsItems } from "~/modules/customs/invoice";
 import { splitStreetAndBuilding } from "~/modules/customs/address-parts";
+import { syncOrderReservations } from "~/modules/inventory/reservations.server";
 
 function streetParts(address1: string | null | undefined): { street: string | null; building: string | null } {
   const parts = splitStreetAndBuilding(address1);
@@ -168,14 +169,32 @@ export function buildShipmentRequest(
   reference: string,
   issuedAt?: Date,
 ): CreateShipmentRequest & { packageCode: string } {
-  const pkg =
+  const defaultPkg =
     settings.packaging.packages.find((p) => p.code === settings.packaging.defaultPackageCode) ??
     settings.packaging.packages[0]!;
-  const weights = computeParcelWeights({
+  // Етап 5: ручне коригування габаритів посилки на рівні замовлення (мм → см, угору) має пріоритет над упаковкою.
+  const overrideDims = order.parcelLengthMm && order.parcelWidthMm && order.parcelHeightMm;
+  const pkg = overrideDims
+    ? {
+        ...defaultPkg,
+        lengthCm: Math.ceil(order.parcelLengthMm! / 10),
+        widthCm: Math.ceil(order.parcelWidthMm! / 10),
+        heightCm: Math.ceil(order.parcelHeightMm! / 10),
+      }
+    : defaultPkg;
+  const computed = computeParcelWeights({
     items: items.map((i) => ({ weightGrams: i.variant?.weightGrams ?? 0, quantity: i.quantity })),
     pkg,
     volumetricDivisor: settings.packaging.volumetricDivisor,
   });
+  // Етап 5: зважена вага посилки (разом з упаковкою) замінює розрахункову фактичну.
+  const weights = order.parcelWeightGrams
+    ? {
+        actualWeightGrams: order.parcelWeightGrams,
+        volumetricWeightGrams: computed.volumetricWeightGrams,
+        chargeableWeightGrams: Math.max(order.parcelWeightGrams, computed.volumetricWeightGrams),
+      }
+    : computed;
   const declared = addMoney("0.00", ...items.map((i) => multiplyMoney(i.unitPrice, i.quantity)));
   const invoice = buildCommercialInvoice({ order, items, settings, issuedAt: issuedAt ?? new Date() });
   const s = settings.shipper;
@@ -822,6 +841,8 @@ export async function cancelOrder(ctx: ServiceContext, orderId: string): Promise
   await ctx.db.transaction(async (tx) => {
     const fresh = await loadOrderRow(tx, orderId, { forUpdate: true });
     await setOrderStatus(tx, fresh, "cancelled", { cancelledAt: ctx.now() });
+    // Етап 5: зняти резерв складу в тій самій транзакції.
+    await syncOrderReservations(tx, orderId, ctx.actor);
     // Проблеми скасованого замовлення більше не потребують дій.
     await tx
       .update(issues)

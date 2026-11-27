@@ -19,6 +19,7 @@ import { writeAudit } from "~/modules/audit/audit.server";
 import { enqueueJob } from "~/modules/jobs/queue.server";
 import { loadOrderRow, type OrderRow, type ShipmentRow } from "~/modules/orders/repository.server";
 import { getSetting } from "~/modules/settings/settings.server";
+import { syncOrderReservations } from "~/modules/inventory/reservations.server";
 import { JOB } from "~/modules/shopify-sync/sync.server";
 import { FULFILL_DEDUPE_PREFIX } from "~/integrations/shopify/queueing-gateway.server";
 import type { CarrierAdapter, TrackingSnapshot, TrackingStatus } from "~/integrations/carriers/types";
@@ -220,6 +221,8 @@ export async function applyTrackingSnapshot(
       const steps = planOrderTransitions(order.status, target);
       await applyOrderSteps(tx, ctx, order, steps, "tracking");
       orderStatus = steps.at(-1) ?? order.status;
+      // Етап 5: фактична передача → списання зарезервованого товару (один раз на позицію) у цій транзакції.
+      if (steps.length > 0) await syncOrderReservations(tx, order.id, ctx.actor);
     }
 
     if (PROBLEM_TRACKING_STATUSES.includes(snapshot.status)) {
@@ -282,6 +285,8 @@ export async function markHandedOver(ctx: ServiceContext, shipmentId: string): P
       .set({ handedOverAt: ctx.now(), updatedAt: ctx.now() })
       .where(and(eq(shipments.id, shipmentId), eq(shipments.status, "created"), isNull(shipments.handedOverAt)));
     await applyOrderSteps(tx, ctx, order, steps, "manual");
+    // Етап 5: списання зарезервованого товару при фактичній передачі.
+    await syncOrderReservations(tx, order.id, ctx.actor);
     await tx.insert(shipmentEvents).values({ shipmentId, type: "handed_over", message: "manual", data: null });
     await writeAudit(tx, ctx.actor, "shipment.handed_over", { type: "shipment", id: shipmentId }, { orderId: order.id, source: "manual" });
   });

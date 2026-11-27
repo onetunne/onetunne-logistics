@@ -20,6 +20,10 @@ const pages = (prefix: "demo" | "app") => [
   route("settings", "pages/settings.tsx", { id: `${prefix}-settings` }),
   route("shopify", "pages/shopify-sync.tsx", { id: `${prefix}-shopify` }),
   route("staff", "pages/staff.tsx", { id: `${prefix}-staff` }),
+  // Етап 5: склад, виробництво, комплектація/пакування.
+  route("warehouse", "pages/warehouse.tsx", { id: `${prefix}-warehouse` }),
+  route("production", "pages/production.tsx", { id: `${prefix}-production` }),
+  route("picking", "pages/picking.tsx", { id: `${prefix}-picking` }),
   route(":section", "pages/planned.tsx", { id: `${prefix}-planned` }),
 ];
 

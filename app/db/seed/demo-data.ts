@@ -111,6 +111,8 @@ export interface DemoOrderSeed {
   shippingPaid: string;
   /** Історичні замовлення: довести до цього стану через сервіси під час заповнення. */
   history?: "waybill" | "delivered" | "cancelled";
+  /** Етап 5: пріоритет відправлення (0 звичайний, 1 високий, 2 терміновий). */
+  priority?: 0 | 1 | 2;
 }
 
 export const DEMO_ORDERS: DemoOrderSeed[] = [
@@ -194,7 +196,7 @@ export const DEMO_ORDERS: DemoOrderSeed[] = [
   },
   // Історичні замовлення (ілюструють подальші статуси).
   {
-    number: "#0998", hoursAgo: 30, scenario: "history: test waybill created", history: "waybill",
+    number: "#0998", hoursAgo: 30, scenario: "history: test waybill created", history: "waybill", priority: 1,
     email: "jonas.k@example.com", contactPhone: null,
     shipping: { firstName: "Jonas", lastName: "Keller", address1: "Probegasse 9", city: "Wien", postalCode: "1010", countryCode: "AT", phone: "+43 664 1234567" },
     items: [{ variant: "light-std", quantity: 1 }], shippingPaid: "13.00",

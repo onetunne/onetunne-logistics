@@ -18,6 +18,7 @@ import products from "./messages/products";
 import orderStage4 from "./messages/order-stage4";
 import customerRequests from "./messages/customer-requests";
 import countryRules from "./messages/country-rules";
+import warehouse from "./messages/warehouse";
 
 export * from "./types";
 
@@ -40,6 +41,7 @@ export const MESSAGE_MODULES: Record<string, MessageModule> = {
   orderStage4,
   customerRequests,
   countryRules,
+  warehouse,
 };
 
 function merge(locale: Locale): Messages {

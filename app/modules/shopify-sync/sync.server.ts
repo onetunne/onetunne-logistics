@@ -4,7 +4,7 @@
  * тож порядок і повтори подій не призводять до неузгодженості.
  */
 import { and, desc, eq, inArray, like, notLike, or, sql } from "drizzle-orm";
-import type { Db, DbOrTx } from "~/db/client.server";
+import type { Db, DbOrTx, Tx } from "~/db/client.server";
 import { issues, jobs, orderChanges, orderLineItems, orders, productVariants, products, shipments, shopInstallations } from "~/db/schema";
 import { isShipped } from "~/domain/order-status";
 import { SYSTEM_ACTOR, requirePermission } from "~/domain/permissions";
@@ -14,6 +14,7 @@ import { enqueueJob } from "~/modules/jobs/queue.server";
 import { loadOrderRow, shippingAddressOf, type OrderRow } from "~/modules/orders/repository.server";
 import { VALIDATABLE_STATUSES, validateOrderInTx } from "~/modules/orders/workflow.server";
 import { cancelOrder, processPaidOrder } from "~/modules/shipments/waybill.server";
+import { syncOrderReservations } from "~/modules/inventory/reservations.server";
 import type { AdminGraphql } from "~/integrations/shopify/admin-client.server";
 import type { ShopifyGateway, ShopifySyncResult } from "~/integrations/shopify/types";
 import {
@@ -176,15 +177,23 @@ async function resolveVariantIds(tx: DbOrTx, m: MappedOrder): Promise<Map<string
   return new Map(rows.map((r) => [r.gid!, r.id]));
 }
 
+/**
+ * Оновлює позиції замовлення за даними Shopify, ЗБЕРІГАЮЧИ id наявних позицій (зіставлення за shopifyLineItemId):
+ * на id позиції посилаються резерви складу (stock_reservations), рухи журналу, чекліст пакування й поля проблем
+ * перевірки (`lineItem.<id>`). Позиції, яких більше немає в Shopify, видаляються (їхні резерви знімає
+ * syncOrderReservations).
+ */
 async function replaceLineItems(tx: DbOrTx, orderId: string, m: MappedOrder) {
   const variantIds = await resolveVariantIds(tx, m);
-  await tx.delete(orderLineItems).where(eq(orderLineItems.orderId, orderId));
-  if (m.lineItems.length === 0) return;
-  await tx.insert(orderLineItems).values(
-    m.lineItems.map((l, position) => ({
-      orderId,
+  const existing = await tx
+    .select({ id: orderLineItems.id, shopifyLineItemId: orderLineItems.shopifyLineItemId })
+    .from(orderLineItems)
+    .where(eq(orderLineItems.orderId, orderId));
+  const byGid = new Map(existing.filter((e) => e.shopifyLineItemId).map((e) => [e.shopifyLineItemId!, e.id]));
+  const keep = new Set<string>();
+  for (const [position, l] of m.lineItems.entries()) {
+    const values = {
       variantId: l.shopifyVariantId ? (variantIds.get(l.shopifyVariantId) ?? null) : null,
-      shopifyLineItemId: l.shopifyLineItemId,
       title: l.title,
       variantTitle: l.variantTitle,
       sku: l.sku,
@@ -193,8 +202,21 @@ async function replaceLineItems(tx: DbOrTx, orderId: string, m: MappedOrder) {
       currency: l.currency,
       imageUrl: l.imageUrl,
       position,
-    })),
-  );
+    };
+    const id = byGid.get(l.shopifyLineItemId);
+    if (id && !keep.has(id)) {
+      await tx.update(orderLineItems).set(values).where(eq(orderLineItems.id, id));
+      keep.add(id);
+    } else {
+      const [row] = await tx
+        .insert(orderLineItems)
+        .values({ ...values, orderId, shopifyLineItemId: l.shopifyLineItemId })
+        .returning({ id: orderLineItems.id });
+      keep.add(row!.id);
+    }
+  }
+  const removed = existing.filter((e) => !keep.has(e.id)).map((e) => e.id);
+  if (removed.length > 0) await tx.delete(orderLineItems).where(inArray(orderLineItems.id, removed));
 }
 
 async function hasPendingPush(tx: DbOrTx, shopifyOrderId: string): Promise<boolean> {
@@ -251,101 +273,116 @@ export async function upsertOrder(
   mode: "live" | "import",
 ): Promise<{ result: OrderSyncResult; orderId: string | null }> {
   const outcome = await ctx.db.transaction(async (tx) => {
-    const [existing] = await tx.select().from(orders).where(eq(orders.shopifyOrderId, m.shopifyOrderId)).for("update");
-    const common = {
-      financialStatus: m.financialStatus,
-      fulfillmentStatus: m.fulfillmentStatus,
-      currency: m.currency,
-      subtotal: m.subtotal,
-      shippingPaid: m.shippingPaid,
-      total: m.total,
-      billingCountryCode: m.billingCountryCode,
-      shopifyUpdatedAt: m.shopifyUpdatedAt,
-    };
-
-    if (!existing) {
-      if (!isPaid({ displayFinancialStatus: m.financialStatus.toUpperCase() }) && !m.cancelledAt) {
-        return { result: "skipped_unpaid" as const, orderId: null, process: false };
-      }
-      const status = initialStatus(m, mode);
-      const [row] = await tx
-        .insert(orders)
-        .values({
-          ...common,
-          source: "shopify",
-          shopifyOrderId: m.shopifyOrderId,
-          orderNumber: m.orderNumber,
-          status,
-          email: m.email,
-          contactPhone: m.contactPhone,
-          shipFirstName: m.shipping.firstName,
-          shipLastName: m.shipping.lastName,
-          shipCompany: m.shipping.company,
-          shipAddress1: m.shipping.address1,
-          shipAddress2: m.shipping.address2,
-          shipCity: m.shipping.city,
-          shipProvince: m.shipping.province,
-          shipPostalCode: m.shipping.postalCode,
-          shipCountryCode: m.shipping.countryCode,
-          shipPhone: m.shipping.phone,
-          note: m.note,
-          placedAt: m.placedAt,
-          cancelledAt: m.cancelledAt,
-        })
-        .returning({ id: orders.id });
-      await replaceLineItems(tx, row!.id, m);
-      await writeAudit(tx, SYSTEM_ACTOR, mode === "import" ? "shopify.order_imported" : "shopify.order_received", {
-        type: "order",
-        id: row!.id,
-      }, { status, test: m.test });
-      return { result: "created" as const, orderId: row!.id, process: mode === "live" && status === "paid" };
+    const applied = await applyOrderInTx(tx, ctx, m, mode);
+    // Етап 5: резерви складу — у тій самій транзакції, що й зміна замовлення (скасування — у cancelOrder нижче).
+    if (applied.orderId && applied.result !== "stale") {
+      await syncOrderReservations(tx, applied.orderId, SYSTEM_ACTOR);
     }
-
-    if (existing.shopifyUpdatedAt && existing.shopifyUpdatedAt > m.shopifyUpdatedAt) {
-      return { result: "stale" as const, orderId: existing.id, process: false };
-    }
-    await tx.update(orders).set({ ...common, updatedAt: new Date() }).where(eq(orders.id, existing.id));
-
-    if (m.cancelledAt && existing.status !== "cancelled") {
-      return { result: "cancelled" as const, orderId: existing.id, process: false, cancel: true };
-    }
-
-    const changes = CONTACT_FIELDS.map((f) => ({ ...f, from: (existing[f.column] as string | null) ?? null, to: f.get(m) })).filter(
-      (c) => c.from !== c.to,
-    );
-    if (changes.length === 0) return { result: "unchanged" as const, orderId: existing.id, process: false };
-
-    const editable =
-      VALIDATABLE_STATUSES.includes(existing.status) &&
-      !(await hasActiveShipment(tx, existing.id)) &&
-      !(await hasPendingPush(tx, m.shopifyOrderId));
-    if (!editable) {
-      await openSyncIssue(tx, existing.id, "SHOPIFY_ORDER_CHANGED", { fields: changes.map((c) => c.field).join(", ") });
-      return { result: "conflict_reported" as const, orderId: existing.id, process: false };
-    }
-    const patch: Record<string, string | null> = {};
-    for (const c of changes) patch[c.column as string] = c.to;
-    await tx
-      .update(orders)
-      .set({ ...patch, version: sql`${orders.version} + 1`, updatedAt: new Date() })
-      .where(eq(orders.id, existing.id));
-    await tx.insert(orderChanges).values(
-      changes.map((c) => ({
-        orderId: existing.id,
-        field: c.field,
-        oldValue: c.from,
-        newValue: c.to,
-        source: "shopify_sync" as const,
-        reason: "shopify.updated",
-        actorId: SYSTEM_ACTOR.id,
-      })),
-    );
-    await replaceLineItems(tx, existing.id, m);
-    // Якщо замовлення вже перевірялося — перевіряємо повторно з новими даними.
-    if (existing.status !== "paid") await validateOrderInTx(tx, { ...ctx, actor: SYSTEM_ACTOR }, existing.id, "after_edit");
-    return { result: "updated" as const, orderId: existing.id, process: false };
+    return applied;
   });
+  return finishUpsert(ctx, outcome);
+}
 
+async function applyOrderInTx(tx: Tx, ctx: ServiceContext, m: MappedOrder, mode: "live" | "import") {
+  const [existing] = await tx.select().from(orders).where(eq(orders.shopifyOrderId, m.shopifyOrderId)).for("update");
+  const common = {
+    financialStatus: m.financialStatus,
+    fulfillmentStatus: m.fulfillmentStatus,
+    currency: m.currency,
+    subtotal: m.subtotal,
+    shippingPaid: m.shippingPaid,
+    total: m.total,
+    billingCountryCode: m.billingCountryCode,
+    shopifyUpdatedAt: m.shopifyUpdatedAt,
+  };
+
+  if (!existing) {
+    if (!isPaid({ displayFinancialStatus: m.financialStatus.toUpperCase() }) && !m.cancelledAt) {
+      return { result: "skipped_unpaid" as const, orderId: null, process: false };
+    }
+    const status = initialStatus(m, mode);
+    const [row] = await tx
+      .insert(orders)
+      .values({
+        ...common,
+        source: "shopify",
+        shopifyOrderId: m.shopifyOrderId,
+        orderNumber: m.orderNumber,
+        status,
+        email: m.email,
+        contactPhone: m.contactPhone,
+        shipFirstName: m.shipping.firstName,
+        shipLastName: m.shipping.lastName,
+        shipCompany: m.shipping.company,
+        shipAddress1: m.shipping.address1,
+        shipAddress2: m.shipping.address2,
+        shipCity: m.shipping.city,
+        shipProvince: m.shipping.province,
+        shipPostalCode: m.shipping.postalCode,
+        shipCountryCode: m.shipping.countryCode,
+        shipPhone: m.shipping.phone,
+        note: m.note,
+        placedAt: m.placedAt,
+        cancelledAt: m.cancelledAt,
+      })
+      .returning({ id: orders.id });
+    await replaceLineItems(tx, row!.id, m);
+    await writeAudit(tx, SYSTEM_ACTOR, mode === "import" ? "shopify.order_imported" : "shopify.order_received", {
+      type: "order",
+      id: row!.id,
+    }, { status, test: m.test });
+    return { result: "created" as const, orderId: row!.id, process: mode === "live" && status === "paid" };
+  }
+
+  if (existing.shopifyUpdatedAt && existing.shopifyUpdatedAt > m.shopifyUpdatedAt) {
+    return { result: "stale" as const, orderId: existing.id, process: false };
+  }
+  await tx.update(orders).set({ ...common, updatedAt: new Date() }).where(eq(orders.id, existing.id));
+
+  if (m.cancelledAt && existing.status !== "cancelled") {
+    return { result: "cancelled" as const, orderId: existing.id, process: false, cancel: true };
+  }
+
+  const changes = CONTACT_FIELDS.map((f) => ({ ...f, from: (existing[f.column] as string | null) ?? null, to: f.get(m) })).filter(
+    (c) => c.from !== c.to,
+  );
+  if (changes.length === 0) return { result: "unchanged" as const, orderId: existing.id, process: false };
+
+  const editable =
+    VALIDATABLE_STATUSES.includes(existing.status) &&
+    !(await hasActiveShipment(tx, existing.id)) &&
+    !(await hasPendingPush(tx, m.shopifyOrderId));
+  if (!editable) {
+    await openSyncIssue(tx, existing.id, "SHOPIFY_ORDER_CHANGED", { fields: changes.map((c) => c.field).join(", ") });
+    return { result: "conflict_reported" as const, orderId: existing.id, process: false };
+  }
+  const patch: Record<string, string | null> = {};
+  for (const c of changes) patch[c.column as string] = c.to;
+  await tx
+    .update(orders)
+    .set({ ...patch, version: sql`${orders.version} + 1`, updatedAt: new Date() })
+    .where(eq(orders.id, existing.id));
+  await tx.insert(orderChanges).values(
+    changes.map((c) => ({
+      orderId: existing.id,
+      field: c.field,
+      oldValue: c.from,
+      newValue: c.to,
+      source: "shopify_sync" as const,
+      reason: "shopify.updated",
+      actorId: SYSTEM_ACTOR.id,
+    })),
+  );
+  await replaceLineItems(tx, existing.id, m);
+  // Якщо замовлення вже перевірялося — перевіряємо повторно з новими даними.
+  if (existing.status !== "paid") await validateOrderInTx(tx, { ...ctx, actor: SYSTEM_ACTOR }, existing.id, "after_edit");
+  return { result: "updated" as const, orderId: existing.id, process: false };
+}
+
+async function finishUpsert(
+  ctx: ServiceContext,
+  outcome: Awaited<ReturnType<typeof applyOrderInTx>>,
+): Promise<{ result: OrderSyncResult; orderId: string | null }> {
   const systemCtx: ServiceContext = { ...ctx, actor: SYSTEM_ACTOR };
   if ("cancel" in outcome && outcome.cancel && outcome.orderId) {
     const order = await loadOrderRow(ctx.db, outcome.orderId);

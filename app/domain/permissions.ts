@@ -16,6 +16,12 @@ export const PERMISSIONS = [
   "finance.view",
   "staff.manage",
   "demo.reset",
+  // Етап 5: склад, виробництво, пакування
+  "warehouse.view", // залишки, історія руху, попередження, виробничі партії (перегляд)
+  "warehouse.receive", // надходження з виробництва/вручну, позначення браку
+  "warehouse.adjust", // ручні коригування, початкові залишки, розв'язання розбіжностей із Shopify (типово — власник)
+  "production.manage", // створення й зміна виробничих партій (типово — власник)
+  "packing.perform", // черга пакування, контроль комплектації, підтвердження «Запаковано»
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -27,9 +33,15 @@ const STAFF_PERMISSIONS: readonly Permission[] = [
   "orders.bulk",
   "waybills.create",
   "problems.view",
+  "warehouse.view",
+  "warehouse.receive",
+  "packing.perform",
 ];
 
-/** Дозволи, які НІКОЛИ не можна надати працівнику через гнучкі права. */
+/**
+ * Дозволи, які НІКОЛИ не можна надати працівнику через гнучкі права.
+ * finance.view також відкриває поля собівартості складу/виробництва/матеріалів (етап 5).
+ */
 export const OWNER_ONLY_PERMISSIONS: readonly Permission[] = [
   "finance.view",
   "settings.manage",

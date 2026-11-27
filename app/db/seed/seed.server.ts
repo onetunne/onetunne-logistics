@@ -1,20 +1,36 @@
 import { count, eq, sql } from "drizzle-orm";
-import type { Db } from "~/db/client.server";
+import type { Db, DbOrTx } from "~/db/client.server";
 import {
   auditLog,
   countryRules,
+  inventoryBalances,
+  inventoryConflicts,
+  inventoryMovements,
   issues,
   jobs,
+  kitTemplateLines,
+  kitTemplateProducts,
+  kitTemplates,
   orderChanges,
   orderLineItems,
+  orderPacking,
   orders,
+  packagingMaterials,
+  productionBatchLines,
+  productionBatches,
+  productionReceiptLines,
+  productionReceipts,
   productVariants,
   products,
   sandboxCarrierShipments,
   settings,
   settingsHistory,
   shipmentEvents,
+  shipmentTrackingEvents,
   shipments,
+  stockAlerts,
+  stockItems,
+  stockReservations,
   warehouses,
   legalEntities,
   webhookEvents,
@@ -29,7 +45,10 @@ import { cancelOrder, createWaybill } from "~/modules/shipments/waybill.server";
 import { validateOrderById } from "~/modules/orders/workflow.server";
 import { DEFAULT_COUNTRY_RULES } from "~/modules/validation/default-country-rules";
 import type { ServiceContext } from "~/server/types";
+import { ensureDefaultWarehouse } from "~/modules/inventory/warehouse.server";
+import { syncOrderReservations } from "~/modules/inventory/reservations.server";
 import { DEMO_ORDERS, DEMO_PRODUCTS, DEMO_SHIPPER, SIMULATED_ORDER_TEMPLATES, type DemoOrderSeed } from "./demo-data";
+import { seedDemoWarehouse } from "./demo-warehouse.server";
 
 /** Довідкові дані, потрібні в обох режимах (ідемпотентно; наявні записи не перезаписуються). */
 export async function seedReferenceData(db: Db, settingsOverrides: Partial<AllSettings> = {}): Promise<void> {
@@ -52,6 +71,8 @@ export async function seedReferenceData(db: Db, settingsOverrides: Partial<AllSe
     )
     .onConflictDoNothing({ target: countryRules.countryCode });
   await ensureDefaultSettings(db, settingsOverrides);
+  // Етап 5: склад за замовчуванням «Основний склад» (один; ідемпотентно).
+  await ensureDefaultWarehouse(db);
 }
 
 export const DEMO_SETTINGS: Partial<AllSettings> = {
@@ -95,12 +116,14 @@ async function insertDemoCatalog(db: Db): Promise<Map<string, { id: string; titl
     .insert(legalEntities)
     .values({ name: "ONE TUNNE (демо)", countryCode: "UA", baseCurrency: "UAH" })
     .returning({ id: legalEntities.id });
-  await db.insert(warehouses).values({ legalEntityId: entity!.id, name: "Склад Київ (демо)", countryCode: "UA", city: "Київ" });
+  // Етап 5: демо використовує склад за замовчуванням (seedReferenceData), прив'язаний до демо-юрособи.
+  const warehouse = await ensureDefaultWarehouse(db);
+  await db.update(warehouses).set({ legalEntityId: entity!.id, city: "Київ", updatedAt: new Date() }).where(eq(warehouses.id, warehouse.id));
   return byKey;
 }
 
 async function insertOrder(
-  db: Db,
+  db: DbOrTx,
   seed: DemoOrderSeed,
   catalog: Awaited<ReturnType<typeof insertDemoCatalog>>,
   now: Date,
@@ -135,6 +158,7 @@ async function insertOrder(
       shipCountryCode: seed.shipping.countryCode,
       shipPhone: seed.shipping.phone,
       note: `DEMO · ${seed.scenario}`,
+      priority: seed.priority ?? 0,
       placedAt,
       createdAt: placedAt,
     })
@@ -176,7 +200,13 @@ export async function isDemoSeeded(db: Db): Promise<boolean> {
 export async function seedDemoData(ctx: ServiceContext): Promise<void> {
   const db = ctx.db;
   await seedReferenceData(db, DEMO_SETTINGS);
-  if (await isDemoSeeded(db)) return;
+  if (!(await isDemoSeeded(db))) await seedDemoOrders(ctx);
+  // Етап 5: склад (окремо ідемпотентно — і для демо-баз, заповнених до етапу 5).
+  await seedDemoWarehouse(ctx);
+}
+
+async function seedDemoOrders(ctx: ServiceContext): Promise<void> {
+  const db = ctx.db;
   const now = ctx.now();
   const catalog = await insertDemoCatalog(db);
   const systemCtx: ServiceContext = { ...ctx, actor: SYSTEM_ACTOR };
@@ -200,6 +230,22 @@ export async function resetDemoData(ctx: ServiceContext): Promise<void> {
   const db = ctx.db;
   await db.transaction(async (tx) => {
     for (const table of [
+      // Етап 5 (спершу — таблиці, що посилаються на замовлення, товари й матеріали).
+      inventoryMovements,
+      stockReservations,
+      stockAlerts,
+      inventoryConflicts,
+      inventoryBalances,
+      productionReceiptLines,
+      productionReceipts,
+      productionBatchLines,
+      productionBatches,
+      orderPacking,
+      kitTemplateProducts,
+      kitTemplateLines,
+      kitTemplates,
+      stockItems,
+      shipmentTrackingEvents,
       shipmentEvents,
       shipments,
       sandboxCarrierShipments,
@@ -207,6 +253,7 @@ export async function resetDemoData(ctx: ServiceContext): Promise<void> {
       orderChanges,
       orderLineItems,
       orders,
+      packagingMaterials,
       productVariants,
       products,
       warehouses,
@@ -246,7 +293,12 @@ export async function insertSimulatedOrder(ctx: ServiceContext): Promise<string>
       if (row) catalog.set(v.key, { id: row.id, title: row.title, variantTitle: row.variantTitle, sku: v.sku, price: row.price, imageUrl: row.imageUrl ?? "" });
     }
   }
-  const orderId = await insertOrder(db, { ...template, number: `#${next}`, hoursAgo: 0 }, catalog, ctx.now());
+  // Як webhook orders/paid: замовлення й резерв складу — в одній транзакції.
+  const orderId = await db.transaction(async (tx) => {
+    const id = await insertOrder(tx, { ...template, number: `#${next}`, hoursAgo: 0 }, catalog, ctx.now());
+    await syncOrderReservations(tx, id, ctx.actor);
+    return id;
+  });
   await writeAudit(db, ctx.actor, "demo.order_simulated", { type: "order", id: orderId });
   return orderId;
 }
