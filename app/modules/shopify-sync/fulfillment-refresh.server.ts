@@ -7,10 +7,16 @@
  * блокує узгодження й автоприйняття для цього SKU — доки статус у базі не оновиться.
  *
  * Як: ланцюжок планових перевірок (одне очікуване завдання, dedupe; перезапуск сервера не переносить і не множить
- * перевірку). Кожна перевірка спершу планує наступну, потім ставить у чергу ЗВИЧАЙНЕ повторне читання замовлення
- * (shopify.sync_order — той самий шлях, що й webhook: лише читання Shopify, у Shopify нічого не записується) для не
- * більш ніж FULFILLMENT_REFRESH_BATCH найдавніше перевірених замовлень; кожне — не частіше ніж раз на
- * FULFILLMENT_RECHECK_MS (orders.shopify_fulfillment_checked_at).
+ * перевірку). Кожна перевірка спершу планує наступну, потім ставить у чергу повторне читання замовлення
+ * (shopify.sync_order у режимі refresh: лише читання Shopify, у Shopify нічого не записується) для не більш ніж
+ * FULFILLMENT_REFRESH_BATCH найдавніше перевірених замовлень; кожне — не частіше ніж раз на FULFILLMENT_RECHECK_MS
+ * (orders.shopify_fulfillment_checked_at). Режим refresh застосовує дані лише тоді, коли Shopify повідомляє щось нове
+ * (новіший updatedAt або інший статус виконання — sync.server.ts refreshFindsNews): загублений webhook так виявляється,
+ * а незмінене замовлення не застосовується щодоби вдруге (і не відтворює закриті менеджером проблеми).
+ *
+ * Кандидати — ті самі замовлення, які звірка складу рахує «в дорозі» (orderTiming, notFulfilled): не «fulfilled», не
+ * старе «restocked» і не часткове виконання, що могло зачепити фізичні позиції (вони вже не «в дорозі», а
+ * «невизначені»); часткове виконання лише позицій без доставки (shopify_shippable_fulfilled = false) — кандидат.
  *
  * Пропускається, коли застосунок не встановлено або немає дозволу читати замовлення. Дозволи (shopify.dev, access
  * scopes): «`read_orders` provides read access and `write_orders` provides read and write access. Both cover orders
@@ -22,7 +28,7 @@ import type { DbOrTx } from "~/db/client.server";
 import { orders, shipments } from "~/db/schema";
 import { SHIPPED_STATUSES } from "~/domain/order-status";
 import { enqueueJob } from "~/modules/jobs/queue.server";
-import { JOB, orderSyncDedupeKey } from "./jobs";
+import { JOB, orderRefreshDedupeKey } from "./jobs";
 import { currentShop } from "./sync.server";
 
 export const FULFILLMENT_REFRESH_DEDUPE_KEY = "shopify:fulfillment-refresh";
@@ -66,9 +72,9 @@ export type FulfillmentRefreshOutcome =
   | { status: "missing_scope" };
 
 /**
- * Замовлення із застарілим статусом виконання: відправлені (SHIPPED_STATUSES), пов'язані з Shopify, у базі не
- * «fulfilled»; передані перевізнику (остання накладна з handed_over_at; без неї — дата замовлення) понад
- * STALE_FULFILLMENT_AFTER_MS тому; не перевірені за останні FULFILLMENT_RECHECK_MS; у вікні читання замовлень.
+ * Замовлення із застарілим статусом виконання: відправлені (SHIPPED_STATUSES), пов'язані з Shopify, у базі «в дорозі»
+ * (inFlightInDb — те саме правило, що notFulfilled в orderTiming); передані перевізнику (остання накладна з
+ * handed_over_at; без неї — дата замовлення) понад STALE_FULFILLMENT_AFTER_MS тому; не перевірені за останні FULFILLMENT_RECHECK_MS; у вікні читання замовлень.
  */
 export async function staleFulfillmentOrders(
   db: DbOrTx,
@@ -78,6 +84,9 @@ export async function staleFulfillmentOrders(
   const recheckBefore = new Date(opts.now.getTime() - FULFILLMENT_RECHECK_MS).toISOString();
   const windowStart = new Date(opts.now.getTime() - ORDERS_DEFAULT_READ_WINDOW_MS).toISOString();
   const handedOver = sql`coalesce((select max(${shipments.handedOverAt}) from ${shipments} where ${shipments.orderId} = ${orders.id}), ${orders.placedAt})`;
+  // Як notFulfilled у modules/inventory-sync/reconcile.server.ts (orderTiming): shopify_shippable_fulfilled null — як true.
+  const fs = sql`coalesce(${orders.fulfillmentStatus}, '')`;
+  const inFlightInDb = sql`not (${fs} in ('fulfilled', 'restocked') or (${fs} = 'partially_fulfilled' and coalesce(${orders.shopifyShippableFulfilled}, true)))`;
   const rows = await db
     .select({ id: orders.id, shopifyOrderId: orders.shopifyOrderId })
     .from(orders)
@@ -85,7 +94,7 @@ export async function staleFulfillmentOrders(
       and(
         inArray(orders.status, [...SHIPPED_STATUSES]),
         isNotNull(orders.shopifyOrderId),
-        sql`coalesce(${orders.fulfillmentStatus}, '') <> 'fulfilled'`,
+        inFlightInDb,
         sql`${handedOver} <= ${staleBefore}::timestamptz`,
         sql`(${orders.shopifyFulfillmentCheckedAt} is null or ${orders.shopifyFulfillmentCheckedAt} <= ${recheckBefore}::timestamptz)`,
         opts.allOrders ? undefined : sql`${orders.placedAt} >= ${windowStart}::timestamptz`,
@@ -98,7 +107,8 @@ export async function staleFulfillmentOrders(
 
 /**
  * Обробник планової перевірки: спершу планує наступну (ланцюжок не обривається ні при збої, ні коли нічого
- * перевіряти), потім ставить повторне читання застарілих замовлень (shopify.sync_order, dedupe з webhook-читанням).
+ * перевіряти), потім ставить повторне читання застарілих замовлень (shopify.sync_order, mode refresh; власний dedupe —
+ * не поглинає звичайне читання, див. orderRefreshDedupeKey).
  */
 export async function runFulfillmentRefresh(db: DbOrTx, now: Date = new Date()): Promise<FulfillmentRefreshOutcome> {
   await scheduleFulfillmentRefreshCheck(db, { now });
@@ -109,7 +119,7 @@ export async function runFulfillmentRefresh(db: DbOrTx, now: Date = new Date()):
   const stale = await staleFulfillmentOrders(db, { now, allOrders: scopes.includes(ALL_ORDERS_SCOPE), limit: FULFILLMENT_REFRESH_BATCH });
   if (stale.length === 0) return { status: "nothing_stale" };
   for (const o of stale) {
-    await enqueueJob(db, JOB.syncOrder, { shop: shop.shop, orderGid: o.shopifyOrderId, mode: "live" }, { dedupeKey: orderSyncDedupeKey(o.shopifyOrderId) });
+    await enqueueJob(db, JOB.syncOrder, { shop: shop.shop, orderGid: o.shopifyOrderId, mode: "refresh" }, { dedupeKey: orderRefreshDedupeKey(o.shopifyOrderId) });
   }
   await db
     .update(orders)

@@ -36,3 +36,12 @@ export const JOB = {
 export function orderSyncDedupeKey(orderGid: string): string {
   return `order:${orderGid}`;
 }
+
+/**
+ * dedupeKey планового страхового читання замовлення (shopify.sync_order з mode refresh, fulfillment-refresh.server.ts).
+ * Окремий від orderSyncDedupeKey: завдання refresh застосовує лише новіші дані Shopify, тож не повинно поглинати
+ * звичайне читання (webhook, повторне читання менеджером або після скасування накладної), яке застосовується завжди.
+ */
+export function orderRefreshDedupeKey(orderGid: string): string {
+  return `order-refresh:${orderGid}`;
+}

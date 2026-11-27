@@ -3,7 +3,7 @@
  * Webhook лише ставить завдання в чергу; завдання завжди перечитує свіжі дані через GraphQL Admin API,
  * тож порядок і повтори подій не призводять до неузгодженості.
  */
-import { and, desc, eq, inArray, isNotNull, isNull, like, notInArray, notLike, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, like, ne, notInArray, notLike, or, sql } from "drizzle-orm";
 import type { Db, DbOrTx, Tx } from "~/db/client.server";
 import { issues, jobs, orderChanges, orderLineItems, orders, productVariants, products, shipments, shopInstallations } from "~/db/schema";
 import { isFulfilledInShopify, isShipped } from "~/domain/order-status";
@@ -257,6 +257,60 @@ const CONTACT_FIELDS: Array<{ field: string; column: keyof OrderRow; get: (o: Ma
   { field: "shipping.phone", column: "shipPhone", get: (o) => o.shipping.phone },
 ];
 
+/** Контакти й адреса так, як їх щойно повідомив Shopify (orders.shopify_contact_snapshot). */
+export function contactSnapshotOf(m: MappedOrder): Record<string, string | null> {
+  return Object.fromEntries(CONTACT_FIELDS.map((f) => [f.field, f.get(m)]));
+}
+
+/** Порожнє значення й null — одне й те саме (автовиправлення в історії записує порожній рядок, поле зберігає null). */
+const sameValue = (a: string | null | undefined, b: string | null | undefined) => (a ?? "") === (b ?? "");
+
+/**
+ * Поля, які відрізняються від замовлення в застосунку, але Shopify їх НЕ змінював: різниця — від змін застосунку
+ * (автовиправлення формату телефону/індексу, копіювання телефону, прийняті пропозиції, підтверджені правки, які ще не
+ * передано або Shopify не прийняв). Автовиправлення в Shopify не передаються (лише підтверджені правки — syncOrderToShopify),
+ * тож без цього кожне наступне читання відправленого замовлення повідомляло б власну зміну застосунку як «змінено в
+ * Shopify» (SHOPIFY_ORDER_CHANGED), а відкрите замовлення — перезаписувало б автовиправлення сирим значенням Shopify.
+ * Знімок (orders.shopify_contact_snapshot) — значення Shopify з попереднього читання; Shopify змінив поле, лише коли
+ * нове значення інше. Замовлення без знімка (до міграції 0011): Shopify не змінював поле, якщо його поточне значення —
+ * початкове значення якоїсь зміни застосунку цього поля (order_changes, джерело не shopify_sync), тобто те, що
+ * застосунок отримав від Shopify і потім змінив. Немає таких змін — поле в застосунку не змінювалося, різниця — від Shopify.
+ */
+async function fieldsUnchangedInShopify(
+  tx: DbOrTx,
+  existing: OrderRow,
+  differing: ReadonlyArray<{ field: string; to: string | null }>,
+): Promise<Set<string>> {
+  const unchanged = new Set<string>();
+  const snapshot = existing.shopifyContactSnapshot;
+  const legacy: Array<{ field: string; to: string | null }> = [];
+  for (const c of differing) {
+    if (snapshot && Object.prototype.hasOwnProperty.call(snapshot, c.field)) {
+      if (sameValue(snapshot[c.field], c.to)) unchanged.add(c.field);
+    } else {
+      legacy.push(c);
+    }
+  }
+  if (legacy.length === 0) return unchanged;
+  const appChanges = await tx
+    .select({ field: orderChanges.field, oldValue: orderChanges.oldValue })
+    .from(orderChanges)
+    .where(
+      and(
+        eq(orderChanges.orderId, existing.id),
+        inArray(
+          orderChanges.field,
+          legacy.map((c) => c.field),
+        ),
+        ne(orderChanges.source, "shopify_sync"),
+      ),
+    );
+  for (const c of legacy) {
+    if (appChanges.some((r) => r.field === c.field && sameValue(r.oldValue, c.to))) unchanged.add(c.field);
+  }
+  return unchanged;
+}
+
 async function resolveVariantIds(tx: DbOrTx, m: MappedOrder): Promise<Map<string, string>> {
   const gids = m.lineItems.map((l) => l.shopifyVariantId).filter((g): g is string => Boolean(g));
   if (gids.length === 0) return new Map();
@@ -509,7 +563,9 @@ async function openSyncIssue(
  * - Нове неоплачене замовлення не створюється (обробляються лише оплачені).
  * - Застарілі події (updatedAt старіший за збережений) ігноруються.
  * - Контакти/адреса оновлюються лише поки замовлення можна редагувати і немає неперенесених
- *   у Shopify локальних підтверджених змін; інакше — проблема «дані змінено в Shopify».
+ *   у Shopify локальних підтверджених змін; інакше — проблема «дані змінено в Shopify». Зміною Shopify вважається лише
+ *   поле, яке змінив Shopify (порівняння з orders.shopify_contact_snapshot — fieldsUnchangedInShopify), а не різниця від
+ *   змін застосунку (автовиправлення не передаються в Shopify): вона не перезаписується й не повідомляється.
  * - Позиції (кількість, видалення, заміна — редагування замовлення в Shopify) оновлюються, поки замовлення можна
  *   редагувати й немає активної накладної (резерв складу змінюється різницею в тій самій транзакції); інакше —
  *   та сама проблема з полем lineItems (до передачі перевізнику) і позначка orders.shopify_lines_pending_at
@@ -551,6 +607,8 @@ async function applyOrderInTx(tx: Tx, ctx: ServiceContext, m: MappedOrder, mode:
     total: m.total,
     billingCountryCode: m.billingCountryCode,
     shopifyUpdatedAt: m.shopifyUpdatedAt,
+    // Що повідомив Shopify (і за якими значеннями наступне читання визначає зміни в Shopify — fieldsUnchangedInShopify).
+    shopifyContactSnapshot: contactSnapshotOf(m),
   };
 
   if (!existing) {
@@ -605,9 +663,12 @@ async function applyOrderInTx(tx: Tx, ctx: ServiceContext, m: MappedOrder, mode:
     return { result: "cancelled" as const, orderId: existing.id, process: false, cancel: true };
   }
 
-  const changes = CONTACT_FIELDS.map((f) => ({ ...f, from: (existing[f.column] as string | null) ?? null, to: f.get(m) })).filter(
+  // Зміни з Shopify — лише поля, які змінив сам Shopify (а не застосунок: автовиправлення тощо, fieldsUnchangedInShopify).
+  const differing = CONTACT_FIELDS.map((f) => ({ ...f, from: (existing[f.column] as string | null) ?? null, to: f.get(m) })).filter(
     (c) => c.from !== c.to,
   );
+  const appSide = await fieldsUnchangedInShopify(tx, existing, differing);
+  const changes = differing.filter((c) => !appSide.has(c.field));
   const lineDiff = await diffLineItems(tx, existing.id, m);
   const open = existing.status !== "cancelled" && !isShipped(existing.status);
   // Нове виконання фізичних товарів у Shopify: змінився статус виконання або (за того самого часткового) Shopify уперше
@@ -746,11 +807,46 @@ export async function readAllLineItems(admin: AdminGraphql, order: GqlOrder): Pr
   return { ...order, lineItems: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } };
 }
 
+/**
+ * Режим читання замовлення: live — webhook / повторне читання (застосовується завжди, рівний updatedAt теж — напр. після
+ * скасування накладної); import — імпорт історії; refresh — планове страхове читання (fulfillment-refresh.server.ts):
+ * застосовується лише те, що застосунок пропустив.
+ */
+export type OrderSyncMode = "live" | "import" | "refresh";
+
+/**
+ * refresh: чи є в Shopify щось, чого застосунок ще не бачив. Shopify (Order.updatedAt, 2026-10): «The date and time ...
+ * when the order was last modified.»; orders/updated: «Occurs whenever an order is updated.» — загублений webhook означає
+ * новіший updatedAt. Додатково — інший статус виконання (саме його й перевіряє планове читання). Інакше нічого не
+ * застосовується: повторне застосування тих самих даних нічого б не дало (і раніше відтворювало закриті менеджером
+ * проблеми). Замовлення, якого немає в застосунку, плановим читанням не створюється (це не webhook нового замовлення).
+ */
+async function refreshFindsNews(db: DbOrTx, order: GqlOrder): Promise<{ news: boolean; orderId: string | null }> {
+  const [row] = await db
+    .select({ id: orders.id, shopifyUpdatedAt: orders.shopifyUpdatedAt, fulfillmentStatus: orders.fulfillmentStatus })
+    .from(orders)
+    .where(eq(orders.shopifyOrderId, order.id));
+  if (!row) return { news: false, orderId: null };
+  const updatedAt = new Date(order.updatedAt);
+  const newer = !row.shopifyUpdatedAt || Number.isNaN(updatedAt.getTime()) || updatedAt.getTime() > row.shopifyUpdatedAt.getTime();
+  const fulfillment = order.displayFulfillmentStatus?.toLowerCase() ?? null;
+  return { news: newer || fulfillment !== row.fulfillmentStatus, orderId: row.id };
+}
+
 /** Перечитує замовлення з Shopify і застосовує. Невідомі варіанти спершу синхронізуються як товари. */
-export async function syncOrder(ctx: ServiceContext, admin: AdminGraphql, orderGid: string, mode: "live" | "import") {
+export async function syncOrder(
+  ctx: ServiceContext,
+  admin: AdminGraphql,
+  orderGid: string,
+  mode: OrderSyncMode,
+): Promise<{ result: OrderSyncResult; orderId: string | null }> {
   const data = await admin<{ order: GqlOrder | null }>(ORDER_QUERY, { id: orderGid });
-  if (!data.order) return { result: "unchanged" as const, orderId: null };
-  return applyOrder(ctx, admin, await readAllLineItems(admin, data.order), mode);
+  if (!data.order) return { result: "unchanged", orderId: null };
+  if (mode === "refresh") {
+    const check = await refreshFindsNews(ctx.db, data.order);
+    if (!check.news) return { result: "unchanged", orderId: check.orderId };
+  }
+  return applyOrder(ctx, admin, await readAllLineItems(admin, data.order), mode === "refresh" ? "live" : mode);
 }
 
 /** Замовлення зі сторінки списку (імпорт): позиції, що не вмістилися, — повторне читання замовлення й сторінки позицій. */

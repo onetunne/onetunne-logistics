@@ -74,7 +74,8 @@ export function createSyncHandlers(deps: SyncDeps): JobHandlers {
       run: async (job) => {
         const p = job.payload as Record<string, unknown>;
         const admin = await deps.admin(String(p.shop));
-        await syncOrder(ctx(), admin, String(p.orderGid), p.mode === "import" ? "import" : "live");
+        const mode = p.mode === "import" || p.mode === "refresh" ? p.mode : "live";
+        await syncOrder(ctx(), admin, String(p.orderGid), mode);
       },
     },
     [JOB.syncProduct]: {

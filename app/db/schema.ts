@@ -384,6 +384,14 @@ export const orders = pgTable(
      * modules/shopify-sync/fulfillment-refresh.server.ts). Обмежує повтори: не частіше ніж раз на інтервал. null — не ставив.
      */
     shopifyFulfillmentCheckedAt: timestamp("shopify_fulfillment_checked_at", { withTimezone: true }),
+    /**
+     * Етап 5: контакти й адреса доставки, якими їх востаннє повідомив Shopify (поле CONTACT_FIELDS у
+     * modules/shopify-sync/sync.server.ts → значення після mapOrder). Синхронізація визначає «змінено в Shopify»,
+     * порівнюючи нові дані Shopify з цим знімком, а не з полями замовлення: ті можуть містити зміни застосунку
+     * (автовиправлення, прийняті пропозиції, підтверджені правки, ще не передані або не прийняті Shopify), які Shopify
+     * не змінював. null — замовлення до міграції 0011 (тоді — за історією змін order_changes).
+     */
+    shopifyContactSnapshot: jsonb("shopify_contact_snapshot").$type<Record<string, string | null>>(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
