@@ -69,5 +69,34 @@
 - Сервісний шар команд складу з перевіркою прав (`modules/warehouse/commands.server.ts`) і реєстрацією в інструментах
   асистента (етап 4); попередження про низькі залишки (`stock_alerts`) — джерело для майбутніх сповіщень.
 
-## 9. Факти Shopify API
-(заповнюється після перевірки документації)
+## 9. Факти Shopify API (перевірено за shopify.dev, версія 2026-10)
+Повні таблиці з посиланнями — у дослідженні етапу 5 (робочі нотатки розробника).
+- Стани: `available`, `committed`, `reserved`, `damaged`, `safety_stock`, `quality_control`, `incoming`, `on_hand`;
+  `on_hand = available + committed + reserved + damaged + safety_stock + quality_control`.
+- Замовлення: `available −n`, `committed +n`. Виконання: `committed −n` (отже `on_hand −n`) — **Shopify сам**.
+  `committed` через API змінити не можна.
+- Запис: `inventoryAdjustQuantities` (дельта; `available` та інші, крім `on_hand`/`committed`), `inventorySetQuantities`
+  (лише `available`/`on_hand`, абсолютне значення), `inventoryMoveQuantities` (між станами однієї локації).
+  Обов'язково: директива `@idempotent(key:)` (ключі живуть 24 год) і `changeFromQuantity` (число або явний `null`);
+  розбіжність → `CHANGE_FROM_QUANTITY_STALE`. Для станів, крім `available`, потрібен `ledgerDocumentUri` (не `gid://`).
+- Дозволи: читання — `read_inventory`; запис — `write_inventory` (+ дозвіл працівника в Shopify).
+- Webhook `inventory_levels/update`: лише `available` (немає `on_hand`/`committed`, немає автора зміни); зміни
+  committed/reserved/damaged/... webhooks не викликають; порядок і доставка не гарантовані → потрібна періодична звірка.
+- Камера: BarcodeDetector у Safari iOS вимкнено за замовчуванням; доступ до камери в iframe адмінки Shopify не
+  задокументовано; App Bridge Scanner — для мобільних застосунків Shopify/POS.
+
+## 10. Рішення для синхронізації з Shopify
+- Порівнюємо **доступну** кількість: застосунок `on_hand − reserved` ↔ Shopify `available` (резерв застосунку відповідає
+  `committed` Shopify). Брак застосунку в Shopify не існує як окремий стан (знімається з `available`).
+- Надсилання (лише якщо `warehouse.shopifyPush = 'deltas'` і є `write_inventory`): для внутрішніх подій
+  (надходження, ручне коригування, брак, ремонт браку) — завдання черги `inventory.push` → `inventoryAdjustQuantities`
+  `name: "available"`, `delta`, `changeFromQuantity: null` (дельти комутативні, перезапису немає),
+  `@idempotent(key: "ot-mv-<movementId>")`, `referenceDocumentUri` = посилання на рух у застосунку.
+  Стан руху: pending → pushed / failed. Повтор після 24 год без підтвердження — лише після звірки (ручний розгляд).
+- Webhook `inventory_levels/update` → не застосовується одразу: через ~10 хв планується звірка цієї позиції (щоб замовлення
+  встигло синхронізуватися й зарезервуватися). Стійка розбіжність → `inventory_conflicts` (або автоматичне прийняття,
+  якщо власник обрав `externalShopifyChanges = 'apply'`).
+- Розв'язання розбіжності: «прийняти Shopify» → рух `shopify_external` (on_hand += різниця); «надіслати склад» →
+  `inventoryAdjustQuantities` з `changeFromQuantity` = побачене значення Shopify (CAS; застаріле → нова звірка).
+- Сканування: поле введення (сканер-клавіатура або вручну), камера через BarcodeDetector лише там, де підтримується.
+- Масовий друк етикеток перевізника: об'єднання PDF на сервері (`pdf-lib`, MIT); зашифровані PDF — по одному.
