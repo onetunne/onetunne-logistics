@@ -142,3 +142,30 @@ describe("DEFAULT_COUNTRY_RULES postal data", () => {
     for (const code of codes) expect(code).toMatch(/^[A-Z]{2}$/);
   });
 });
+
+describe("owner-entered postal patterns are safe (stage 4, ReDoS)", () => {
+  it("all default country patterns are allowed", async () => {
+    const { DEFAULT_COUNTRY_RULES } = await import("~/modules/validation");
+    const { isSafePostalPattern, compilePostalPattern } = await import("~/modules/validation/postal");
+    for (const r of DEFAULT_COUNTRY_RULES) {
+      if (r.postalCodePattern) {
+        expect(isSafePostalPattern(r.postalCodePattern), r.countryCode).toBe(true);
+        expect(compilePostalPattern(r.postalCodePattern), r.countryCode).not.toBeNull();
+      }
+    }
+  });
+
+  it("rejects unbounded repetition, backreferences and lookarounds; long values are not matched", async () => {
+    const { isSafePostalPattern, compilePostalPattern, matchesPostalPattern } = await import("~/modules/validation/postal");
+    for (const p of ["(\\d+)+", "\\d*", "(a|aa)+", "\\d{2,}", "(\\d)\\1", "(?=\\d)\\d{5}", "(?<!x)\\d"]) {
+      expect(isSafePostalPattern(p), p).toBe(false);
+      expect(compilePostalPattern(p), p).toBeNull();
+    }
+    expect(isSafePostalPattern("[+*]\\d{5}")).toBe(true);
+    expect(isSafePostalPattern("\\d{4,5}( [A-Z]{2})?")).toBe(true);
+    const rule = { countryCode: "XX", postalCodePattern: "\\d{5}" } as Parameters<typeof matchesPostalPattern>[1];
+    const started = Date.now();
+    expect(matchesPostalPattern("1".repeat(5000), rule)).toBe(false);
+    expect(Date.now() - started).toBeLessThan(50);
+  });
+});

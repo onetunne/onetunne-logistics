@@ -97,7 +97,7 @@ const messages: MessageModule = {
 
     "countryRules.error.invalid": "Некоректне значення",
     "countryRules.error.tooLong": "Занадто довге значення",
-    "countryRules.error.patternInvalid": "Некоректний регулярний вираз",
+    "countryRules.error.patternInvalid": "Некоректний або недозволений шаблон: використовуйте \\d, [A-Z], {n} або {n,m}, ? і |; без +, * та {n,} (захист від перевантаження сервера)",
     "countryRules.error.exampleMismatch": "Приклад не відповідає формату індексу",
     "countryRules.error.codeInvalid": "Потрібно 2 латинські літери (A–Z)",
     "countryRules.error.codeExists": "Ця країна вже є в списку",
@@ -196,7 +196,7 @@ const messages: MessageModule = {
 
     "countryRules.error.invalid": "Invalid value",
     "countryRules.error.tooLong": "Value is too long",
-    "countryRules.error.patternInvalid": "Invalid regular expression",
+    "countryRules.error.patternInvalid": "Invalid or disallowed pattern: use \\d, [A-Z], {n} or {n,m}, ? and |; no +, * or {n,} (protects the server from overload)",
     "countryRules.error.exampleMismatch": "The example does not match the postal code format",
     "countryRules.error.codeInvalid": "2 Latin letters (A–Z) are required",
     "countryRules.error.codeExists": "This country is already in the list",
