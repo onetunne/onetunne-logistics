@@ -106,9 +106,15 @@ export function fakeInventoryAdmin(): FakeInventoryAdmin {
     calls.push({ op, variables, query });
     let data: unknown;
     switch (op) {
-      case "OtLocations":
-        data = { locations: { pageInfo: { hasNextPage: false }, nodes: locations } };
+      case "OtLocations": {
+        // Пагінація з'єднання: first + after (курсор — позиція наступної сторінки).
+        const first = Number(variables?.first ?? 50);
+        const start = typeof variables?.after === "string" ? Number(variables.after.replace("cursor-", "")) : 0;
+        const next = start + first;
+        const more = next < locations.length;
+        data = { locations: { pageInfo: { hasNextPage: more, endCursor: more ? `cursor-${next}` : null }, nodes: locations.slice(start, next) } };
         break;
+      }
       case "OtInventoryLevels": {
         const ids = (variables?.ids as string[]) ?? [];
         if (variables?.locationId !== LOC && variables?.locationId !== LOC2) throw new ShopifyApiError("bad location", false, "INVALID");

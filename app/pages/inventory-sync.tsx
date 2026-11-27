@@ -42,6 +42,7 @@ import {
   Banner,
   Button,
   Card,
+  Checkbox,
   ConfirmSubmitButton,
   DataTable,
   Disclosure,
@@ -181,12 +182,24 @@ export async function action({ request }: ActionFunctionArgs): Promise<ActionRes
         const r = await acceptShopifyValue(ctx, conflictId, { admin: () => adminFor(shop) });
         if (r.status === "accepted") return { ok: true, message: "inventorySync.result.accepted", params: { diff: signed(r.delta) } };
         if (r.status === "already") return { ok: true, message: "inventorySync.result.already", tone: "info" };
+        if (r.status === "push_pending") return { ok: true, message: "inventorySync.result.push_pending", tone: "warning" };
         return { ok: true, message: `inventorySync.result.${r.status}`, tone: "warning", extra: outcomeExtra(r.reconciled) };
       }
       case "pushApp": {
-        const r = await pushAppValue(ctx, await adminFor(shop), conflictId, { appUrl: await appUrl() });
-        if (r.status === "pushed") return { ok: true, message: "inventorySync.result.pushed", params: { delta: signed(r.delta) } };
+        // Прапорець «Shopify не поповнить ці повернення» (Checkbox без value — браузер надсилає "on").
+        const r = await pushAppValue(ctx, await adminFor(shop), conflictId, { appUrl: await appUrl(), includeReturns: form.has("includeReturns") });
+        if (r.status === "pushed") {
+          const held = (r.heldOtherStates ?? 0) + (r.heldAwaiting ?? 0);
+          return held > 0
+            ? { ok: true, message: "inventorySync.result.pushedHeld", params: { delta: signed(r.delta), held }, tone: "info" }
+            : { ok: true, message: "inventorySync.result.pushed", params: { delta: signed(r.delta) } };
+        }
         if (r.status === "failed") return { ok: false, error: "inventorySync.pushFailed", params: { code: r.code } };
+        if (r.status === "other_states") return { ok: false, error: "inventorySync.pushOtherStates", params: { count: r.count } };
+        if (r.status === "awaiting_restock") return { ok: false, error: "inventorySync.pushAwaitingReturns", params: { count: r.count } };
+        if (r.status === "resolved_concurrently") {
+          return { ok: true, message: "inventorySync.result.resolved_concurrently", params: { delta: signed(r.delta) }, tone: "info" };
+        }
         if (r.status === "stale" || r.status === "needs_reconcile") {
           return { ok: true, message: `inventorySync.result.${r.status}`, tone: "warning", extra: outcomeExtra(r.reconciled) };
         }
@@ -202,12 +215,14 @@ export async function action({ request }: ActionFunctionArgs): Promise<ActionRes
         return {
           ok: true,
           message: "inventorySync.result.bulkAccepted",
-          params: { accepted: r.accepted, units: signed(r.units), stale: r.stale, already: r.already, failed: r.failed },
-          tone: r.stale + r.failed > 0 ? "warning" : "success",
+          params: { accepted: r.accepted, units: signed(r.units), stale: r.stale, already: r.already, pending: r.pending, failed: r.failed },
+          tone: r.stale + r.failed + r.pending > 0 ? "warning" : "success",
         };
       }
       case "reconcileItem": {
-        const outcome = await reconcileStockItemNow(ctx.db, await adminFor(shop), formString(form, "stockItemId"));
+        const stockItemId = formString(form, "stockItemId");
+        if (!UUID_RE.test(stockItemId)) return { ok: false, error: "inventorySync.reconcileUnavailable" };
+        const outcome = await reconcileStockItemNow(ctx.db, await adminFor(shop), stockItemId);
         if (!outcome) return { ok: false, error: "inventorySync.reconcileUnavailable" };
         return { ok: true, message: "inventorySync.result.reconciledItem", extra: outcomeExtra(outcome), tone: "info" };
       }
@@ -327,6 +342,10 @@ function StatusBanners({ data }: { data: LoaderData }) {
   if (!o.shop) banners.push({ key: "shop", tone: "warning", text: t("shopify.notInstalled") });
   if (o.shop && !o.canWrite) banners.push({ key: "scope", tone: o.pushMode === "deltas" ? "warning" : "info", text: t("inventorySync.banner.missingWrite") });
   if (o.pushMode === "off") banners.push({ key: "off", tone: "info", text: t("inventorySync.banner.pushOff") });
+  // Автоприйняття діє лише з передачею змін і write_inventory (autoApplyEffective) — інакше все на розгляд власника.
+  if (o.externalMode === "apply" && !(o.pushMode === "deltas" && o.canWrite)) {
+    banners.push({ key: "autoApply", tone: "warning", text: t("inventorySync.banner.autoApplyPaused") });
+  }
   if (!o.inventoryInitializedAt) banners.push({ key: "init", tone: "info", text: t("inventorySync.banner.notInitialized") });
   if (o.shop && !o.locationId) banners.push({ key: "location", tone: "warning", text: t("inventorySync.banner.chooseLocation") });
   if (o.locationAutoSelected) banners.push({ key: "auto", tone: "info", text: t("inventorySync.banner.confirmLocation") });
@@ -431,6 +450,20 @@ function OverviewCard({ data }: { data: LoaderData }) {
                 ) : (
                   t("inventorySync.overview.lastReconcileNever")
                 ),
+            },
+            {
+              key: "nextReconcile",
+              label: t("inventorySync.overview.nextReconcile"),
+              value: (
+                <Stack gap={1}>
+                  <span>
+                    {o.nextScheduledReconcileAt ? formatDateTime(o.nextScheduledReconcileAt, locale) : t("inventorySync.overview.nextReconcileNone")}
+                  </span>
+                  <Text variant="caption" tone="subdued">
+                    {t("inventorySync.overview.nextReconcileHint")}
+                  </Text>
+                </Stack>
+              ),
             },
             {
               key: "queued",
@@ -646,7 +679,16 @@ function ConflictsTable({ data }: { data: LoaderData }) {
       // Зміна фактичного залишку — лише непояснена частина (так само рахує сервер).
       units: resolvable.reduce((s, r) => s + (r.unexplained ?? 0), 0),
       explained: resolvable.filter((r) => r.expectedDiff !== 0).length,
-      risky: resolvable.filter((r) => r.failedPushes > 0 || r.uncertain).length,
+      risky: resolvable.filter(
+        (r) =>
+          r.failedPushes > 0 ||
+          r.uncertain ||
+          r.unsentDelta !== 0 ||
+          r.reservationExcess > 0 ||
+          r.shopifyOtherStates > 0 ||
+          r.returnsAwaiting > 0 ||
+          r.pushAttemptAt !== null,
+      ).length,
     };
   }, [rows, selected]);
 
@@ -784,16 +826,23 @@ function ConflictsTable({ data }: { data: LoaderData }) {
 
 function Explanation({ row }: { row: ConflictView }) {
   const t = useT();
+  const locale = useLocale();
   const lines: string[] = [];
   if (row.origin === "opened_with_internal_history") lines.push(t("inventorySync.why.openedWithHistory"));
   if (!row.resolvable && row.status === "open") lines.push(t("inventorySync.why.needsReconcile"));
+  if (row.pushAttemptAt) lines.push(t("inventorySync.why.pushPending", { date: formatDateTime(row.pushAttemptAt, locale) }));
+  if (row.unsentDelta !== 0) lines.push(t("inventorySync.why.unsent", { count: row.unsentCount, delta: signed(row.unsentDelta) }));
   if (row.committedNotReserved > 0) lines.push(t("inventorySync.why.committed", { count: row.committedNotReserved }));
+  if (row.reservationExcess > 0) lines.push(t("inventorySync.why.reservationExcess", { count: row.reservationExcess }));
   if (row.failedPushes > 0) lines.push(t("inventorySync.why.failedPushes", { count: row.failedPushes, delta: signed(row.failedDelta) }));
   if (row.inFlight > 0) lines.push(t("inventorySync.why.inFlight", { count: row.inFlight }));
+  if (row.returnsPending > 0) lines.push(t("inventorySync.why.returnsPending", { count: row.returnsPending }));
+  if (row.returnsAwaiting > 0) lines.push(t("inventorySync.why.returnsAwaiting", { count: row.returnsAwaiting }));
   if (row.shopifyOtherStates > 0) lines.push(t("inventorySync.why.otherStates", { count: row.shopifyOtherStates }));
-  if (row.uncertain) lines.push(t("inventorySync.why.uncertain"));
+  if (row.uncertain && row.returnsPending === 0) lines.push(t("inventorySync.why.uncertain"));
   if (row.autoApplyBlocked) lines.push(t("inventorySync.why.autoBlocked"));
   if (lines.length === 0) lines.push(t("inventorySync.why.external"));
+  if (row.autoApplyBlockers.length > 0) lines.push(t("inventorySync.why.autoSkipped"));
   return (
     <Stack gap={1}>
       {lines.map((l) => (
@@ -832,9 +881,11 @@ function RowActions({ row, busy, canWrite }: { row: ConflictView; busy: boolean;
       </Form>
     );
   }
-  // Дії змінюють лише непояснену частину різниці (див. conflicts.server.ts).
+  // Дії змінюють лише непояснену частину різниці (див. conflicts.server.ts); «Надіслати склад» — без одиниць, які
+  // Shopify тримає в інших станах, і без повернень, які Shopify поповнить сам (pure.ts pushPlan).
   const change = row.unexplained ?? 0;
-  const shopifyTarget = row.shopifyAvailable === null ? null : row.shopifyAvailable - change;
+  const pushDelta = row.pushDelta ?? -change;
+  const shopifyTarget = row.shopifyAvailable === null ? null : row.shopifyAvailable + pushDelta;
   return (
     <Stack gap={2}>
       <Form method="post">
@@ -850,6 +901,16 @@ function RowActions({ row, busy, canWrite }: { row: ConflictView; busy: boolean;
               <Stack gap={2}>
                 <Text>{t("inventorySync.action.accept.message", { diff: signed(change) })}</Text>
                 {row.expectedDiff !== 0 ? <Text>{t("inventorySync.action.explainedKept", { count: Math.abs(row.expectedDiff) })}</Text> : null}
+                {row.unsentDelta !== 0 ? <Text tone="warning">{t("inventorySync.action.accept.unsentWarning", { delta: signed(row.unsentDelta) })}</Text> : null}
+                {row.returnsAwaiting > 0 ? (
+                  <Text tone="warning">{t("inventorySync.action.accept.awaitingWarning", { count: row.returnsAwaiting })}</Text>
+                ) : null}
+                {row.shopifyOtherStates > 0 ? (
+                  <Text tone="warning">{t("inventorySync.action.accept.otherStatesWarning", { count: row.shopifyOtherStates })}</Text>
+                ) : null}
+                {row.reservationExcess > 0 ? (
+                  <Text tone="warning">{t("inventorySync.action.reservationWarning", { count: row.reservationExcess })}</Text>
+                ) : null}
                 {row.failedPushes > 0 || row.uncertain ? <Text tone="warning">{t("inventorySync.action.accept.warning")}</Text> : null}
               </Stack>
             }
@@ -858,7 +919,7 @@ function RowActions({ row, busy, canWrite }: { row: ConflictView; busy: boolean;
           >
             {t("inventorySync.action.accept")}
           </ConfirmSubmitButton>
-          {canWrite ? (
+          {canWrite && !row.pushBlockedOtherStates ? (
             <ConfirmSubmitButton
               name="intent"
               value="pushApp"
@@ -867,10 +928,30 @@ function RowActions({ row, busy, canWrite }: { row: ConflictView; busy: boolean;
               title={t("inventorySync.action.pushApp.title")}
               message={
                 <Stack gap={2}>
-                  <Text>
-                    {t("inventorySync.action.pushApp.message", { delta: signed(-change), to: shopifyTarget ?? "—", shopify: row.shopifyAvailable ?? "—" })}
-                  </Text>
+                  {pushDelta !== 0 ? (
+                    <Text>
+                      {t("inventorySync.action.pushApp.message", { delta: signed(pushDelta), to: shopifyTarget ?? "—", shopify: row.shopifyAvailable ?? "—" })}
+                    </Text>
+                  ) : (
+                    <Text>{t("inventorySync.action.pushApp.onlyReturns")}</Text>
+                  )}
                   {row.expectedDiff !== 0 ? <Text>{t("inventorySync.action.explainedKept", { count: Math.abs(row.expectedDiff) })}</Text> : null}
+                  {row.pushHeldOtherStates > 0 ? (
+                    <Text>{t("inventorySync.action.pushApp.heldOtherStates", { count: row.pushHeldOtherStates })}</Text>
+                  ) : null}
+                  {row.pushHeldAwaiting > 0 ? (
+                    <>
+                      <Text tone="warning">{t("inventorySync.action.pushApp.heldAwaiting", { count: row.pushHeldAwaiting })}</Text>
+                      <Checkbox
+                        id={`include-returns-${row.id}`}
+                        name="includeReturns"
+                        label={t("inventorySync.action.pushApp.includeReturns", { count: row.pushHeldAwaiting })}
+                      />
+                    </>
+                  ) : null}
+                  {row.reservationExcess > 0 ? (
+                    <Text tone="warning">{t("inventorySync.action.reservationWarning", { count: row.reservationExcess })}</Text>
+                  ) : null}
                   {row.uncertain ? <Text tone="warning">{t("inventorySync.action.pushApp.warning")}</Text> : null}
                 </Stack>
               }
@@ -887,6 +968,16 @@ function RowActions({ row, busy, canWrite }: { row: ConflictView; busy: boolean;
           {t("inventorySync.action.pushApp.noScope")}
         </Text>
       )}
+      {canWrite && row.pushBlockedOtherStates ? (
+        <Text variant="caption" tone="subdued">
+          {t("inventorySync.action.pushApp.otherStates", { count: row.shopifyOtherStates })}
+        </Text>
+      ) : null}
+      {row.pushAttemptAt ? (
+        <Text variant="caption" tone="subdued">
+          {t("inventorySync.action.dismiss.pushPending")}
+        </Text>
+      ) : null}
       <Disclosure summary={t("inventorySync.action.dismiss")}>
         <Form method="post">
           <input type="hidden" name="conflictId" value={row.id} />

@@ -13,6 +13,8 @@
  * сутність inventory_balance «<склад>:<позиція>»); рухи після неї = поточні підсумки − збережені. Час не порівнюється:
  * created_at руху — початок його транзакції, тож рух, що чекав на блокування балансу, міг би мати час, раніший за
  * узгодження. Записується лише тоді, коли є що узгоджувати (кількість змінилася), — не на кожну звірку.
+ * Точка узгодження зберігає й стан повернень покупця на той момент (returns.server.ts, ReturnsSnapshot): повернення,
+ * уже узгоджені з Shopify, не пояснюють нових різниць.
  * Викликати в транзакції після lockBalances позиції (рухи позиції серіалізовані блокуванням балансу).
  */
 import { and, desc, eq, ne, sql } from "drizzle-orm";
@@ -20,6 +22,15 @@ import type { DbOrTx, Tx } from "~/db/client.server";
 import { auditLog, inventoryMovements } from "~/db/schema";
 import type { Actor } from "~/domain/permissions";
 import { writeAudit } from "~/modules/audit/audit.server";
+import {
+  EMPTY_RETURNS_SNAPSHOT,
+  emptyReturnsState,
+  loadReturnsState,
+  parseReturnsSnapshot,
+  returnsSnapshotOf,
+  sameReturnsSnapshot,
+  type ReturnsSnapshot,
+} from "./returns.server";
 
 export const IN_SYNC_ACTION = "inventory_sync.in_sync";
 /** Скільки останніх неотриманих рухів показувати в розбіжності. */
@@ -58,7 +69,12 @@ async function skippedTotals(db: DbOrTx, warehouseId: string, stockItemId: strin
   return { count: row?.count ?? 0, delta: row?.delta ?? 0 };
 }
 
-async function lastAgreement(db: DbOrTx, warehouseId: string, stockItemId: string): Promise<UnsentTotals | null> {
+export interface Agreement extends UnsentTotals {
+  returns: ReturnsSnapshot;
+}
+
+/** Остання точка узгодження позиції (null — не було або запис пошкоджено). */
+export async function lastAgreement(db: DbOrTx, warehouseId: string, stockItemId: string): Promise<Agreement | null> {
   const [row] = await db
     .select({ details: auditLog.details })
     .from(auditLog)
@@ -76,7 +92,7 @@ async function lastAgreement(db: DbOrTx, warehouseId: string, stockItemId: strin
   const count = d.skippedCount;
   const delta = d.skippedDelta;
   if (typeof count !== "number" || !Number.isSafeInteger(count) || typeof delta !== "number" || !Number.isSafeInteger(delta)) return null;
-  return { count, delta };
+  return { count, delta, returns: parseReturnsSnapshot(d.returns) };
 }
 
 /** Неотримані Shopify внутрішні зміни позиції від останнього узгодження. */
@@ -100,19 +116,32 @@ export async function unsentSinceAgreement(db: DbOrTx, warehouseId: string, stoc
 export type AgreementSource = "match" | "explained" | "accepted" | "auto_applied" | "pushed";
 
 /**
- * Записати точку узгодження, якщо після попередньої з'явилися неотримані рухи. Викликати лише тоді, коли значення
- * Shopify і складу узгоджені НАПЕВНО (баланс заблоковано й він не змінився від порівняння/спостереження).
+ * Записати точку узгодження, якщо після попередньої з'явилися неотримані рухи або змінився стан повернень. Викликати
+ * лише тоді, коли значення Shopify і складу узгоджені НАПЕВНО (баланс заблоковано й він не змінився від
+ * порівняння/спостереження). now — для вікна повернень (returns.server.ts).
  */
-export async function recordAgreement(tx: Tx, actor: Actor, warehouseId: string, stockItemId: string, source: AgreementSource): Promise<boolean> {
+export async function recordAgreement(
+  tx: Tx,
+  actor: Actor,
+  warehouseId: string,
+  stockItemId: string,
+  source: AgreementSource,
+  now: Date = new Date(),
+): Promise<boolean> {
   const totals = await skippedTotals(tx, warehouseId, stockItemId);
   const agreed = await lastAgreement(tx, warehouseId, stockItemId);
-  if (agreed ? agreed.count === totals.count && agreed.delta === totals.delta : totals.count === 0) return false;
+  const state = (await loadReturnsState(tx, warehouseId, [stockItemId], now)).get(stockItemId) ?? emptyReturnsState();
+  const returns = returnsSnapshotOf(state);
+  const sameReturns = sameReturnsSnapshot(agreed?.returns ?? EMPTY_RETURNS_SNAPSHOT, returns);
+  const sameTotals = agreed ? agreed.count === totals.count && agreed.delta === totals.delta : totals.count === 0;
+  if (sameTotals && sameReturns) return false;
   await writeAudit(tx, actor, IN_SYNC_ACTION, { type: "inventory_balance", id: balanceEntityId(warehouseId, stockItemId) }, {
     source,
     skippedCount: totals.count,
     skippedDelta: totals.delta,
     settledCount: totals.count - (agreed?.count ?? 0),
     settledDelta: totals.delta - (agreed?.delta ?? 0),
+    returns,
   });
   return true;
 }

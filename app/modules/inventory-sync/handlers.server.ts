@@ -6,7 +6,7 @@ import type { JobHandlers } from "~/modules/jobs/worker.server";
 import { INVENTORY_SYNC_JOB } from "./jobs";
 import { runInventoryPush } from "./push.server";
 import { parseReconcilePayload, runReconcileJob } from "./reconcile.server";
-import { ensureInventoryPushSweep } from "./schedule.server";
+import { ensureInventoryPushSweep, runScheduledReconcile } from "./schedule.server";
 
 export interface InventorySyncDeps {
   db: Db;
@@ -41,6 +41,12 @@ export function createInventorySyncHandlers(deps: InventorySyncDeps): JobHandler
           return;
         }
         await runReconcileJob({ db: deps.db, admin: deps.admin }, payload);
+      },
+    },
+    [INVENTORY_SYNC_JOB.scheduledReconcile]: {
+      run: async () => {
+        const outcome = await runScheduledReconcile(deps.db);
+        logger.info("inventory_sync.scheduled_reconcile", { outcome });
       },
     },
   };

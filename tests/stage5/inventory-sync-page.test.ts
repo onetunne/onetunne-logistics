@@ -245,7 +245,9 @@ describe("actions", () => {
   it("every result/outcome key exists in both locales", () => {
     const keys = [
       ...RECONCILE_OUTCOMES.map((o) => `inventorySync.outcome.${o}`),
-      ...["accepted", "already", "stale", "needs_reconcile", "pushed", "inProgress", "unknown", "dismissed", "bulkAccepted"].map((k) => `inventorySync.result.${k}`),
+      ...["accepted", "already", "stale", "needs_reconcile", "pushed", "inProgress", "unknown", "dismissed", "bulkAccepted", "push_pending", "resolved_concurrently"].map(
+        (k) => `inventorySync.result.${k}`,
+      ),
       ...["open", "accepted_shopify", "pushed_app", "dismissed"].map((s) => `inventorySync.conflictStatus.${s}`),
       ...["accepted_shopify", "pushed_app", "dismissed", "auto_resolved", "auto_applied"].map((s) => `inventorySync.resolution.${s}`),
       "inventorySync.overview.pushMode.off",
@@ -300,5 +302,53 @@ describe("demo and rendering", () => {
     } finally {
       await db.db.update(shopInstallations).set({ scopes: "read_products,read_inventory,write_inventory" });
     }
+  });
+});
+
+describe("round 2 review: explainable conflicts and safe actions", () => {
+  it("reconcileItem with an invalid stock item id is refused cleanly (no uuid error)", async () => {
+    expect(await act({ intent: "reconcileItem", stockItemId: "abc" })).toEqual({ ok: false, error: "inventorySync.reconcileUnavailable" });
+  });
+
+  it("warns that automatic acceptance is not in effect while push is off", async () => {
+    const current = await getSetting(db.db, "warehouse");
+    await updateSetting(db.db, OWNER, "warehouse", { ...current, shopifyPush: "off", externalShopifyChanges: "apply" });
+    try {
+      const html = await render("/app/warehouse/shopify");
+      expect(html).toContain(esc(uk("inventorySync.banner.autoApplyPaused")));
+    } finally {
+      await updateSetting(db.db, OWNER, "warehouse", { ...(await getSetting(db.db, "warehouse")), externalShopifyChanges: "review" });
+    }
+    expect(await render("/app/warehouse/shopify")).not.toContain(esc(uk("inventorySync.banner.autoApplyPaused")));
+  });
+
+  it("units in Shopify «unavailable» states: explained, «send warehouse» hidden and refused by the server", async () => {
+    fake.setLevel(items[1]!.gid, { available: 9, onHand: 12, committed: 0 });
+    await act({ intent: "reconcileItem", stockItemId: items[1]!.stockItemId });
+    const id = (await openConflictId(1))!;
+    const row = (await load()).conflicts.find((c) => c.id === id)!;
+    expect(row).toMatchObject({ shopifyOtherStates: 3, pushBlockedOtherStates: true });
+    const html = await render("/app/warehouse/shopify");
+    expect(html).toContain(esc(uk("inventorySync.action.pushApp.otherStates").replace("{count}", "3")));
+    expect(html).toContain(esc(uk("inventorySync.why.otherStates").replace("{count}", "3")));
+    expect(await act({ intent: "pushApp", conflictId: id })).toEqual({ ok: false, error: "inventorySync.pushOtherStates", params: { count: 3 } });
+    expect(fake.levels.get(items[1]!.gid)).toMatchObject({ available: 9, onHand: 12 });
+  });
+
+  it("internal changes Shopify did not receive are shown on the conflict and in the accept dialog", async () => {
+    // Передачу вимкнено: надходження не надсилається (skipped); очікувані з попередніх тестів теж стають skipped.
+    await updateSetting(db.db, OWNER, "warehouse", { ...(await getSetting(db.db, "warehouse")), shopifyPush: "off" });
+    const { applied } = await apply(db.db, { stockItemId: items[2]!.stockItemId, type: "receipt_manual", idempotencyKey: `manual:${crypto.randomUUID()}`, onHandDelta: 2 });
+    expect(applied[0]!.shopifySyncState).toBe("skipped");
+    const { runJobsOnce } = await import("~/modules/jobs/worker.server");
+    const { createSyncHandlers } = await import("~/modules/shopify-sync/handlers.server");
+    await act({ intent: "pushNow" });
+    await runJobsOnce(db.db, createSyncHandlers({ db: db.db, serviceContext: () => m.ctx!, admin: async () => fake.admin }));
+    await act({ intent: "reconcileItem", stockItemId: items[2]!.stockItemId });
+    const id = (await openConflictId(2))!;
+    const row = (await load()).conflicts.find((c) => c.id === id)!;
+    expect(row.unsentDelta).toBeGreaterThanOrEqual(2);
+    const html = await render("/app/warehouse/shopify");
+    expect(html).toContain(esc(uk("inventorySync.action.accept.unsentWarning").replace("{delta}", `+${row.unsentDelta}`)));
   });
 });

@@ -14,15 +14,26 @@
  * Результат для позиції: збіг/пояснено (diff = expectedDiff; diff = 0 при expectedDiff ≠ 0 — це розбіжність) →
  * відкрита розбіжність закривається системою (dismissed, resolution auto_resolved), невдалі передачі позначаються
  * pushed (Shopify має значення складу); розбіжність → одна відкрита на
- * позицію (оновлюється спостереження) або, якщо власник обрав externalShopifyChanges = apply і різниця не має
- * інших пояснень, — автоматичне прийняття значення Shopify (рух shopify_external, ключ від id розбіжності).
+ * позицію (оновлюється спостереження) або, якщо власник обрав externalShopifyChanges = apply (діє лише з передачею
+ * змін і write_inventory — autoApplyEffective) і різниця не має інших пояснень (autoApplyBlockers: неотримані Shopify
+ * внутрішні зміни, невдалі передачі, стани Shopify reserved/damaged/…, резерв понад committed, повернення, розбіжність
+ * запуску обліку, невідомий результат «надіслати склад», повернення, які Shopify ще поповнить), — автоматичне прийняття значення Shopify (рух
+ * shopify_external, ключ від id розбіжності).
+ *
+ * Узгодження (unsent.server.ts, pure.ts settlesEvidence): точний збіг (reservationExcess = 0) або пояснена різниця без
+ * невизначеності — точка узгодження для неотриманих Shopify рухів і повернень (returns.server.ts) і закриття невдалих
+ * передач як pushed. При reservationExcess > 0 збіг може бути випадковим (звільнені Shopify одиниці замовлення
+ * «покривають» неотримане надходження) — докази не закриваються.
+ * Повернення (returns.server.ts) рахуються під блокуванням балансу позиції від останнього узгодження; невідома спроба
+ * «надіслати склад» переноситься з закритої розбіжності в нову (carriedPushAttempt) до 24 год.
  */
-import { and, asc, count, eq, gt, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, inArray, isNotNull, ne, sql } from "drizzle-orm";
 import type { Db, DbOrTx } from "~/db/client.server";
 import {
   inventoryBalances,
   inventoryConflicts,
   inventoryMovements,
+  orderLineItems,
   orders,
   productVariants,
   stockItems,
@@ -48,9 +59,21 @@ import { acceptInTx, settleFailedMovements } from "./accept.server";
 import { loadSyncEnvironment, type InventorySyncEnvironment } from "./environment.server";
 import { INVENTORY_SYNC_JOB, RECONCILE_DELAY_MS, RECONCILE_MAX_RESCHEDULES, reconcileAllDedupeKey } from "./jobs";
 import { ensureWarehouseLocation } from "./location.server";
-import { conflictOrigin, parseObservation, type ConflictObservation } from "./observation";
-import { canAutoApply, compareLevels, verdictOf, type FulfillmentTiming } from "./pure";
+import { conflictOrigin, parseObservation, parsePushAttempt, type ConflictObservation } from "./observation";
+import {
+  PUSH_ATTEMPT_TTL_MS,
+  autoApplyBlockers,
+  autoApplyEffective,
+  compareLevels,
+  settlesEvidence,
+  verdictOf,
+  type FulfillmentTiming,
+} from "./pure";
+import { EMPTY_RETURNS_SNAPSHOT, emptyReturnsState, loadReturnsState, returnsTimingFrom, type ReturnsTiming } from "./returns.server";
+import { lastAgreement, recordAgreement, unsentSinceAgreement } from "./unsent.server";
 import { enqueueInventoryPush, ensureInventoryPushSweep, scheduleItemReconcile } from "./schedule.server";
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export const RECONCILE_OUTCOMES = [
   "match",
@@ -151,17 +174,37 @@ export async function targetForStockItem(db: DbOrTx, stockItemId: string): Promi
 // Дані застосунку
 // ---------------------------------------------------------------------------
 
-/** Замовлення, передані/виконані не синхронно в застосунку й Shopify (поправка до committed − reserved). */
-export async function fulfillmentTiming(db: DbOrTx, warehouseId: string, stockItemIds: readonly string[]): Promise<Map<string, FulfillmentTiming>> {
+export { RETURN_PENDING_WINDOW_MS } from "./returns.server";
+
+/**
+ * Замовлення, передані/виконані не синхронно в застосунку й Shopify (поправка до committed − reserved):
+ * - inFlight: передано перевізнику (списано в застосунку), у Shopify ще не виконано — committed Shopify містить поточну
+ *   кількість позиції (без повернених/відшкодованих одиниць); також позиції, уперше побачені вже переданими (історичні,
+ *   без рядка резерву — reservations.server.ts), якщо Shopify їх ще не виконав;
+ * - fulfilledOutside: виконано в Shopify, а в застосунку ще зарезервовано;
+ * - uncertain: частково виконані замовлення.
+ * Статус Shopify RESTOCKED у 2026-10 замінено на UNFULFILLED (лишається лише для старих даних) — повернення
+ * визначаються за current_quantity, а не за статусом (returns.server.ts).
+ */
+export async function orderTiming(db: DbOrTx, warehouseId: string, stockItemIds: readonly string[]): Promise<Map<string, FulfillmentTiming>> {
   const out = new Map<string, FulfillmentTiming>();
   if (stockItemIds.length === 0) return out;
+  const ids = [...stockItemIds];
+  const get = (id: string) => {
+    let t = out.get(id);
+    if (!t) out.set(id, (t = { inFlight: 0, fulfilledOutside: 0, uncertain: false }));
+    return t;
+  };
   const shipped = inArray(orders.status, [...SHIPPED_STATUSES]);
   const fs = sql`coalesce(${orders.fulfillmentStatus}, '')`;
+  const notFulfilled = sql`${fs} not in ('fulfilled', 'partially_fulfilled', 'restocked')`;
+  // Поточна кількість позиції (Shopify currentQuantity); позиції вже немає — як списано (без висновку про повернення).
+  const lineQty = sql`greatest(coalesce(${orderLineItems.currentQuantity}, ${orderLineItems.quantity}, ${stockReservations.consumedQty}), 0)`;
   const rows = await db
     .select({
       stockItemId: stockReservations.stockItemId,
-      inFlight: sql<number>`coalesce(sum(case when ${shipped} and ${fs} not in ('fulfilled', 'partially_fulfilled', 'restocked')
-        then ${stockReservations.consumedQty} else 0 end), 0)`.mapWith(Number),
+      inFlight: sql<number>`coalesce(sum(case when ${shipped} and ${notFulfilled}
+        then least(${stockReservations.consumedQty}, ${lineQty}) else 0 end), 0)`.mapWith(Number),
       fulfilledOutside: sql<number>`coalesce(sum(case when not ${shipped} and ${orders.status} <> 'cancelled' and ${fs} = 'fulfilled'
         then ${stockReservations.reservedQty} else 0 end), 0)`.mapWith(Number),
       uncertain: sql<boolean>`coalesce(bool_or(${fs} in ('partially_fulfilled', 'restocked')
@@ -169,9 +212,71 @@ export async function fulfillmentTiming(db: DbOrTx, warehouseId: string, stockIt
     })
     .from(stockReservations)
     .innerJoin(orders, eq(orders.id, stockReservations.orderId))
-    .where(and(eq(stockReservations.warehouseId, warehouseId), inArray(stockReservations.stockItemId, [...stockItemIds])))
+    .leftJoin(orderLineItems, eq(orderLineItems.id, stockReservations.orderLineItemId))
+    .where(and(eq(stockReservations.warehouseId, warehouseId), inArray(stockReservations.stockItemId, ids)))
     .groupBy(stockReservations.stockItemId);
-  for (const r of rows) out.set(r.stockItemId, { inFlight: r.inFlight, fulfilledOutside: r.fulfilledOutside, uncertain: Boolean(r.uncertain) });
+  for (const r of rows) Object.assign(get(r.stockItemId), { inFlight: r.inFlight, fulfilledOutside: r.fulfilledOutside, uncertain: Boolean(r.uncertain) });
+
+  // Історичні позиції: уперше побачені вже переданими (до знімка) — рядка резерву немає, але Shopify, поки не виконав
+  // замовлення, тримає їх у committed (і on_hand), тоді як у залишку застосунку їх немає.
+  const historical = await db
+    .select({
+      stockItemId: stockItems.id,
+      inFlight: sql<number>`coalesce(sum(case when ${notFulfilled}
+        then greatest(coalesce(${orderLineItems.currentQuantity}, ${orderLineItems.quantity}), 0) else 0 end), 0)`.mapWith(Number),
+      uncertain: sql<boolean>`coalesce(bool_or(${fs} = 'partially_fulfilled'), false)`,
+    })
+    .from(orderLineItems)
+    .innerJoin(orders, eq(orders.id, orderLineItems.orderId))
+    .innerJoin(stockItems, eq(stockItems.variantId, orderLineItems.variantId))
+    .where(
+      and(
+        inArray(stockItems.id, ids),
+        shipped,
+        isNotNull(orders.shopifyOrderId),
+        sql`not exists (select 1 from ${stockReservations} where ${stockReservations.orderLineItemId} = ${orderLineItems.id})`,
+      ),
+    )
+    .groupBy(stockItems.id);
+  for (const r of historical) {
+    const t = get(r.stockItemId);
+    t.inFlight += r.inFlight;
+    t.uncertain ||= Boolean(r.uncertain);
+  }
+  return out;
+}
+
+/** Повернення позиції відносно останнього узгодження (returns.server.ts). Під блокуванням балансу — узгоджено з рухами. */
+async function returnsTiming(db: DbOrTx, warehouseId: string, stockItemId: string, now: Date): Promise<ReturnsTiming> {
+  const state = (await loadReturnsState(db, warehouseId, [stockItemId], now)).get(stockItemId) ?? emptyReturnsState();
+  const agreed = await lastAgreement(db, warehouseId, stockItemId);
+  return returnsTimingFrom(state, agreed?.returns ?? EMPTY_RETURNS_SNAPSHOT);
+}
+
+function withReturns(t: FulfillmentTiming, r: ReturnsTiming): FulfillmentTiming {
+  return { ...t, returnsPending: r.pending, returnsAwaiting: r.awaiting, uncertain: t.uncertain || r.pending > 0 };
+}
+
+/**
+ * Поправки замовлень (orderTiming) і повернення (returns.server.ts) — як їх бачить звірка:
+ * - returnsPending: після списання поточна кількість позиції зменшилася (повернення/відшкодування в Shopify; Shopify
+ *   міг поповнити «доступно» сам), а склад ще не оприбуткував стільки ПРИДАТНИХ повернень покупця (від останнього
+ *   узгодження) — автоприйняття такої різниці подвоїло б одиниці або додало б брак як придатний товар;
+ * - returnsAwaiting: склад оприбуткував повернення, яке Shopify ще має поповнити сам;
+ * - uncertain: частково виконані замовлення або returnsPending > 0.
+ */
+export async function fulfillmentTiming(
+  db: DbOrTx,
+  warehouseId: string,
+  stockItemIds: readonly string[],
+  now: Date = new Date(),
+): Promise<Map<string, FulfillmentTiming>> {
+  const base = await orderTiming(db, warehouseId, stockItemIds);
+  const out = new Map<string, FulfillmentTiming>();
+  for (const id of new Set(stockItemIds)) {
+    const t = base.get(id) ?? { inFlight: 0, fulfilledOutside: 0, uncertain: false };
+    out.set(id, withReturns(t, await returnsTiming(db, warehouseId, id, now)));
+  }
   return out;
 }
 
@@ -204,7 +309,7 @@ async function preStates(db: DbOrTx, warehouseId: string, stockItemIds: readonly
   return out;
 }
 
-type ShopifyRead =
+export type ShopifyRead =
   | { kind: "ok"; quantities: ShopifyLevelQuantities }
   | { kind: "missing" | "untracked" | "not_stocked" };
 
@@ -242,7 +347,7 @@ export async function readShopifyLevels(
 export async function reconcileTargets(
   db: Db,
   admin: AdminGraphql,
-  env: Pick<InventorySyncEnvironment, "externalMode" | "warehouse">,
+  env: Pick<InventorySyncEnvironment, "externalMode" | "pushMode" | "canWrite" | "warehouse">,
   locationId: string,
   targets: readonly ReconcileTarget[],
   opts: ReconcileOptions = {},
@@ -263,7 +368,9 @@ export async function reconcileTargets(
   if (toRead.length === 0) return results;
 
   const shopify = await readShopifyLevels(admin, toRead.map((t) => t.inventoryItemId), locationId);
-  const timing = await fulfillmentTiming(db, warehouseId, toRead.map((t) => t.stockItemId));
+  // Поправки замовлень — пакетом; повернення — під блокуванням балансу кожної позиції (reconcileOne).
+  const timing = await orderTiming(db, warehouseId, toRead.map((t) => t.stockItemId));
+  const autoApply = autoApplyEffective(env);
   for (const t of toRead) {
     const read = shopify.get(t.inventoryItemId) ?? { kind: "missing" as const };
     if (read.kind !== "ok") {
@@ -274,7 +381,7 @@ export async function reconcileTargets(
       target: t,
       warehouseId,
       locationId,
-      externalMode: env.externalMode,
+      autoApply,
       preVersion: pre.get(t.stockItemId)?.version ?? null,
       quantities: read.quantities,
       timing: timing.get(t.stockItemId) ?? { inFlight: 0, fulfilledOutside: 0, uncertain: false },
@@ -290,7 +397,8 @@ interface ReconcileOneInput {
   target: ReconcileTarget;
   warehouseId: string;
   locationId: string;
-  externalMode: "review" | "apply";
+  /** Автоприйняття діє (externalShopifyChanges = apply + передача змін + write_inventory). */
+  autoApply: boolean;
   preVersion: number | null;
   quantities: ShopifyLevelQuantities;
   timing: FulfillmentTiming;
@@ -306,6 +414,18 @@ async function reconcileOne(db: Db, input: ReconcileOneInput): Promise<Reconcile
     if (!b.openedAt || b.kind !== "product") return { ...target, outcome: "not_opened" as const };
     if (input.preVersion === null || b.version !== input.preVersion) return { ...target, outcome: "skipped_busy" as const };
 
+    // Розбіжність блокується до читання доказів: відхилення (failed → skipped) не прослизне між ними.
+    const [open] = await tx
+      .select()
+      .from(inventoryConflicts)
+      .where(
+        and(
+          eq(inventoryConflicts.stockItemId, target.stockItemId),
+          eq(inventoryConflicts.warehouseId, warehouseId),
+          eq(inventoryConflicts.status, "open"),
+        ),
+      )
+      .for("update");
     const failed = await tx
       .select({ id: inventoryMovements.id, onHandDelta: inventoryMovements.onHandDelta })
       .from(inventoryMovements)
@@ -318,24 +438,20 @@ async function reconcileOne(db: Db, input: ReconcileOneInput): Promise<Reconcile
       )
       .orderBy(asc(inventoryMovements.createdAt))
       .limit(500);
-    const cmp = compareLevels(input.quantities, { onHand: b.onHand, reserved: b.reserved }, input.timing);
+    const unsent = await unsentSinceAgreement(tx, warehouseId, target.stockItemId);
+    const timing = withReturns(input.timing, await returnsTiming(tx, warehouseId, target.stockItemId, now));
+    const cmp = compareLevels(input.quantities, { onHand: b.onHand, reserved: b.reserved }, timing);
     const verdict = verdictOf(cmp);
-    const [open] = await tx
-      .select()
-      .from(inventoryConflicts)
-      .where(
-        and(
-          eq(inventoryConflicts.stockItemId, target.stockItemId),
-          eq(inventoryConflicts.warehouseId, warehouseId),
-          eq(inventoryConflicts.status, "open"),
-        ),
-      )
-      .for("update");
 
     if (verdict !== "conflict") {
-      const settled = await settleFailedMovements(tx, failed.map((f) => f.id), "pushed");
-      if (settled > 0) {
-        await writeAudit(tx, actor, "inventory_sync.push_reconciled", { type: "stock_item", id: target.stockItemId }, { settled });
+      // Узгодження: точний збіг (без reservationExcess) або пояснена різниця без невизначеності (settlesEvidence) —
+      // інакше збіг міг бути випадковим, докази лишаються.
+      if (settlesEvidence(cmp)) {
+        const settled = await settleFailedMovements(tx, failed.map((f) => f.id), "pushed");
+        if (settled > 0) {
+          await writeAudit(tx, actor, "inventory_sync.push_reconciled", { type: "stock_item", id: target.stockItemId }, { settled });
+        }
+        await recordAgreement(tx, actor, warehouseId, target.stockItemId, verdict, now);
       }
       if (!open) return { ...target, outcome: verdict, diff: cmp.diff };
       await tx
@@ -354,6 +470,11 @@ async function reconcileOne(db: Db, input: ReconcileOneInput): Promise<Reconcile
     const previous = open ? parseObservation(open.details) : null;
     const origin = open ? (previous?.origin ?? conflictOrigin(open.details) ?? undefined) : undefined;
     const internalOnHand = open ? numberOrUndefined((open.details as Record<string, unknown>)?.internalOnHand) : undefined;
+    // Спроба «надіслати склад» із невідомим результатом лишається видимою (і блокує автоприйняття) до 24 год — також
+    // після відхилення/закриття розбіжності: Shopify міг застосувати запит пізніше (тоді нова різниця — саме він).
+    const attempt = open ? parsePushAttempt((open.details as Record<string, unknown>)?.pushAttempt) : await carriedPushAttempt(tx, target.stockItemId, warehouseId);
+    const pushAttempt = attempt && now.getTime() - Date.parse(attempt.at) < PUSH_ATTEMPT_TTL_MS ? attempt : null;
+    const blockers = autoApplyBlockers(cmp, { failedPushes: failed.length, unsentDelta: unsent.delta, origin, pushPending: pushAttempt !== null });
     const observation: ConflictObservation = {
       kind: "reconciliation",
       observationSeq: (previous?.observationSeq ?? 0) + 1,
@@ -364,6 +485,11 @@ async function reconcileOne(db: Db, input: ReconcileOneInput): Promise<Reconcile
       ...cmp,
       failedMovementIds: failed.map((f) => f.id),
       failedDelta: failed.reduce((s, f) => s + f.onHandDelta, 0),
+      unsentCount: unsent.count,
+      unsentDelta: unsent.delta,
+      unsentMovementIds: unsent.movementIds,
+      ...(input.autoApply && blockers.length > 0 ? { autoApplyBlockers: blockers } : {}),
+      ...(pushAttempt ? { pushAttempt } : {}),
       ...(origin ? { origin } : {}),
       ...(internalOnHand !== undefined ? { internalOnHand } : {}),
     };
@@ -400,7 +526,7 @@ async function reconcileOne(db: Db, input: ReconcileOneInput): Promise<Reconcile
       });
     }
 
-    if (input.externalMode === "apply" && canAutoApply(cmp, failed.length)) {
+    if (input.autoApply && blockers.length === 0) {
       try {
         await acceptInTx(tx, SYSTEM_ACTOR, conflict, observation, "auto", now);
         return { ...target, outcome: "auto_applied" as const, conflictId: conflict.id, diff: cmp.diff };
@@ -414,6 +540,27 @@ async function reconcileOne(db: Db, input: ReconcileOneInput): Promise<Reconcile
     }
     return { ...target, outcome, conflictId: conflict.id, diff: cmp.diff };
   });
+}
+
+/**
+ * Спроба «надіслати склад» останньої закритої розбіжності позиції (відхилено / закрито звіркою / прийнято), якщо її
+ * результат так і не став відомим. Успіх і остаточна відмова Shopify знімають позначку (conflicts.server.ts).
+ */
+async function carriedPushAttempt(tx: DbOrTx, stockItemId: string, warehouseId: string) {
+  const [last] = await tx
+    .select({ details: inventoryConflicts.details })
+    .from(inventoryConflicts)
+    .where(
+      and(
+        eq(inventoryConflicts.stockItemId, stockItemId),
+        eq(inventoryConflicts.warehouseId, warehouseId),
+        ne(inventoryConflicts.status, "open"),
+        sql`${inventoryConflicts.details} ? 'pushAttempt'`,
+      ),
+    )
+    .orderBy(sql`${inventoryConflicts.resolvedAt} desc nulls last`, desc(inventoryConflicts.createdAt))
+    .limit(1);
+  return last ? parsePushAttempt((last.details as Record<string, unknown> | null)?.pushAttempt) : null;
 }
 
 async function anyOpened(db: DbOrTx, warehouseId: string, targets: readonly ReconcileTarget[]): Promise<boolean> {
@@ -456,6 +603,8 @@ export async function reconcileStockItemNow(
   stockItemId: string,
   opts: ReconcileOptions = {},
 ): Promise<ReconcileOutcome | null> {
+  // Неправильний id (застаріла/підроблена форма) — без звернень до Shopify і без помилки БД (uuid).
+  if (!UUID_RE.test(stockItemId)) return null;
   const env = await loadSyncEnvironment(db);
   if (!env.shop || !env.canRead) return null;
   const location = await ensureWarehouseLocation(db, admin, env.warehouse);

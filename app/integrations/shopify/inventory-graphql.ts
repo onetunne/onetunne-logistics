@@ -9,8 +9,10 @@
  *   Потрібен дозвіл write_inventory (+ право працівника «apply changes to inventory quantities»).
  * - InventoryItem.inventoryLevel(locationId: ID!) → InventoryLevel.quantities(names: [String!]!) — читання станів
  *   (read_inventory). Неактивний рівень без includeInactive повертає null.
- * - locations(first, sortKey: CREATED_AT) — лише активні локації (без локацій fulfillment-сервісів за замовчуванням).
- *   Поля «основна локація» магазину в 2026-10 немає — застосунок обирає лише однозначну (єдину) локацію.
+ * - locations(first, after, sortKey: CREATED_AT) — лише активні локації (без локацій fulfillment-сервісів за
+ *   замовчуванням); сторінки — стандартна пагінація з'єднання (pageInfo.hasNextPage/endCursor + after), як у
+ *   orders/products (graphql.ts). Поля «основна локація» магазину в 2026-10 немає — застосунок обирає лише однозначну
+ *   (єдину) локацію.
  * - nodes(ids:) — пакетне читання кількох InventoryItem (масиви вводу — до 250 елементів).
  *
  * Вартість запиту (rate-limits: об'єкт — 1, з'єднання — 2 + first; ліміт одного запиту — 1000 балів, перевіряється ДО
@@ -60,12 +62,16 @@ export const INVENTORY_ADJUST_MUTATION = `#graphql
     }
   }`;
 
-/** Локації магазину (найстаріші першими). Більше LOCATIONS_PAGE_SIZE — вважається неоднозначним вибором. */
-export const LOCATIONS_PAGE_SIZE = 20;
+/**
+ * Локації магазину (найстаріші першими), сторінками по LOCATIONS_PAGE_SIZE (вартість ≈ 2 + 50 балів), не більше
+ * LOCATIONS_MAX_PAGES сторінок (1000 локацій). Решта (якщо є) — hasMore: вибір неоднозначний.
+ */
+export const LOCATIONS_PAGE_SIZE = 50;
+export const LOCATIONS_MAX_PAGES = 20;
 export const LOCATIONS_QUERY = `#graphql
-  query OtLocations {
-    locations(first: ${LOCATIONS_PAGE_SIZE}, sortKey: CREATED_AT) {
-      pageInfo { hasNextPage }
+  query OtLocations($first: Int!, $after: String) {
+    locations(first: $first, after: $after, sortKey: CREATED_AT) {
+      pageInfo { hasNextPage endCursor }
       nodes { id name isActive isFulfillmentService fulfillsOnlineOrders }
     }
   }`;
@@ -118,7 +124,7 @@ export interface GqlLocation {
 }
 
 export interface GqlLocationsResult {
-  locations: { pageInfo: { hasNextPage: boolean }; nodes: GqlLocation[] };
+  locations: { pageInfo: { hasNextPage: boolean; endCursor?: string | null }; nodes: GqlLocation[] };
 }
 
 export interface GqlInventoryItemLevel {
@@ -176,4 +182,21 @@ export function quantitiesOf(level: GqlInventoryItemLevel["inventoryLevel"]): Sh
 
 export function isInventoryItemNode(node: GqlInventoryLevelsResult["nodes"][number]): node is GqlInventoryItemLevel {
   return Boolean(node && typeof (node as { id?: unknown }).id === "string" && "inventoryLevel" in node);
+}
+
+/**
+ * GID InventoryItem із webhook inventory_levels/update. inventory_item_id у тілі — число JSON, яке після JSON.parse
+ * втрачає точність понад 2^53 (документований приклад: 271878346596884015), тому id береться з рядка
+ * admin_graphql_api_id ("gid://shopify/InventoryLevel/<n>?inventory_item_id=<id>"); числове поле — лише якщо воно точне.
+ */
+export function inventoryItemGidFromLevelPayload(payload: Record<string, unknown>): string | null {
+  const api = payload.admin_graphql_api_id;
+  if (typeof api === "string") {
+    const m = /^gid:\/\/shopify\/InventoryLevel\/[^?]+\?(?:[^#]*&)?inventory_item_id=(\d+)(?:&|#|$)/.exec(api);
+    if (m) return `gid://shopify/InventoryItem/${m[1]}`;
+  }
+  const id = payload.inventory_item_id;
+  if (typeof id === "number" && Number.isSafeInteger(id) && id > 0) return `gid://shopify/InventoryItem/${id}`;
+  if (typeof id === "string" && /^\d+$/.test(id)) return `gid://shopify/InventoryItem/${id}`;
+  return null;
 }

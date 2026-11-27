@@ -12,7 +12,13 @@ import { auditLog, warehouses } from "~/db/schema";
 import { SYSTEM_ACTOR, requirePermission } from "~/domain/permissions";
 import { DomainError } from "~/lib/errors";
 import type { AdminGraphql } from "~/integrations/shopify/admin-client.server";
-import { LOCATIONS_QUERY, type GqlLocation, type GqlLocationsResult } from "~/integrations/shopify/inventory-graphql";
+import {
+  LOCATIONS_MAX_PAGES,
+  LOCATIONS_PAGE_SIZE,
+  LOCATIONS_QUERY,
+  type GqlLocation,
+  type GqlLocationsResult,
+} from "~/integrations/shopify/inventory-graphql";
 import { writeAudit } from "~/modules/audit/audit.server";
 import type { WarehouseRow } from "~/modules/inventory/warehouse.server";
 import type { ServiceContext } from "~/server/types";
@@ -45,9 +51,27 @@ export function locationFingerprint(locationId: string): string {
     .replace(/[0-9a-f]/g, (c) => String.fromCharCode(97 + parseInt(c, 16)));
 }
 
-export async function fetchLocations(admin: AdminGraphql): Promise<{ nodes: GqlLocation[]; hasMore: boolean }> {
-  const data = await admin<GqlLocationsResult>(LOCATIONS_QUERY);
-  return { nodes: data.locations.nodes, hasMore: data.locations.pageInfo.hasNextPage };
+/**
+ * Локації магазину сторінками (до LOCATIONS_MAX_PAGES). hasMore — є ще локації понад прочитані (вибір неоднозначний).
+ * until — зупинитися, щойно знайдено потрібну (перевірка вибору власника).
+ */
+export async function fetchLocations(
+  admin: AdminGraphql,
+  opts: { until?: (l: GqlLocation) => boolean } = {},
+): Promise<{ nodes: GqlLocation[]; hasMore: boolean }> {
+  const nodes: GqlLocation[] = [];
+  let after: string | null = null;
+  for (let page = 0; page < LOCATIONS_MAX_PAGES; page++) {
+    const data: GqlLocationsResult = await admin<GqlLocationsResult>(LOCATIONS_QUERY, { first: LOCATIONS_PAGE_SIZE, after });
+    nodes.push(...data.locations.nodes);
+    const { hasNextPage, endCursor } = data.locations.pageInfo;
+    if (!hasNextPage) return { nodes, hasMore: false };
+    if (opts.until && data.locations.nodes.some(opts.until)) return { nodes, hasMore: true };
+    // Без курсора далі читати неможливо — решта невідома (неоднозначно).
+    if (!endCursor) return { nodes, hasMore: true };
+    after = endCursor;
+  }
+  return { nodes, hasMore: true };
 }
 
 /** Локація для передачі/звірки: збережена, або єдина локація магазину (зберігається), або потрібен вибір власника. */
@@ -84,7 +108,7 @@ export async function setWarehouseLocation(
   locationId: string,
 ): Promise<LocationOption> {
   requirePermission(ctx.actor, "settings.manage");
-  const { nodes } = await fetchLocations(admin);
+  const { nodes } = await fetchLocations(admin, { until: (l) => l.id === locationId });
   const chosen = nodes.find((l) => l.id === locationId && l.isActive && !l.isFulfillmentService);
   if (!chosen) throw new DomainError("inventorySync.locationInvalid", 400);
   const [previous] = await ctx.db.select({ locationId: warehouses.shopifyLocationId }).from(warehouses).where(eq(warehouses.id, warehouse.id));

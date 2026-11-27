@@ -15,7 +15,8 @@ import { QueueingShopifyGateway } from "~/integrations/shopify/queueing-gateway.
 import type { ShopifyGateway } from "~/integrations/shopify/types";
 import { scheduleTrackingPoll } from "~/modules/tracking/tracking.server";
 import type { ServiceContext } from "./types";
-import { ensureInventoryPushSweep } from "~/modules/inventory-sync/schedule.server";
+import { ensureInventoryPushSweep, scheduleFullReconcileCheck } from "~/modules/inventory-sync/schedule.server";
+import { SCHEDULED_RECONCILE_FIRST_DELAY_MS } from "~/modules/inventory-sync/jobs";
 
 /**
  * Робоче середовище: PostgreSQL (DATABASE_URL). Тестовий перевізник тут НЕ реєструється —
@@ -86,6 +87,8 @@ export async function ensureJobWorker(): Promise<void> {
     await scheduleTrackingPoll(runtime.handle.db, new Date(Date.now() + 60_000));
     // Страхова передача складських змін у Shopify (етап 5): ланцюжок зупиняється сам, якщо передачу вимкнено.
     await ensureInventoryPushSweep(runtime.handle.db);
+    // Планова повна звірка залишків із Shopify (кожні 6 год; лише читання; звіряє, коли облік відкрито).
+    await scheduleFullReconcileCheck(runtime.handle.db, { delayMs: SCHEDULED_RECONCILE_FIRST_DELAY_MS });
   } catch (e) {
     workerStarted = false;
     logger.error("job.worker_start_failed", { error: e });

@@ -28,7 +28,10 @@ export interface ConflictObservation extends LevelComparison {
   unsentMovementIds: string[];
   /** Причини, з яких автоприйняття не виконано (лише в режимі apply). */
   autoApplyBlockers?: string[];
-  /** Спроба «надіслати склад» із невідомим результатом (переноситься в нові спостереження, поки не мине 24 год). */
+  /**
+   * Спроба «надіслати склад» із невідомим результатом: переноситься в нові спостереження, поки не мине 24 год, — також
+   * у нову розбіжність після відхилення/закриття попередньої (reconcile.server.ts, carriedPushAttempt).
+   */
   pushAttempt?: PushAttempt;
   /** Походження розбіжності до першої звірки (напр. opened_with_internal_history). */
   origin?: string;
@@ -63,7 +66,7 @@ const NUMBER_FIELDS = [
 ] as const;
 
 /** Поля, додані пізніше (спостереження, збережені раніше, їх не мають — тоді 0). */
-const OPTIONAL_NUMBER_FIELDS = ["reservationExcess", "returnsPending", "unsentCount", "unsentDelta"] as const;
+const OPTIONAL_NUMBER_FIELDS = ["reservationExcess", "returnsPending", "returnsAwaiting", "unsentCount", "unsentDelta"] as const;
 
 const isInt = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v);
 const isStringArray = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === "string");

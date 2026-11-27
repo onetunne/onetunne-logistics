@@ -2,17 +2,21 @@
  * Постановка завдань синхронізації залишків у чергу. Модуль навмисно легкий (лише черга): його імпортують
  * синхронізація Shopify (webhook) і модулі складу, що створюють рухи для передачі.
  */
-import { and, eq, isNotNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, like, sql } from "drizzle-orm";
 import type { DbOrTx } from "~/db/client.server";
 import { inventoryBalances, jobs, productVariants, stockItems } from "~/db/schema";
 import { enqueueJob } from "~/modules/jobs/queue.server";
 import { getSetting } from "~/modules/settings/settings.server";
+import { loadSyncEnvironment } from "./environment.server";
 import {
   INVENTORY_SYNC_JOB,
   PUSH_DEDUPE_KEY,
   PUSH_SWEEP_MS,
   RECONCILE_DELAY_MS,
   RECONCILE_MAX_DEFER_MS,
+  SCHEDULED_RECONCILE_DEDUPE_KEY,
+  SCHEDULED_RECONCILE_INTERVAL_MS,
+  SCHEDULED_RECONCILE_REQUESTER,
   reconcileAllDedupeKey,
   reconcileItemDedupeKey,
 } from "./jobs";
@@ -131,4 +135,56 @@ export async function enqueueFullReconcile(db: DbOrTx, shop: string, requestedBy
     { scope: "all", shop, after: null, requestedBy, startedAt: new Date().toISOString(), summary: {} },
     { dedupeKey: reconcileAllDedupeKey(null), maxAttempts: 6 },
   );
+}
+
+/**
+ * Наступна планова перевірка повної звірки (одне очікуване завдання; уже заплановане не переноситься — перезапуск
+ * сервера не відкладає і не множить звірки).
+ */
+export async function scheduleFullReconcileCheck(db: DbOrTx, opts: { now?: Date; delayMs?: number } = {}): Promise<boolean> {
+  const now = opts.now ?? new Date();
+  return enqueueJob(db, INVENTORY_SYNC_JOB.scheduledReconcile, {}, {
+    dedupeKey: SCHEDULED_RECONCILE_DEDUPE_KEY,
+    maxAttempts: 3,
+    runAt: new Date(now.getTime() + (opts.delayMs ?? SCHEDULED_RECONCILE_INTERVAL_MS)),
+  });
+}
+
+/** Повна звірка вже в черзі або виконується (будь-яка її сторінка). */
+export async function fullReconcileActive(db: DbOrTx): Promise<boolean> {
+  const [row] = await db
+    .select({ id: jobs.id })
+    .from(jobs)
+    .where(
+      and(
+        eq(jobs.type, INVENTORY_SYNC_JOB.reconcile),
+        inArray(jobs.status, ["queued", "running"]),
+        like(jobs.dedupeKey, reconcileAllDedupeKey("%")),
+      ),
+    )
+    .limit(1);
+  return Boolean(row);
+}
+
+export type ScheduledReconcileOutcome = "queued" | "not_installed" | "missing_scope" | "not_opened" | "already_running";
+
+/**
+ * Обробник планової звірки: спершу планує наступну перевірку (ланцюжок не обривається ні при збої, ні поки звіряти
+ * нічого), потім ставить повну звірку — лише коли застосунок установлено, є дозвіл читати залишки, облік складу
+ * відкрито й повна звірка ще не йде. Сама звірка — звичайне завдання inventory.reconcile (scope all).
+ */
+export async function runScheduledReconcile(db: DbOrTx, now: Date = new Date()): Promise<ScheduledReconcileOutcome> {
+  await scheduleFullReconcileCheck(db, { now });
+  const env = await loadSyncEnvironment(db);
+  if (!env.shop) return "not_installed";
+  if (!env.canRead) return "missing_scope";
+  const [opened] = await db
+    .select({ id: inventoryBalances.stockItemId })
+    .from(inventoryBalances)
+    .where(and(eq(inventoryBalances.warehouseId, env.warehouse.id), isNotNull(inventoryBalances.openedAt)))
+    .limit(1);
+  if (!opened) return "not_opened";
+  if (await fullReconcileActive(db)) return "already_running";
+  await enqueueFullReconcile(db, env.shop, SCHEDULED_RECONCILE_REQUESTER);
+  return "queued";
 }

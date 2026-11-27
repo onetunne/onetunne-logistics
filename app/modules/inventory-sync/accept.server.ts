@@ -12,6 +12,7 @@ import { inventoryKeys } from "~/modules/inventory/keys";
 import { applyMovements } from "~/modules/inventory/ledger.server";
 import type { ConflictObservation } from "./observation";
 import { unexplainedDiff } from "./pure";
+import { recordAgreement } from "./unsent.server";
 
 export type ConflictRow = typeof inventoryConflicts.$inferSelect;
 
@@ -33,8 +34,9 @@ export async function settleFailedMovements(tx: Tx, ids: readonly string[], to: 
  * «Прийняти значення Shopify»: on_hand += НЕПОЯСНЕНА різниця (diff − expectedDiff, див. unexplainedDiff) рухом
  * shopify_external з ключем shopify_external:<id розбіжності> (повтор не створює другого руху), розбіжність →
  * accepted_shopify. Одиниці, які Shopify закріпив під неоплачені/ще не синхронізовані замовлення (expectedDiff), фізично
- * на складі — їх не віднімаємо. Кидає DomainError("inventory.insufficient"), якщо on_hand став би від'ємним, а
- * налаштування це забороняє (точка збереження applyMovements — транзакція придатна).
+ * на складі — їх не віднімаємо. Склад тепер дорівнює Shopify — точка узгодження (неотримані Shopify рухи до неї
+ * скасовано прийняттям і більше не враховуються). Кидає DomainError("inventory.insufficient"), якщо on_hand став би
+ * від'ємним, а налаштування це забороняє (точка збереження applyMovements — транзакція придатна).
  */
 export async function acceptInTx(
   tx: Tx,
@@ -69,6 +71,7 @@ export async function acceptInTx(
     })
     .where(eq(inventoryConflicts.id, conflict.id));
   const settled = await settleFailedMovements(tx, obs.failedMovementIds, "skipped");
+  await recordAgreement(tx, actor, conflict.warehouseId, conflict.stockItemId, mode === "auto" ? "auto_applied" : "accepted", now);
   await writeAudit(tx, actor, mode === "auto" ? "inventory_sync.conflict_auto_applied" : "inventory_sync.conflict_accepted", {
     type: "inventory_conflict",
     id: conflict.id,

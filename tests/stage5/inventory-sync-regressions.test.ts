@@ -175,7 +175,7 @@ describe("resolution changes only the unexplained part of the difference (probes
     const c = (await openConflict(2))!;
     expect(parseObservation(c.details)).toMatchObject({ diff: 3, expectedDiff: -2 });
     expect((await listConflicts(h.db, { conflictId: c.id })).rows[0]).toMatchObject({ diff: 3, unexplained: 5, expectedDiff: -2 });
-    expect(await acceptShopifyValue(ctx, c.id)).toMatchObject({ status: "accepted", delta: 5 });
+    expect(await acceptShopifyValue(ctx, c.id, { admin: adminFor })).toMatchObject({ status: "accepted", delta: 5 });
     expect((await balance(h.db, items[2]!.stockItemId)).onHand).toBe(17); // = фізичний on_hand Shopify
     const [mv] = await h.db.select().from(inventoryMovements).where(eq(inventoryMovements.idempotencyKey, inventoryKeys.shopifyExternal(c.id)));
     expect(mv).toMatchObject({ onHandDelta: 5, type: "shopify_external" });
@@ -200,7 +200,7 @@ describe("resolution changes only the unexplained part of the difference (probes
     fake.setLevel(items[4]!.gid, { available: 9, onHand: 11, committed: 2 }); // замовлення 2 + ручне −1
     expect(await reconcileItem(4)).toEqual(["opened"]);
     const c = (await openConflict(4))!;
-    expect(await acceptShopifyValues(ctx, [c.id])).toEqual({ accepted: 1, already: 0, stale: 0, failed: 0, units: -1 });
+    expect(await acceptShopifyValues(ctx, [c.id], { admin: adminFor })).toEqual({ accepted: 1, already: 0, stale: 0, pending: 0, failed: 0, units: -1 });
     expect((await balance(h.db, items[4]!.stockItemId)).onHand).toBe(11);
     expect(await reconcileItem(4)).toEqual(["explained"]);
   });
@@ -218,11 +218,19 @@ describe("Shopify location change", () => {
       const reconcileAll = await h.db.select().from(jobs).where(and(eq(jobs.type, INVENTORY_SYNC_JOB.reconcile), eq(jobs.status, "queued")));
       expect(reconcileAll.map((j) => (j.payload as { scope?: string }).scope)).toContain("all");
       // Спостереження з іншої локації: дії не виконуються, позиція звіряється заново вже в новій локації.
-      expect(await acceptShopifyValue(ctx, c.id)).toEqual({ status: "needs_reconcile" });
       const adjustBefore = fake.adjustCalls().length;
       expect(await pushAppValue(ctx, fake.admin, c.id, { appUrl: APP_URL })).toEqual({ status: "needs_reconcile", reconciled: "updated" });
       expect(fake.adjustCalls()).toHaveLength(adjustBefore);
       expect(parseObservation((await openConflict(5))!.details)).toMatchObject({ locationId: LOC2, observationSeq: 2 });
+      // «Прийняти» зі спостереженням старої локації теж не виконується (і не змінює склад).
+      await h.db
+        .update(inventoryConflicts)
+        .set({ details: { ...(await openConflict(5))!.details, locationId: LOC } })
+        .where(eq(inventoryConflicts.id, c.id));
+      const onHand = (await balance(h.db, items[5]!.stockItemId)).onHand;
+      expect(await acceptShopifyValue(ctx, c.id, { admin: adminFor })).toEqual({ status: "needs_reconcile", reconciled: "updated" });
+      expect((await balance(h.db, items[5]!.stockItemId)).onHand).toBe(onHand);
+      expect(parseObservation((await openConflict(5))!.details)).toMatchObject({ locationId: LOC2, observationSeq: 3 });
       expect(await pushAppValue(ctx, fake.admin, c.id, { appUrl: APP_URL })).toEqual({ status: "pushed", delta: -2 });
       expect(fake.adjustCalls().at(-1)!.input.changes[0].locationId).toBe(LOC2);
     } finally {
@@ -248,7 +256,7 @@ describe("pending movements never get stuck (probe F)", () => {
       expect(await queuedPushJobs()).toEqual([]); // передачу вимкнено — страховий обхід не продовжується
       // Позиція звіряється, дія з розбіжністю не «застаріла».
       expect(await reconcileItem(6)).toEqual(["opened"]);
-      expect(await acceptShopifyValue(ctx, (await openConflict(6))!.id)).toMatchObject({ status: "accepted", delta: -1 });
+      expect(await acceptShopifyValue(ctx, (await openConflict(6))!.id, { admin: adminFor })).toMatchObject({ status: "accepted", delta: -1 });
     } finally {
       await setWarehouse({ shopifyPush: "deltas" });
     }
@@ -360,7 +368,7 @@ describe("concurrency (real PostgreSQL when TEST_DATABASE_URL is set)", () => {
     fake.setLevel(items[10]!.gid, { available: start + 4, onHand: start + 4, committed: 0 });
     expect(await reconcileItem(10)).toEqual(["opened"]);
     const c = (await openConflict(10))!;
-    const results = await Promise.all([acceptShopifyValue(ctx, c.id), acceptShopifyValue(ctx, c.id), acceptShopifyValue(ctx, c.id)]);
+    const results = await Promise.all([acceptShopifyValue(ctx, c.id, { admin: adminFor }), acceptShopifyValue(ctx, c.id, { admin: adminFor }), acceptShopifyValue(ctx, c.id, { admin: adminFor })]);
     expect(results.filter((r) => r.status === "accepted")).toHaveLength(1);
     expect(results.filter((r) => r.status === "already")).toHaveLength(2);
     const moves = await h.db.select().from(inventoryMovements).where(eq(inventoryMovements.idempotencyKey, inventoryKeys.shopifyExternal(c.id)));

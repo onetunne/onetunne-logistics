@@ -23,9 +23,13 @@ export function pushIdempotencyKey(movementId: string): string {
 /**
  * Ключ «надіслати значення складу» для розбіжності: свій для кожного спостереження (observationSeq), бо
  * changeFromQuantity змінюється разом зі спостереженням (той самий ключ з іншими параметрами Shopify відхиляє).
+ * withReturns — варіант із поверненнями, які Shopify мав поповнити сам (інша дельта того самого спостереження, див.
+ * pushPlan): окремий ключ, бо той самий ключ з іншою дельтою Shopify відхилив би як IDEMPOTENCY_KEY_PARAMETER_MISMATCH,
+ * а попередня спроба могла бути застосована. Подвійного застосування не буде: обидва варіанти мають CAS
+ * changeFromQuantity = те саме побачене значення Shopify.
  */
-export function conflictPushKey(conflictId: string, observationSeq: number): string {
-  return `ot-cf-${conflictId}-${observationSeq}`;
+export function conflictPushKey(conflictId: string, observationSeq: number, withReturns = false): string {
+  return `ot-cf-${conflictId}-${observationSeq}${withReturns ? "-r" : ""}`;
 }
 
 /**
@@ -33,6 +37,14 @@ export function conflictPushKey(conflictId: string, observationSeq: number): str
  * НЕ надсилається: повтор після вікна вважався б новою операцією (подвійна дельта). Такий рух → failed (звірка).
  */
 export const IDEMPOTENCY_WINDOW_MS = 23 * 60 * 60 * 1000;
+
+/** Спроба «надіслати склад» із невідомим результатом вважається можливою, поки Shopify пам'ятає її ключ (24 год). */
+export const PUSH_ATTEMPT_TTL_MS = 24 * 60 * 60 * 1000;
+/**
+ * Після «надіслати склад» із невідомим результатом «прийняти Shopify» недоступне, поки спостереження те саме, і ще
+ * PUSH_SETTLE_MS після спроби навіть зі свіжою звіркою (запит міг ще оброблятися, коли звірка читала Shopify).
+ */
+export const PUSH_SETTLE_MS = 5 * 60 * 1000;
 
 export function isOutsideIdempotencyWindow(createdAt: Date, now: Date): boolean {
   return now.getTime() - createdAt.getTime() > IDEMPOTENCY_WINDOW_MS;
@@ -141,13 +153,16 @@ export function pickLocation(nodes: readonly GqlLocation[], hasMore: boolean): L
  * Shopify ще містять ці одиниці); fulfilledOutside — виконано в Shopify, а в застосунку ще зарезервовано.
  * uncertain — частково виконані замовлення або повернення (Shopify міг поповнити залишок до того, як склад оприбуткував
  * повернення): розподіл одиниць невідомий (автоприйняття вимкнено). returnsPending — повернені/відшкодовані після
- * відправлення одиниці, яких склад ще не оприбуткував як повернення покупця.
+ * відправлення одиниці, яких склад ще не оприбуткував як повернення покупця (від останнього узгодження).
+ * returnsAwaiting — навпаки: склад оприбуткував повернення покупця (Shopify поповнює сам), а відшкодування з
+ * поверненням на склад у Shopify ще немає — Shopify має додати ці одиниці сам (returns.server.ts).
  */
 export interface FulfillmentTiming {
   inFlight: number;
   fulfilledOutside: number;
   uncertain: boolean;
   returnsPending?: number;
+  returnsAwaiting?: number;
 }
 
 export interface AppLevel {
@@ -185,16 +200,22 @@ export interface LevelComparison {
   uncertain: boolean;
   /** Повернені/відшкодовані після відправлення одиниці, яких склад ще не оприбуткував (див. FulfillmentTiming). */
   returnsPending: number;
+  /** Оприбутковані складом повернення, які Shopify ще має поповнити сам (див. FulfillmentTiming). */
+  returnsAwaiting: number;
 }
 
 /**
  * Порівняння. Позначення: S — Shopify, A — застосунок, t = inFlight − fulfilledOutside, raw = S.committed − A.reserved − t.
  * raw > 0 — Shopify закріпив одиниці, яких застосунок не резервує (committedNotReserved = raw, очікувано −raw).
- * raw < 0 — застосунок резервує більше (reservationExcess = −raw). Якщо on_hand узгоджений (S.available + S.committed =
- * A.on_hand + t), Shopify звільнив ці одиниці → очікувано +reservationExcess («доступно» Shopify більше); якщо on_hand
- * Shopify менший — Shopify виконав замовлення раніше, ніж застосунок це побачив → «доступно» однакове (очікувано 0).
- * Непояснена частина (diff − expectedDiff) — розбіжність фізичного залишку: S.available + S.committed − (A.on_hand + t)
- * (+ частина reservationExcess, віднесена до виконання в Shopify).
+ * raw < 0 — застосунок резервує більше (reservationExcess = −raw). Розподіл — за on_hand Shopify (S.on_hand = A.on_hand + t,
+ * якщо фізичний залишок узгоджений; стани reserved/damaged/… on_hand не змінюють, тож їх тут не враховано):
+ * on_hand Shopify менший — Shopify виконав замовлення раніше, ніж застосунок це побачив → «доступно» однакове
+ * (fulfilledFirst, очікувано 0); решта — Shopify звільнив одиниці (замовлення змінено/скасовано) → очікувано
+ * +releasedFirst («доступно» Shopify більше). Звільнити Shopify міг лише одиниці, які застосунок резервує й Shopify ще
+ * закріплює (A.reserved − fulfilledOutside): передані перевізнику одиниці, яких Shopify не закріплює, — це виконання
+ * (у застосунку ще не оновлене), а не звільнення. Непояснена частина решти reservationExcess лишається в unexplained.
+ * Непояснена частина (diff − expectedDiff) — розбіжність фізичного залишку: S.on_hand − (A.on_hand + t), стани Shopify
+ * reserved/damaged/… (−shopifyOtherStates) і частина reservationExcess, віднесена до виконання в Shopify.
  */
 export function compareLevels(shopify: ShopifyLevelQuantities, app: AppLevel, timing: FulfillmentTiming): LevelComparison {
   const appAvailable = app.onHand - app.reserved;
@@ -203,9 +224,10 @@ export function compareLevels(shopify: ShopifyLevelQuantities, app: AppLevel, ti
   const raw = shopify.committed - app.reserved - timingAdj;
   const committedNotReserved = Math.max(0, raw);
   const reservationExcess = Math.max(0, -raw);
-  const onHandGap = shopify.available + shopify.committed - (app.onHand + timingAdj);
+  const onHandGap = shopify.onHand - (app.onHand + timingAdj);
   const fulfilledFirst = Math.min(reservationExcess, Math.max(0, -onHandGap));
-  const releasedFirst = reservationExcess - fulfilledFirst;
+  const releasable = Math.max(0, app.reserved - timing.fulfilledOutside);
+  const releasedFirst = Math.min(reservationExcess - fulfilledFirst, releasable);
   const expectedDiff = releasedFirst - committedNotReserved;
   return {
     appOnHand: app.onHand,
@@ -223,7 +245,24 @@ export function compareLevels(shopify: ShopifyLevelQuantities, app: AppLevel, ti
     fulfilledOutside: timing.fulfilledOutside,
     uncertain: timing.uncertain,
     returnsPending: timing.returnsPending ?? 0,
+    returnsAwaiting: timing.returnsAwaiting ?? 0,
   };
+}
+
+/**
+ * Чи узгоджує збіг/пояснена різниця докази (невдалі передачі → pushed, точка узгодження неотриманих рухів і повернень).
+ * Точний збіг (diff = 0, expectedDiff = 0) — так, навіть із невизначеністю повернень/часткових виконань: «доступно»
+ * Shopify і складу однакові, і committed Shopify = резерв + передане (інакше expectedDiff ≠ 0), — без цього правила
+ * відшкодування без повернення на склад блокувало б докази до 60 днів. Але НЕ при reservationExcess > 0: тоді збіг може
+ * бути випадковим (звільнені Shopify одиниці замовлення «покривають» неотримане надходження). Пояснена різниця
+ * (diff = expectedDiff ≠ 0) — лише без невизначеності.
+ */
+export function settlesEvidence(
+  c: Pick<LevelComparison, "diff" | "expectedDiff" | "reservationExcess" | "uncertain" | "returnsAwaiting">,
+): boolean {
+  if (c.diff !== c.expectedDiff || c.reservationExcess !== 0) return false;
+  if (c.diff === 0) return true;
+  return !c.uncertain && c.returnsAwaiting === 0;
 }
 
 /**
@@ -264,7 +303,10 @@ export const OPENING_HISTORY_ORIGIN = "opened_with_internal_history";
  * - unsent_movements — внутрішні зміни on_hand, яких Shopify не отримав від останнього узгодження (передачу вимкнено,
  *   немає дозволу, повернення, рухи до відкриття, відхилені невдалі передачі): прийняття скасувало б їх;
  * - opening_history — розбіжність із запуску обліку (внутрішня історія до відкриття — лише рішення власника);
- * - push_pending — результат «надіслати склад» ще невідомий (тайм-аут / обробляється).
+ * - push_pending — результат «надіслати склад» ще невідомий (тайм-аут / обробляється; також після відхилення чи
+ *   закриття розбіжності — спроба переноситься в нову розбіжність до 24 год);
+ * - awaiting_restock — склад оприбуткував повернення, які Shopify ще має поповнити сам (зміна Shopify може бути саме
+ *   цим поповненням або різниця зникне з ним).
  */
 export const AUTO_APPLY_BLOCKERS = [
   "explained_part",
@@ -275,6 +317,7 @@ export const AUTO_APPLY_BLOCKERS = [
   "unsent_movements",
   "opening_history",
   "push_pending",
+  "awaiting_restock",
 ] as const;
 export type AutoApplyBlocker = (typeof AUTO_APPLY_BLOCKERS)[number];
 
@@ -286,10 +329,10 @@ export interface AutoApplyContext {
   pushPending?: boolean;
 }
 
-export function autoApplyBlockers(
-  c: Pick<LevelComparison, "expectedDiff" | "uncertain" | "reservationExcess" | "shopifyOtherStates">,
-  ctx: AutoApplyContext,
-): AutoApplyBlocker[] {
+type BlockerInput = Pick<LevelComparison, "expectedDiff" | "uncertain" | "reservationExcess" | "shopifyOtherStates"> &
+  Partial<Pick<LevelComparison, "returnsAwaiting">>;
+
+export function autoApplyBlockers(c: BlockerInput, ctx: AutoApplyContext): AutoApplyBlocker[] {
   const out: AutoApplyBlocker[] = [];
   if (c.expectedDiff !== 0) out.push("explained_part");
   if (c.uncertain) out.push("uncertain");
@@ -299,14 +342,12 @@ export function autoApplyBlockers(
   if (ctx.unsentDelta !== 0) out.push("unsent_movements");
   if (ctx.origin === OPENING_HISTORY_ORIGIN) out.push("opening_history");
   if (ctx.pushPending) out.push("push_pending");
+  if ((c.returnsAwaiting ?? 0) > 0) out.push("awaiting_restock");
   return out;
 }
 
 /** Автоматичне прийняття значення Shopify — лише коли різниця не має інших пояснень (autoApplyBlockers порожній). */
-export function canAutoApply(
-  c: Pick<LevelComparison, "expectedDiff" | "uncertain" | "reservationExcess" | "shopifyOtherStates">,
-  ctx: AutoApplyContext,
-): boolean {
+export function canAutoApply(c: BlockerInput, ctx: AutoApplyContext): boolean {
   return autoApplyBlockers(c, ctx).length === 0;
 }
 
@@ -319,10 +360,39 @@ export function autoApplyEffective(env: { externalMode: "review" | "apply"; push
 }
 
 /**
- * «Надіслати склад» змінює available дельтою, а Shopify змінює on_hand на ту саму дельту. Якщо частина одиниць Shopify
- * у станах reserved/damaged/safety_stock/quality_control, збільшення available додало б on_hand понад фізичний залишок
- * (і продаж одиниць, які Shopify вважає непридатними). Такі одиниці власник звільняє в Shopify або позначає брак на складі.
+ * Що надсилає «Надіслати склад» (available += delta; Shopify змінює on_hand на ту саму дельту).
+ * Повна зміна — −unexplained. Збільшення зменшується на:
+ * - heldOtherStates — одиниці Shopify у станах reserved/damaged/safety_stock/quality_control: вони вже в on_hand Shopify,
+ *   тож їх додавання до available підняло б on_hand понад фізичний залишок (і продаж непридатних). Після надсилання решти
+ *   on_hand Shopify = on_hand складу, а різниця «доступно» на ці одиниці лишається (брак → позначити на складі; резерв /
+ *   безпечний запас — Shopify тримає їх свідомо);
+ * - heldAwaiting — оприбутковані складом повернення, які Shopify поповнить сам (returnsAwaiting): надіслані зараз, вони
+ *   після поповнення порахувалися б двічі. includeReturns — власник підтвердив, що Shopify їх не поповнить.
+ * Зменшення available надсилається повністю (on_hand Shopify не зростає).
  */
+export interface PushPlan {
+  /** Повна зміна (−unexplained). */
+  full: number;
+  /** Зміна, яку буде надіслано. */
+  delta: number;
+  heldOtherStates: number;
+  heldAwaiting: number;
+}
+
+export function pushPlan(
+  c: Pick<LevelComparison, "shopifyOtherStates" | "diff" | "expectedDiff"> & Partial<Pick<LevelComparison, "returnsAwaiting">>,
+  opts: { includeReturns?: boolean } = {},
+): PushPlan {
+  const full = -unexplainedDiff(c);
+  if (full <= 0) return { full, delta: full, heldOtherStates: 0, heldAwaiting: 0 };
+  const heldOtherStates = Math.min(full, Math.max(0, c.shopifyOtherStates));
+  const awaiting = opts.includeReturns ? 0 : Math.max(0, c.returnsAwaiting ?? 0);
+  const heldAwaiting = Math.min(full - heldOtherStates, awaiting);
+  return { full, delta: full - heldOtherStates - heldAwaiting, heldOtherStates, heldAwaiting };
+}
+
+/** «Надіслати склад» нічого не надіслало б навіть із поверненнями: уся різниця — одиниці в інших станах Shopify. */
 export function pushBlockedByOtherStates(c: Pick<LevelComparison, "shopifyOtherStates" | "diff" | "expectedDiff">): boolean {
-  return c.shopifyOtherStates > 0 && -unexplainedDiff(c) > 0;
+  const plan = pushPlan(c, { includeReturns: true });
+  return plan.full > 0 && plan.delta === 0;
 }

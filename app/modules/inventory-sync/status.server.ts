@@ -35,6 +35,8 @@ export interface InventorySyncOverview {
   locationAutoSelected: boolean;
   push: { pending: number; failed: number; oldestPendingAt: Date | null };
   queued: { push: boolean; reconcile: number };
+  /** Наступна планова повна звірка (завдання в черзі); null — не заплановано (демо, обробник не запущено). */
+  nextScheduledReconcileAt: Date | null;
   lastReconcile: { at: Date; summary: ReconcileSummary } | null;
   lastPushRun: { at: Date; pushed: number; failed: number } | null;
   recentFailures: PushFailureView[];
@@ -49,9 +51,14 @@ export async function getInventorySyncOverview(db: DbOrTx): Promise<InventorySyn
     locationConfirmation(db, w),
     pushStateCounts(db),
     db
-      .select({ type: jobs.type })
+      .select({ type: jobs.type, runAt: jobs.runAt, status: jobs.status })
       .from(jobs)
-      .where(and(inArray(jobs.type, [INVENTORY_SYNC_JOB.push, INVENTORY_SYNC_JOB.reconcile]), inArray(jobs.status, ["queued", "running"]))),
+      .where(
+        and(
+          inArray(jobs.type, [INVENTORY_SYNC_JOB.push, INVENTORY_SYNC_JOB.reconcile, INVENTORY_SYNC_JOB.scheduledReconcile]),
+          inArray(jobs.status, ["queued", "running"]),
+        ),
+      ),
     db
       .select({ createdAt: auditLog.createdAt, details: auditLog.details })
       .from(auditLog)
@@ -132,6 +139,11 @@ export async function getInventorySyncOverview(db: DbOrTx): Promise<InventorySyn
       push: queuedRows.some((r) => r.type === INVENTORY_SYNC_JOB.push),
       reconcile: queuedRows.filter((r) => r.type === INVENTORY_SYNC_JOB.reconcile).length,
     },
+    nextScheduledReconcileAt:
+      queuedRows
+        .filter((r) => r.type === INVENTORY_SYNC_JOB.scheduledReconcile && r.status === "queued")
+        .map((r) => r.runAt)
+        .sort((a, b) => a.getTime() - b.getTime())[0] ?? null,
     lastReconcile: lastReconcileRow[0] ? { at: lastReconcileRow[0].createdAt, summary } : null,
     lastPushRun: lastPushRow[0] ? { at: lastPushRow[0].createdAt, pushed: num(pushDetails?.pushed), failed: num(pushDetails?.failed) } : null,
     recentFailures: failures.map((f) => ({

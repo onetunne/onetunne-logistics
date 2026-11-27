@@ -16,6 +16,8 @@ const messages: MessageModule = {
     "inventorySync.banner.chooseLocation":
       "Не обрано локацію Shopify для складу. У магазині кілька локацій (або їх не вдалося прочитати) — оберіть локацію нижче. До вибору передача й звірка не виконуються.",
     "inventorySync.banner.confirmLocation": "Локацію Shopify обрано автоматично (вона в магазині єдина). Перевірте й підтвердьте її нижче.",
+    "inventorySync.banner.autoApplyPaused":
+      "Обрано автоматичне прийняття змін із Shopify, але воно не діє: передачу змін складу в Shopify вимкнено або немає дозволу write_inventory. Без передачі Shopify не знає про надходження, брак і коригування складу, і автоприйняття скасувало б їх — тому всі різниці йдуть на розгляд власника.",
 
     "inventorySync.overview.title": "Стан синхронізації",
     "inventorySync.overview.shop": "Магазин",
@@ -43,6 +45,10 @@ const messages: MessageModule = {
     "inventorySync.overview.lastReconcileSummary":
       "Перевірено {checked}: збігається {match}, розбіжностей {conflicts}, прийнято автоматично {autoApplied}, закрито {closed}, пропущено {skipped}",
     "inventorySync.overview.lastReconcileNever": "Ще не виконувалася",
+    "inventorySync.overview.nextReconcile": "Наступна планова звірка",
+    "inventorySync.overview.nextReconcileNone": "Не заплановано",
+    "inventorySync.overview.nextReconcileHint":
+      "Кожні 6 год застосунок сам звіряє залишки з Shopify (лише читання), якщо облік складу запущено. Розбіжності обробляються за правилом «Зміни залишку, зроблені в Shopify» з налаштувань складу.",
     "inventorySync.overview.queue": "У черзі",
     "inventorySync.overview.queuedPush": "передача",
     "inventorySync.overview.queuedReconcile": "звірок: {count}",
@@ -63,6 +69,14 @@ const messages: MessageModule = {
       "Фактичний залишок складу зміниться на {diff} шт. — склад вважатиме правильним значення Shopify. Зміна запишеться в історію руху.",
     "inventorySync.action.accept.warning":
       "Є невдалі передачі або частково виконані/повернені замовлення — перевірте, чи справді змінився фактичний залишок.",
+    "inventorySync.action.accept.unsentWarning":
+      "Склад має зміни на {delta} шт., яких Shopify не отримав (надходження, брак, коригування, повернення). Прийняття значення Shopify їх скасує. Якщо ці зміни правильні — оберіть «Надіслати склад» (повернення, які Shopify поповнить сам, воно не надсилає).",
+    "inventorySync.action.accept.awaitingWarning":
+      "Склад оприбуткував {count} шт. повернень покупця, які Shopify ще має поповнити сам (відшкодування з поверненням на склад у Shopify ще не оформлено). Прийняття значення Shopify зараз скасує їх на складі — зачекайте, поки Shopify їх поповнить.",
+    "inventorySync.action.accept.otherStatesWarning":
+      "У Shopify {count} шт. позначено як недоступні (брак, резерв, контроль якості) — фізично вони на складі. Якщо це брак, позначте брак на складі замість прийняття: прийняття зменшить фактичний залишок.",
+    "inventorySync.action.reservationWarning":
+      "Склад резервує на {count} шт. більше, ніж закріпив Shopify (замовлення змінено, скасовано або виконано в Shopify, а в застосунку — ще ні). Спершу перевірте такі замовлення («Проблеми»).",
     "inventorySync.action.explainedKept":
       "Ще {count} шт. різниці пояснюють замовлення, які Shopify закріпив, а склад не резервує (неоплачені, ще не синхронізовані) — їх не змінюємо: різниця зникне, коли замовлення оплатять або скасують.",
     "inventorySync.action.pushApp": "Надіслати склад",
@@ -72,9 +86,21 @@ const messages: MessageModule = {
     "inventorySync.action.pushApp.warning":
       "Є частково виконані/повернені замовлення — розподіл одиниць неточний, перевірте значення в Shopify після надсилання.",
     "inventorySync.action.pushApp.noScope": "«Надіслати склад» недоступно: немає дозволу write_inventory.",
+    "inventorySync.action.pushApp.otherStates":
+      "«Надіслати склад» недоступно: уся різниця — {count} шт., які Shopify тримає в станах «брак», «резерв», «безпечний запас» або «контроль якості» (вони вже у фактичному залишку Shopify, тож надсилання додало б їх удруге). Брак — позначте брак на складі; резерв і безпечний запас Shopify тримає свідомо (різниця лишається, доки їх не звільнять у Shopify); контроль якості — завершіть його в Shopify. Потім звірте товар.",
+    "inventorySync.action.pushApp.onlyReturns":
+      "Без позначки нижче нічого не буде надіслано: решта різниці — повернення, які Shopify поповнить сам.",
+    "inventorySync.action.pushApp.heldOtherStates":
+      "Не надсилається {count} шт.: Shopify тримає їх у станах «брак», «резерв», «безпечний запас» або «контроль якості» — вони вже у фактичному залишку Shopify. Після надсилання фактичний залишок Shopify дорівнюватиме складу, а різниця «доступно» на ці одиниці лишиться.",
+    "inventorySync.action.pushApp.heldAwaiting":
+      "Не надсилається {count} шт.: це повернення покупця, оприбутковані складом, які Shopify поповнить сам, коли повернення буде відшкодовано з поверненням на склад. Надіслані зараз, вони після поповнення порахувалися б у Shopify двічі.",
+    "inventorySync.action.pushApp.includeReturns":
+      "Shopify не поповнить ці повернення (відшкодовано без повернення на склад або не оформлено в Shopify) — надіслати й їх ({count} шт.)",
     "inventorySync.action.dismiss": "Відхилити",
     "inventorySync.action.dismiss.note": "Причина (обов'язково)",
     "inventorySync.action.dismiss.submit": "Відхилити розбіжність",
+    "inventorySync.action.dismiss.pushPending":
+      "Результат «Надіслати склад» ще не підтверджено. Відхилення не скасовує запит: Shopify міг застосувати його пізніше, тому до 24 год від спроби нові різниці цього товару автоматично не прийматимуться.",
 
     "inventorySync.location.unavailable": "Не вдалося прочитати локації Shopify. Оновіть сторінку пізніше.",
     "inventorySync.location.title": "Локація Shopify складу",
@@ -145,9 +171,20 @@ const messages: MessageModule = {
     "inventorySync.why.committed": "Shopify закріпив {count} шт. під замовлення, яких застосунок не резервує (неоплачені, чернетки)",
     "inventorySync.why.failedPushes": "Невдалих передач: {count} (разом {delta} шт.) — Shopify їх, імовірно, не отримав",
     "inventorySync.why.inFlight": "Передано перевізнику, але ще не виконано в Shopify: {count} шт.",
-    "inventorySync.why.otherStates": "У Shopify {count} шт. позначено як недоступні (брак, резерв, контроль якості)",
-    "inventorySync.why.uncertain": "Є частково виконані/повернені замовлення — перевірте вручну",
+    "inventorySync.why.otherStates": "У Shopify {count} шт. позначено як недоступні (брак, резерв, безпечний запас, контроль якості)",
+    "inventorySync.why.uncertain": "Є частково виконані замовлення — перевірте вручну",
     "inventorySync.why.autoBlocked": "Автоприйняття не виконано: фактичний залишок став би від'ємним",
+    "inventorySync.why.unsent":
+      "Склад має {count} змін(и), яких Shopify не отримав (разом {delta} шт.): передачу вимкнено, немає дозволу, зміни до запуску обліку, відхилені невдалі передачі або повернення покупця, які Shopify поповнює сам. «Прийняти Shopify» їх скасує. «Надіслати склад» донесе до Shopify усе, крім повернень, що чекають поповнення в Shopify",
+    "inventorySync.why.reservationExcess":
+      "Склад резервує на {count} шт. більше, ніж закріпив Shopify: замовлення змінено/скасовано/виконано в Shopify, а в застосунку — ще ні (див. «Проблеми»)",
+    "inventorySync.why.returnsPending":
+      "Повернено/відшкодовано після відправлення {count} шт., яких склад ще не оприбуткував як придатні (повернення не надійшло або товар пошкоджений) — Shopify міг уже поповнити «доступно» сам. Якщо повернення вже оприбутковано й надіслано в Shopify кнопкою «Надіслати склад», Shopify порахував його двічі — оберіть «Надіслати склад»",
+    "inventorySync.why.returnsAwaiting":
+      "Склад оприбуткував {count} шт. повернень покупця, які Shopify ще має поповнити сам (відшкодування з поверненням на склад у Shopify ще немає). Різниця зникне, коли Shopify їх поповнить; «Надіслати склад» їх не надсилає",
+    "inventorySync.why.pushPending":
+      "Результат «Надіслати склад» від {date} ще не підтверджено — повторіть «Надіслати склад» (повтор безпечний) або звірте товар",
+    "inventorySync.why.autoSkipped": "Не прийнято автоматично: різницю може пояснювати інше (див. вище) — потрібне рішення власника",
     "inventorySync.why.external": "Імовірно, залишок змінили в Shopify вручну або іншим застосунком",
 
     "inventorySync.conflictStatus.open": "Відкрита",
@@ -161,7 +198,7 @@ const messages: MessageModule = {
     "inventorySync.resolution.auto_applied": "Прийнято автоматично (налаштування)",
 
     "inventorySync.outcome.match": "Залишки збігаються.",
-    "inventorySync.outcome.explained": "Різниця пояснюється замовленнями, закріпленими в Shopify, — розбіжності немає.",
+    "inventorySync.outcome.explained": "Різниця пояснюється замовленнями (закріпленими в Shopify або ще не оновленими на складі) — розбіжності немає.",
     "inventorySync.outcome.opened": "Знайдено розбіжність — вона в списку нижче.",
     "inventorySync.outcome.updated": "Розбіжність оновлено свіжими даними.",
     "inventorySync.outcome.auto_applied": "Значення Shopify прийнято автоматично.",
@@ -178,10 +215,17 @@ const messages: MessageModule = {
     "inventorySync.result.stale": "Залишок змінився після звірки — розбіжність звірено заново. Перевірте нові значення.",
     "inventorySync.result.needs_reconcile": "Розбіжність звірено з Shopify. Перевірте значення й оберіть дію.",
     "inventorySync.result.pushed": "Значення складу надіслано в Shopify (зміна {delta} шт.).",
+    "inventorySync.result.pushedHeld":
+      "Значення складу надіслано в Shopify (зміна {delta} шт.). Не надіслано {held} шт. — пояснення в розбіжності після звірки.",
     "inventorySync.result.inProgress": "Shopify ще обробляє попередній запит. Спробуйте за хвилину — повтор безпечний.",
     "inventorySync.result.unknown": "Не вдалося підтвердити відповідь Shopify. Спробуйте ще раз — повтор не змінить залишок двічі.",
+    "inventorySync.result.push_pending":
+      "Результат попереднього «Надіслати склад» ще невідомий, тому «Прийняти Shopify» зараз недоступне (інакше застосувалися б обидві зміни). Повторіть «Надіслати склад» або натисніть «Звірити» за кілька хвилин.",
+    "inventorySync.result.resolved_concurrently":
+      "Значення складу надіслано в Shopify (зміна {delta} шт.), але розбіжність тим часом закрито іншою дією. Звірте товар, щоб перевірити значення.",
     "inventorySync.result.dismissed": "Розбіжність відхилено.",
-    "inventorySync.result.bulkAccepted": "Прийнято: {accepted} (разом {units} шт.). Звірено заново: {stale}. Уже розв'язано: {already}. Помилок: {failed}.",
+    "inventorySync.result.bulkAccepted":
+      "Прийнято: {accepted} (разом {units} шт.). Звірено заново: {stale}. Уже розв'язано: {already}. Очікують результату «Надіслати склад»: {pending}. Помилок: {failed}.",
     "inventorySync.result.reconciledItem": "Товар звірено з Shopify.",
     "inventorySync.result.reconcileQueued": "Повну звірку поставлено в чергу. Результат з'явиться тут за кілька хвилин.",
     "inventorySync.result.reconcileAlreadyQueued": "Повна звірка вже в черзі.",
@@ -202,6 +246,10 @@ const messages: MessageModule = {
     "inventorySync.locationMissing": "Локацію ще не обрано.",
     "inventorySync.reconcileUnavailable": "Звірка неможлива: немає локації, дозволу або зв'язку товару з Shopify.",
     "inventorySync.pushFailed": "Shopify відхилив зміну ({code}). Розбіжність лишається відкритою.",
+    "inventorySync.pushOtherStates":
+      "Не надіслано: уся різниця — {count} шт., які Shopify тримає в станах «брак», «резерв», «безпечний запас» або «контроль якості». Брак — позначте на складі; резерв, безпечний запас і контроль якості змінюються в Shopify. Потім звірте товар.",
+    "inventorySync.pushAwaitingReturns":
+      "Не надіслано: {count} шт. — повернення, які Shopify поповнить сам. Якщо Shopify їх не поповнить, позначте «Shopify не поповнить ці повернення» й надішліть ще раз.",
   },
   en: {
     "inventorySync.title": "Stock and Shopify",
@@ -217,6 +265,8 @@ const messages: MessageModule = {
     "inventorySync.banner.chooseLocation":
       "No Shopify location is selected for the warehouse. The store has several locations (or they could not be read) — choose one below. Until then nothing is sent or reconciled.",
     "inventorySync.banner.confirmLocation": "The Shopify location was selected automatically (it is the only one in the store). Check and confirm it below.",
+    "inventorySync.banner.autoApplyPaused":
+      "Automatic acceptance of Shopify changes is selected but not in effect: sending warehouse changes to Shopify is off or the write_inventory permission is missing. Without sending, Shopify does not know about warehouse receipts, defects and adjustments, and automatic acceptance would cancel them — so every difference goes to owner review.",
 
     "inventorySync.overview.title": "Sync status",
     "inventorySync.overview.shop": "Store",
@@ -244,6 +294,10 @@ const messages: MessageModule = {
     "inventorySync.overview.lastReconcileSummary":
       "Checked {checked}: matching {match}, discrepancies {conflicts}, accepted automatically {autoApplied}, closed {closed}, skipped {skipped}",
     "inventorySync.overview.lastReconcileNever": "Not run yet",
+    "inventorySync.overview.nextReconcile": "Next scheduled reconciliation",
+    "inventorySync.overview.nextReconcileNone": "Not scheduled",
+    "inventorySync.overview.nextReconcileHint":
+      "Every 6 hours the app compares stock with Shopify on its own (read-only) once warehouse accounting is started. Differences follow the “Stock changes made in Shopify” rule in the warehouse settings.",
     "inventorySync.overview.queue": "Queued",
     "inventorySync.overview.queuedPush": "sending",
     "inventorySync.overview.queuedReconcile": "reconciliations: {count}",
@@ -264,6 +318,14 @@ const messages: MessageModule = {
       "Warehouse on-hand stock changes by {diff} pcs — the warehouse treats the Shopify value as correct. The change is recorded in the movement history.",
     "inventorySync.action.accept.warning":
       "There are failed sends or partially fulfilled/returned orders — check that the physical stock really changed.",
+    "inventorySync.action.accept.unsentWarning":
+      "The warehouse has changes of {delta} pcs that Shopify did not receive (receipts, defects, adjustments, returns). Accepting the Shopify value cancels them. If these changes are correct, choose “Send warehouse” (it does not send returns that Shopify restocks itself).",
+    "inventorySync.action.accept.awaitingWarning":
+      "The warehouse received {count} pcs of customer returns that Shopify still has to restock itself (the refund with restock is not in Shopify yet). Accepting the Shopify value now cancels them in the warehouse — wait until Shopify restocks them.",
+    "inventorySync.action.accept.otherStatesWarning":
+      "Shopify marks {count} pcs as unavailable (damaged, reserved, quality control) — they are physically in the warehouse. If they are defective, record a defect in the warehouse instead: accepting reduces on-hand stock.",
+    "inventorySync.action.reservationWarning":
+      "The warehouse reserves {count} pcs more than Shopify holds (an order was edited, cancelled or fulfilled in Shopify but not yet in the app). Check those orders first (“Problems”).",
     "inventorySync.action.explainedKept":
       "Another {count} pcs of the difference are orders Shopify holds but the warehouse does not reserve (unpaid, not yet synced) — they are not changed: that part disappears once the orders are paid or cancelled.",
     "inventorySync.action.pushApp": "Send warehouse",
@@ -273,9 +335,21 @@ const messages: MessageModule = {
     "inventorySync.action.pushApp.warning":
       "There are partially fulfilled/returned orders — the split of units is uncertain, check the value in Shopify after sending.",
     "inventorySync.action.pushApp.noScope": "“Send warehouse” is unavailable: the write_inventory permission is missing.",
+    "inventorySync.action.pushApp.otherStates":
+      "“Send warehouse” is unavailable: the whole difference is {count} pcs that Shopify keeps as “damaged”, “reserved”, “safety stock” or “quality control” (they are already in Shopify's on-hand stock, so sending would add them a second time). Damaged — record a defect in the warehouse; reserved and safety stock are held by Shopify on purpose (the difference stays until they are released in Shopify); quality control — finish it in Shopify. Then reconcile the product.",
+    "inventorySync.action.pushApp.onlyReturns":
+      "Without the option below nothing is sent: the rest of the difference is returns that Shopify restocks itself.",
+    "inventorySync.action.pushApp.heldOtherStates":
+      "{count} pcs are not sent: Shopify keeps them as “damaged”, “reserved”, “safety stock” or “quality control” — they are already in Shopify's on-hand stock. After sending, Shopify's on-hand stock equals the warehouse, and the “available” difference for these units remains.",
+    "inventorySync.action.pushApp.heldAwaiting":
+      "{count} pcs are not sent: these are customer returns received by the warehouse that Shopify restocks itself once the return is refunded with restock. Sent now, they would be counted twice in Shopify after the restock.",
+    "inventorySync.action.pushApp.includeReturns":
+      "Shopify will not restock these returns (refunded without restock or not handled in Shopify) — send them too ({count} pcs)",
     "inventorySync.action.dismiss": "Dismiss",
     "inventorySync.action.dismiss.note": "Reason (required)",
     "inventorySync.action.dismiss.submit": "Dismiss discrepancy",
+    "inventorySync.action.dismiss.pushPending":
+      "The result of “Send warehouse” is not confirmed yet. Dismissing does not cancel the request: Shopify may still apply it, so for 24 hours after the attempt new differences of this product are not accepted automatically.",
 
     "inventorySync.location.unavailable": "Could not read Shopify locations. Refresh the page later.",
     "inventorySync.location.title": "Warehouse Shopify location",
@@ -345,9 +419,20 @@ const messages: MessageModule = {
     "inventorySync.why.committed": "Shopify holds {count} pcs for orders the app does not reserve (unpaid, drafts)",
     "inventorySync.why.failedPushes": "Failed sends: {count} (total {delta} pcs) — Shopify probably did not get them",
     "inventorySync.why.inFlight": "Handed to the carrier but not yet fulfilled in Shopify: {count} pcs",
-    "inventorySync.why.otherStates": "{count} pcs are marked unavailable in Shopify (damaged, reserved, quality control)",
-    "inventorySync.why.uncertain": "There are partially fulfilled/returned orders — check manually",
+    "inventorySync.why.otherStates": "{count} pcs are marked unavailable in Shopify (damaged, reserved, safety stock, quality control)",
+    "inventorySync.why.uncertain": "There are partially fulfilled orders — check manually",
     "inventorySync.why.autoBlocked": "Not accepted automatically: on-hand stock would become negative",
+    "inventorySync.why.unsent":
+      "The warehouse has {count} change(s) Shopify did not receive (total {delta} pcs): sending is off, the permission is missing, changes before accounting was started, dismissed failed sends or customer returns that Shopify restocks itself. “Accept Shopify” cancels them. “Send warehouse” delivers everything except returns waiting for Shopify's restock",
+    "inventorySync.why.reservationExcess":
+      "The warehouse reserves {count} pcs more than Shopify holds: an order was edited/cancelled/fulfilled in Shopify but not yet in the app (see “Problems”)",
+    "inventorySync.why.returnsPending":
+      "{count} pcs were returned/refunded after shipping but the warehouse has not received them as sellable (the return has not arrived or the item is damaged) — Shopify may already have restocked them as available. If the return was already received and sent to Shopify with “Send warehouse”, Shopify counted it twice — choose “Send warehouse”",
+    "inventorySync.why.returnsAwaiting":
+      "The warehouse received {count} pcs of customer returns that Shopify still has to restock itself (no refund with restock in Shopify yet). The difference disappears once Shopify restocks them; “Send warehouse” does not send them",
+    "inventorySync.why.pushPending":
+      "The result of “Send warehouse” at {date} is not confirmed yet — retry “Send warehouse” (retrying is safe) or reconcile the product",
+    "inventorySync.why.autoSkipped": "Not accepted automatically: something else may explain the difference (see above) — the owner decides",
     "inventorySync.why.external": "Stock was probably changed in Shopify manually or by another app",
 
     "inventorySync.conflictStatus.open": "Open",
@@ -361,7 +446,7 @@ const messages: MessageModule = {
     "inventorySync.resolution.auto_applied": "Accepted automatically (setting)",
 
     "inventorySync.outcome.match": "Stock matches.",
-    "inventorySync.outcome.explained": "The difference is explained by orders held in Shopify — no discrepancy.",
+    "inventorySync.outcome.explained": "The difference is explained by orders (held in Shopify or not yet updated in the warehouse) — no discrepancy.",
     "inventorySync.outcome.opened": "A discrepancy was found — it is in the list below.",
     "inventorySync.outcome.updated": "The discrepancy was updated with fresh data.",
     "inventorySync.outcome.auto_applied": "The Shopify value was accepted automatically.",
@@ -378,10 +463,17 @@ const messages: MessageModule = {
     "inventorySync.result.stale": "Stock changed after reconciliation — the discrepancy was reconciled again. Check the new values.",
     "inventorySync.result.needs_reconcile": "The discrepancy was reconciled with Shopify. Check the values and choose an action.",
     "inventorySync.result.pushed": "Warehouse value sent to Shopify (change {delta} pcs).",
+    "inventorySync.result.pushedHeld":
+      "Warehouse value sent to Shopify (change {delta} pcs). {held} pcs were not sent — see the discrepancy after reconciliation.",
     "inventorySync.result.inProgress": "Shopify is still processing the previous request. Try again in a minute — retrying is safe.",
     "inventorySync.result.unknown": "Could not confirm Shopify's response. Try again — a retry will not change stock twice.",
+    "inventorySync.result.push_pending":
+      "The result of the previous “Send warehouse” is still unknown, so “Accept Shopify” is unavailable now (otherwise both changes would apply). Retry “Send warehouse” or press “Reconcile” in a few minutes.",
+    "inventorySync.result.resolved_concurrently":
+      "The warehouse value was sent to Shopify (change {delta} pcs), but the discrepancy was closed by another action meanwhile. Reconcile the product to check the values.",
     "inventorySync.result.dismissed": "Discrepancy dismissed.",
-    "inventorySync.result.bulkAccepted": "Accepted: {accepted} (total {units} pcs). Reconciled again: {stale}. Already resolved: {already}. Errors: {failed}.",
+    "inventorySync.result.bulkAccepted":
+      "Accepted: {accepted} (total {units} pcs). Reconciled again: {stale}. Already resolved: {already}. Waiting for “Send warehouse” result: {pending}. Errors: {failed}.",
     "inventorySync.result.reconciledItem": "Product reconciled with Shopify.",
     "inventorySync.result.reconcileQueued": "Full reconciliation queued. The result appears here in a few minutes.",
     "inventorySync.result.reconcileAlreadyQueued": "A full reconciliation is already queued.",
@@ -402,6 +494,10 @@ const messages: MessageModule = {
     "inventorySync.locationMissing": "No location selected yet.",
     "inventorySync.reconcileUnavailable": "Reconciliation is not possible: no location, permission or link of the product to Shopify.",
     "inventorySync.pushFailed": "Shopify rejected the change ({code}). The discrepancy stays open.",
+    "inventorySync.pushOtherStates":
+      "Not sent: the whole difference is {count} pcs that Shopify keeps as “damaged”, “reserved”, “safety stock” or “quality control”. Damaged — record a defect in the warehouse; reserved, safety stock and quality control are changed in Shopify. Then reconcile the product.",
+    "inventorySync.pushAwaitingReturns":
+      "Not sent: {count} pcs are returns that Shopify restocks itself. If Shopify will not restock them, tick “Shopify will not restock these returns” and send again.",
   },
 };
 
