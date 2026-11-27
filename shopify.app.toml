@@ -9,7 +9,8 @@ embedded = true
 [access_scopes]
 # Мінімальні дозволи етапу 2 (той самий список — у версії застосунку в Dev Dashboard і в змінній SCOPES):
 #   write_orders    — читання замовлень і оновлення адреси/email/телефону (orderUpdate); включає read_orders
-#   read_products   — товари, варіанти, фото, метаполе митного опису
+#   read_products   — товари, варіанти, фото, метаполе митного опису; етап 5 — колекції (ручні й автоматичні) і
+#                     товари в них для шаблонів комплектації (Collection, Product.collections, webhooks collections/*)
 #   read_inventory  — залишки, вага, HS-код, країна походження (InventoryItem)
 # Етап 3:
 #   write_merchant_managed_fulfillment_orders — виконання замовлення з трек-номером після передачі перевізнику

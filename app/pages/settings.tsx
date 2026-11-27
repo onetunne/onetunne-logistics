@@ -2148,6 +2148,9 @@ function WarehouseSection({ data, result, pending, fieldError }: SectionProps) {
         <Stack gap={4}>
           <ActionBanner data={result} />
           {value.shopifyPush === "deltas" ? <Banner tone="info">{t("settings.warehouse.pushOnBanner")}</Banner> : null}
+          {value.externalShopifyChanges === "apply" && value.shopifyPush !== "deltas" ? (
+            <Banner tone="warning">{t("settings.warehouse.applyWithoutPushWarning")}</Banner>
+          ) : null}
           <FormLayout columns={2}>
             {number("lowStockThreshold", 0, 100000, t("settings.warehouse.unitPieces"))}
             {number("productionLeadDays", 1, 365, t("settings.warehouse.unitDays"))}

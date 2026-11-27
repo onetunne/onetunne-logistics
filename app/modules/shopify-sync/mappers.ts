@@ -150,10 +150,18 @@ export interface MappedOrder {
     quantity: number;
     /** До відправлення: Shopify currentQuantity (без повернених і видалених); резервує й списує склад. */
     currentQuantity: number;
+    /** Коли позицію створено в Shopify (LineItem.createdAt); null — немає в даних (старі відповіді/тести). */
+    shopifyCreatedAt: Date | null;
     unitPrice: string;
     currency: string;
     imageUrl: string | null;
   }>;
+}
+
+function validDate(value: string | null | undefined): Date | null {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
 }
 
 export function mapOrder(o: GqlOrder): MappedOrder {
@@ -200,6 +208,7 @@ export function mapOrder(o: GqlOrder): MappedOrder {
       quantity: li.quantity,
       // Старі відповіді/тести без currentQuantity → quantity.
       currentQuantity: typeof li.currentQuantity === "number" ? Math.max(0, li.currentQuantity) : li.quantity,
+      shopifyCreatedAt: validDate(li.createdAt),
       unitPrice: normalizeAmount(li.originalUnitPriceSet.shopMoney.amount),
       currency: li.originalUnitPriceSet.shopMoney.currencyCode,
       imageUrl: li.image?.url ?? null,

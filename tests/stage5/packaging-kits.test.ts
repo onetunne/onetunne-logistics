@@ -71,6 +71,17 @@ describe("resolveKitMaterials (demo templates)", () => {
     expect(await resolveKitMaterials(env.handle.db, order)).toEqual([]);
     await env.handle.db.update(orderLineItems).set({ quantity: 1, currentQuantity: null }).where(eq(orderLineItems.id, line!.id));
   });
+
+  it("collection templates (demo): tires collection per item; fenders collection only for Model S (gap-4, production-7)", async () => {
+    const tape = async (n: string) => (await resolveKitMaterials(env.handle.db, await env.orderId(n))).find((k) => k.code === "tape");
+    expect(await tape("#1008")).toMatchObject({ quantity: 4, templateIds: [expect.any(String)] }); // 2 покришки × 2 м
+    expect(await tape("#1006")).toMatchObject({ quantity: 1 }); // крило Model S
+    expect(await tape("#1002")).toBeUndefined(); // крило Model X тієї самої колекції — фільтр моделі
+    expect(await tape("#1001")).toBeUndefined();
+    // Крило Model S отримує і шаблон товару (болти), і шаблон колекції з фільтром — шаблони додаються, не замінюються.
+    const s = await resolveKitMaterials(env.handle.db, await env.orderId("#1006"));
+    expect(sortByCode(s).map((k) => k.code)).toEqual(["bolts_m5", "card_thanks", "instruction_fender", "sticker_logo", "tape"]);
+  });
 });
 
 describe("kit template management", () => {
@@ -131,7 +142,7 @@ describe("kit template management", () => {
   });
 
   it("product options include models, colours and SKUs for filtering", async () => {
-    const options = await listKitProductOptions(env.handle.db);
+    const { options } = await listKitProductOptions(env.handle.db);
     const fender = options.find((o) => o.models.includes("Model X"));
     expect(fender).toMatchObject({ models: ["Model S", "Model X"], skus: ["OT-FK-S", "OT-FK-X"] });
     expect(options.some((o) => o.colors.includes("Чорний"))).toBe(true);
@@ -147,9 +158,19 @@ describe("order preview", () => {
     const preview = await previewOrderPacking(env.handle.db, id);
     expect(preview.materials.length).toBe(4);
     expect(preview.materials.find((m) => m.code === "bolts_m5")?.templateNames).toEqual(["Крило: болти та інструкція"]);
-    // Демо-товари без габаритів → підбір лише за вагою (позначено).
-    expect(preview.boxReason).toBe("weight_only");
-    expect(preview.goods).toMatchObject({ units: 2, measuredUnits: 0, weightGrams: 470 });
+    // #1012: крило Model X без габаритів + тримач білий з габаритами → підбір неточний (частина без габаритів).
+    expect(preview.boxReason).toBe("partial_dimensions");
+    expect(preview.goods).toMatchObject({ units: 2, measuredUnits: 1, weightGrams: 470 });
+  });
+
+  it("demo variants with dimensions get an exact box by dimensions and weight; the rest stay weight-only (gap-8)", async () => {
+    // Регресія: у демо не було габаритів — автоматичний підбір за габаритами не можна було показати.
+    const exact = await previewOrderPacking(env.handle.db, await env.orderId("#1006")); // крило Model S 280×140×60
+    expect(exact).toMatchObject({ boxReason: "fits", box: { code: "box_m" }, goods: { units: 1, measuredUnits: 1 } });
+    const twoHolders = await previewOrderPacking(env.handle.db, await env.orderId("#1004")); // 2 × тримач білий
+    expect(twoHolders).toMatchObject({ boxReason: "fits", box: { code: "box_s" }, goods: { units: 2, measuredUnits: 2 } });
+    // Навмисно без габаритів: лише за вагою (і для накладної — типова упаковка).
+    expect((await previewOrderPacking(env.handle.db, await env.orderId("#1001"))).boxReason).toBe("weight_only");
   });
 });
 

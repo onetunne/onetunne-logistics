@@ -10,6 +10,11 @@ export interface SectionDef {
   stage: number;
   /** Потрібний дозвіл для перегляду. */
   permission?: Permission;
+  /**
+   * Уже реалізована частина в іншому розділі, на яку веде сторінка «Заплановано» (напр. «Аналітика» етапу 6 →
+   * «Склад» → «Аналітика» етапу 5). Показується лише з дозволом `permission`.
+   */
+  related?: { path: string; labelKey: string; descriptionKey: string; permission?: Permission };
 }
 
 export const SECTIONS: readonly SectionDef[] = [
@@ -25,7 +30,18 @@ export const SECTIONS: readonly SectionDef[] = [
   { key: "warehouse", path: "warehouse", implemented: true, stage: 5, permission: "warehouse.view" },
   { key: "production", path: "production", implemented: true, stage: 5, permission: "warehouse.view" },
   { key: "finance", path: "finance", implemented: false, stage: 6, permission: "finance.view" },
-  { key: "analytics", path: "analytics", implemented: false, stage: 6 },
+  {
+    key: "analytics",
+    path: "analytics",
+    implemented: false,
+    stage: 6,
+    related: {
+      path: "warehouse/analytics",
+      labelKey: "warehouseAnalytics.planned.link",
+      descriptionKey: "warehouseAnalytics.planned.description",
+      permission: "warehouse.view",
+    },
+  },
   { key: "assistant", path: "assistant", implemented: false, stage: 7 },
   { key: "development", path: "development", implemented: false, stage: 9 },
   { key: "countryRules", path: "country-rules", implemented: true, stage: 4, permission: "orders.view" },

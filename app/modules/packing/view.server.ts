@@ -5,7 +5,7 @@
 import { eq } from "drizzle-orm";
 import type { DbOrTx } from "~/db/client.server";
 import { packagingMaterials, type OrderPriority, type PackagingMaterialKind } from "~/db/schema";
-import type { OrderStatus } from "~/domain/order-status";
+import { isFulfilledInShopify, type OrderStatus } from "~/domain/order-status";
 import { effectiveLineQuantity } from "~/modules/inventory/quantities";
 import { loadLineItems, loadOrderRow } from "~/modules/orders/repository.server";
 import { boxInnerDims, type SelectBoxFlags, type SelectBoxReason } from "~/modules/packaging/box-selection";
@@ -19,7 +19,18 @@ import { findActiveShipment } from "~/modules/shipments/waybill.server";
 import type { ServiceContext } from "~/server/types";
 import { STARTABLE_STATUSES } from "./constants";
 import { dimsOf, waybillParcel, type Dims, type ParcelMeasure, type ParcelMismatch } from "./parcel-compare";
-import { loadActivePacking, materialsConsumedFor, normalizeId, parcelMismatchFor, toChecklistLines, type PackingRow } from "./packing.server";
+import { openCancelledAfterPacking } from "./lifecycle.server";
+import {
+  isDeletedAtCarrier,
+  isPackableShipment,
+  loadActivePacking,
+  materialsConsumedFor,
+  normalizeId,
+  parcelMismatchFor,
+  toChecklistLines,
+  type PackingRow,
+} from "./packing.server";
+import { shopifyLinesPending } from "~/modules/shopify-sync/pending-lines.server";
 import { parcelPrefill } from "./parcel-form";
 import { checklistProgress, packedQty, type ChecklistProgress } from "./scan";
 
@@ -115,6 +126,20 @@ export interface PackingScreen {
   /** Для цього пакування матеріали вже списано (повторне «Запаковано» не списує вдруге). */
   materialsConsumed: boolean;
   canStart: boolean;
+  /** Перевізник повідомив, що накладну видалено: пакувати з цією етикеткою не можна (нова накладна на сторінці замовлення). */
+  deletedAtCarrier: boolean;
+  /**
+   * Етап 5: Shopify змінив позиції після створення накладної, а застосунок їх ще не застосував — чекліст може бути
+   * застарілим; «Запаковано» лише рішенням власника (шлях — скасувати накладну, застосунок перечитає замовлення).
+   */
+  shopifyLinesPending: boolean;
+  /** Етап 5: замовлення вже виконане (частково) в Shopify поза застосунком — пакувати не можна. */
+  fulfilledInShopify: boolean;
+  /**
+   * Етап 5: замовлення скасовано після початку пакування / «Запаковано» — розібрати посилку й повернути товар на
+   * полицю, потім «Повернуто на склад» (закриває попередження ORDER_CANCELLED_AFTER_PACKING).
+   */
+  cancelledAfterPacking: { previousStatus: string; materialsConsumed: boolean } | null;
 }
 
 const toPackingInfo = (p: PackingRow): PackingInfo => ({
@@ -199,7 +224,10 @@ export async function loadPackingScreen(ctx: Pick<ServiceContext, "db" | "carrie
   const dims = savedDims ?? prefill.dimsMm;
 
   const adapter = shipment ? ctx.carriers.get(shipment.carrierCode) : undefined;
-  const packable = Boolean(shipment && shipment.status === "created" && shipment.waybillNumber && !shipment.handedOverAt);
+  const packable = isPackableShipment(shipment);
+  const linesPending = shopifyLinesPending(order);
+  const fulfilledInShopify = isFulfilledInShopify(order.fulfillmentStatus) && order.status !== "cancelled";
+  const cancelled = order.status === "cancelled" ? await openCancelledAfterPacking(db, id) : null;
   return {
     order: {
       id: order.id,
@@ -251,13 +279,18 @@ export async function loadPackingScreen(ctx: Pick<ServiceContext, "db" | "carrie
     },
     waybillParcel: shipment && shipment.status === "created" ? waybillParcel(shipment) : null,
     mismatch: await parcelMismatchFor(db, order, packing, shipment),
-    packedWithoutWaybill: order.status === "packed" && !packable,
+    packedWithoutWaybill: order.status === "packed" && !packable && !isDeletedAtCarrier(shipment),
     materialsConsumed: packing ? await materialsConsumedFor(db, packing.id) : false,
     // «Почати/продовжити»: нове пакування або «Накладна створена» з розпочатим пакуванням (напр. після переоформлення).
     canStart:
       packable &&
+      !fulfilledInShopify &&
       (STARTABLE_STATUSES as readonly OrderStatus[]).includes(order.status) &&
       !(order.status === "awaiting_picking" && packing?.status === "in_progress"),
+    deletedAtCarrier: isDeletedAtCarrier(shipment),
+    shopifyLinesPending: linesPending,
+    fulfilledInShopify,
+    cancelledAfterPacking: cancelled ? { previousStatus: cancelled.previousStatus, materialsConsumed: cancelled.materialsConsumed } : null,
   };
 }
 
@@ -273,6 +306,14 @@ export interface PackingSummary {
   inQueue: boolean;
   /** Запаковано, а дійсної накладної немає (скасовано після «Запаковано»): розпакувати на екрані пакування. */
   packedWithoutWaybill: boolean;
+  /** Накладну видалено у перевізника (етикетка недійсна). */
+  deletedAtCarrier: boolean;
+  /** Етап 5: неперенесені зміни позицій із Shopify (див. PackingScreen.shopifyLinesPending). */
+  shopifyLinesPending: boolean;
+  /** Етап 5: виконано (частково) в Shopify поза застосунком. */
+  fulfilledInShopify: boolean;
+  /** Етап 5: скасовано після пакування — посилку розібрати й повернути товар (див. PackingScreen). */
+  cancelledAfterPacking: boolean;
 }
 
 /** Картка «Пакування» на сторінці замовлення. */
@@ -288,7 +329,7 @@ export async function loadPackingSummary(db: DbOrTx, orderId: string): Promise<P
     boxCode = m?.code ?? null;
     boxName = m?.name ?? null;
   }
-  const packable = Boolean(shipment && shipment.status === "created" && shipment.waybillNumber && !shipment.handedOverAt);
+  const packable = isPackableShipment(shipment);
   return {
     priority: order.priority as OrderPriority,
     status: order.status,
@@ -301,6 +342,10 @@ export async function loadPackingSummary(db: DbOrTx, orderId: string): Promise<P
     mismatch: await parcelMismatchFor(db, order, packing, shipment),
     materialsConsumed: packing ? await materialsConsumedFor(db, packing.id) : false,
     inQueue: packable && ["waybill_created", "awaiting_picking", "packed"].includes(order.status),
-    packedWithoutWaybill: order.status === "packed" && !packable,
+    packedWithoutWaybill: order.status === "packed" && !packable && !isDeletedAtCarrier(shipment),
+    deletedAtCarrier: isDeletedAtCarrier(shipment),
+    shopifyLinesPending: shopifyLinesPending(order),
+    fulfilledInShopify: isFulfilledInShopify(order.fulfillmentStatus) && order.status !== "cancelled",
+    cancelledAfterPacking: order.status === "cancelled" && (await openCancelledAfterPacking(db, id)) !== null,
   };
 }

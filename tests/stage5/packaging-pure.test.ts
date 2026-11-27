@@ -291,6 +291,52 @@ describe("computeKitMaterials", () => {
   });
 });
 
+describe("computeKitMaterials: collections and variant filters (resolution precedence)", () => {
+  const tpl = (id: string, extra: Partial<KitTemplateForResolution>): KitTemplateForResolution => ({
+    id,
+    appliesTo: "all",
+    priority: 0,
+    active: true,
+    productIds: [],
+    lines: [{ materialId: `m-${id}`, quantity: 1, per: "item" }],
+    ...extra,
+  });
+  const fenderX = { productId: "p-fender", quantity: 2, model: "Model X", color: null, collectionIds: ["c-fenders", "c-safety"] };
+  const fenderS = { productId: "p-fender", quantity: 1, model: " model s ", color: null, collectionIds: ["c-fenders", "c-safety"] };
+  const holderBlack = { productId: "p-holder", quantity: 3, model: null, color: "Чорний", collectionIds: ["c-handlebar"] };
+  const qty = (r: ReturnType<typeof computeKitMaterials>, id: string) => r.find((x) => x.materialId === `m-${id}`)?.quantity ?? 0;
+
+  it("collection target: units of products in any chosen collection, each line counted once", () => {
+    const fenders = tpl("fenders", { appliesTo: "collections", collectionIds: ["c-fenders", "c-safety"] });
+    const r = computeKitMaterials([fenders], [fenderX, fenderS, holderBlack]);
+    expect(qty(r, "fenders")).toBe(3); // 2 + 1, не 6 (товар у двох колекціях шаблону)
+    expect(computeKitMaterials([fenders], [holderBlack])).toEqual([]);
+    // Позиція без колекцій (товар ще не синхронізовано / не в колекції) — шаблон не підходить.
+    expect(computeKitMaterials([fenders], [{ productId: "p-fender", quantity: 1 }])).toEqual([]);
+  });
+
+  it("model/colour filter narrows any target (trimmed, case-insensitive); both filters are AND", () => {
+    const sOnly = tpl("s", { appliesTo: "collections", collectionIds: ["c-fenders"], models: ["Model S"] });
+    expect(qty(computeKitMaterials([sOnly], [fenderX, fenderS]), "s")).toBe(1);
+    expect(computeKitMaterials([sOnly], [fenderX])).toEqual([]);
+    const allBlack = tpl("black", { colors: ["чорний"] }); // ціль «усі товари» + фільтр кольору
+    expect(qty(computeKitMaterials([allBlack], [fenderX, holderBlack]), "black")).toBe(3);
+    const both = tpl("both", { models: ["Model X"], colors: ["Чорний"] });
+    expect(computeKitMaterials([both], [fenderX, holderBlack])).toEqual([]); // жоден варіант не має обох
+    const products = tpl("prod", { appliesTo: "products", productIds: ["p-fender"], models: ["Model X", "Model S"] });
+    expect(qty(computeKitMaterials([products], [fenderX, fenderS, holderBlack]), "prod")).toBe(3);
+    // Варіант без моделі не підпадає під фільтр моделі.
+    expect(computeKitMaterials([tpl("m", { models: ["Model X"] })], [holderBlack])).toEqual([]);
+  });
+
+  it("a specific template never replaces a general one: all matching templates add up (priority = display order only)", () => {
+    const general = tpl("g", { lines: [{ materialId: "bolts", quantity: 1, per: "item" }] });
+    const specific = tpl("sp", { appliesTo: "collections", collectionIds: ["c-fenders"], models: ["Model S"], priority: 50, lines: [{ materialId: "bolts", quantity: 1, per: "item" }] });
+    expect(computeKitMaterials([general, specific], [fenderS])).toEqual([{ materialId: "bolts", quantity: 2, templateIds: ["sp", "g"] }]);
+    expect(computeKitMaterials([general, specific], [fenderX])).toEqual([{ materialId: "bolts", quantity: 2, templateIds: ["g"] }]);
+  });
+});
+
 describe("form schemas", () => {
   const base = { code: " Box_M ", name: " Коробка ", kind: "box", unit: "pcs", innerLengthMm: "300", innerWidthMm: "200", innerHeightMm: "120", maxWeightGrams: "", tareWeightGrams: "0", lowStockThreshold: "" };
 
@@ -322,6 +368,23 @@ describe("form schemas", () => {
     expect(kitTemplateInputSchema.parse({ name: "A", appliesTo: "all", priority: "5", lines: [{ materialId: m, quantity: "3", per: "item" }] })).toMatchObject({
       priority: 5,
       lines: [{ quantity: 3, per: "item" }],
+      collectionIds: [],
+      models: [],
+      colors: [],
     });
+  });
+
+  it("validates collection templates and normalizes the model/colour filter", () => {
+    const m = "11111111-1111-4111-8111-111111111111";
+    const line = [{ materialId: m, quantity: "1", per: "item" }];
+    expect(kitTemplateInputSchema.safeParse({ name: "A", appliesTo: "collections", lines: line, collectionIds: [] }).error?.issues[0]?.message).toBe(
+      "packaging.error.kitNoCollections",
+    );
+    expect(
+      kitTemplateInputSchema.parse({ name: "A", appliesTo: "collections", lines: line, collectionIds: [m.toUpperCase()], models: [" Model S ", "model s", ""], colors: ["Чорний"] }),
+    ).toMatchObject({ collectionIds: [m], models: ["Model S"], colors: ["Чорний"] });
+    expect(kitTemplateInputSchema.safeParse({ name: "A", appliesTo: "all", lines: line, models: ["x".repeat(256)] }).success).toBe(false);
+    expect(kitTemplateInputSchema.safeParse({ name: "A", appliesTo: "all", lines: line, models: Array.from({ length: 51 }, (_, i) => `M${i}`) }).success).toBe(false);
+    expect(kitTemplateInputSchema.safeParse({ name: "A", appliesTo: "bogus", lines: line }).success).toBe(false);
   });
 });

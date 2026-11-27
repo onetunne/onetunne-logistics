@@ -1,7 +1,8 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Form,
   useActionData,
+  useFetcher,
   useLoaderData,
   useLocation,
   useNavigation,
@@ -12,22 +13,33 @@ import { ActionBanner, type ActionResult } from "~/components/action-banner";
 import { useHref } from "~/components/shell";
 import { can, requirePermission } from "~/domain/permissions";
 import { hasKey, useLocale, useT, type TFunction } from "~/i18n";
-import { formatNumber, formatWeight } from "~/lib/format";
+import { DomainError } from "~/lib/errors";
+import { formatDateTime, formatNumber, formatWeight } from "~/lib/format";
+import { writeAudit } from "~/modules/audit/audit.server";
+import { normalizeVariantValue } from "~/modules/packaging/kit-resolution";
 import {
+  collectionModels,
   createKitTemplate,
   deleteKitTemplate,
+  listKitCollectionOptions,
   listKitProductOptions,
   listKitTemplates,
+  listKitVariantAttributes,
+  productModels,
   setKitTemplatesActive,
   updateKitTemplate,
+  type KitAppliesTo,
   type KitLinePer,
 } from "~/modules/packaging/kits.server";
+import { startCollectionsSync } from "~/modules/shopify-sync/collections.server";
+import { currentShop } from "~/modules/shopify-sync/sync.server";
 import { listMaterials } from "~/modules/packaging/materials.server";
 import { findOrderIdByNumber, previewOrderPacking, type OrderPackingPreview } from "~/modules/packaging/preview.server";
 import { getRequestContext } from "~/server/context.server";
 import { formString, toActionError } from "~/server/http.server";
 import {
   Badge,
+  Banner,
   Button,
   Card,
   Checkbox,
@@ -51,9 +63,13 @@ import {
 
 /**
  * «Склад» → «Комплектація» (етап 5, WP «Упаковка»): шаблони — що додається до замовлення (на замовлення) або до
- * кожної одиниці товару (на товар); «колекції/групи» товарів — перелік товарів шаблону з пошуком і фільтрами за
- * моделлю/кольором. Перевірка на замовленні показує матеріали (усі шаблони, що підходять) і запропоновану коробку.
+ * кожної одиниці товару (на товар). Ціль шаблону: усі товари, вибрані товари або колекції Shopify (нові товари
+ * колекції — автоматично) + необов'язковий фільтр за моделлю/кольором варіанта. Правила — kit-resolution.ts.
+ * Перевірка на замовленні показує матеріали (усі шаблони, що підходять) і запропоновану коробку.
  * Дозволи — на сервері (modules/packaging/kits.server.ts): перегляд warehouse.view, зміни warehouse.adjust.
+ *
+ * Вибір товарів/колекцій у формі не обрізається мовчки: призначені завжди в списку, а коли каталог більший за ліміт —
+ * повідомлення й пошук у каталозі (той самий loader з параметром pq/cq через fetcher, стан форми не губиться).
  */
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -61,12 +77,13 @@ const MAX_QUERY_LENGTH = 100;
 const BULK_FORM_ID = "kits-bulk";
 const STATUS_TABS = ["all", "active", "inactive"] as const;
 type StatusTab = (typeof STATUS_TABS)[number];
-const APPLIES = ["all", "products"] as const;
+const APPLIES = ["all", "products", "collections"] as const satisfies readonly KitAppliesTo[];
+const isApplies = (v: string | null): v is KitAppliesTo => v !== null && (APPLIES as readonly string[]).includes(v);
 
 interface Filters {
   q: string;
   status: StatusTab;
-  appliesTo: "all" | "products" | null;
+  appliesTo: KitAppliesTo | null;
   model: string;
   order: string;
 }
@@ -77,7 +94,7 @@ function parseFilters(params: URLSearchParams): Filters {
   return {
     q: (params.get("q") ?? "").trim().slice(0, MAX_QUERY_LENGTH),
     status: status && (STATUS_TABS as readonly string[]).includes(status) ? (status as StatusTab) : "all",
-    appliesTo: applies === "all" || applies === "products" ? applies : null,
+    appliesTo: isApplies(applies) ? applies : null,
     model: (params.get("model") ?? "").trim().slice(0, MAX_QUERY_LENGTH),
     order: (params.get("order") ?? "").trim().slice(0, 40),
   };
@@ -104,19 +121,36 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const filters = parseFilters(params);
   const canEdit = can(ctx.actor, "warehouse.adjust");
   const templates = await listKitTemplates(ctx.db);
-  const assigned = templates.flatMap((t) => t.products.map((p) => p.id));
-  const productOptions = await listKitProductOptions(ctx.db, { includeIds: assigned });
-  const modelsByProduct = new Map(productOptions.map((p) => [p.id, p.models]));
-  const models = [...new Set(productOptions.flatMap((p) => p.models))].sort((a, b) => a.localeCompare(b));
+  const attributes = await listKitVariantAttributes(ctx.db);
+  const [modelsByProduct, modelsByCollection] = await Promise.all([
+    productModels(ctx.db, templates.flatMap((t) => t.products.map((p) => p.id))),
+    collectionModels(ctx.db, templates.flatMap((t) => t.collections.map((c) => c.id))),
+  ]);
+  const models = [...new Set([...attributes.models, ...templates.flatMap((t) => t.models)])].sort((a, b) => a.localeCompare(b));
 
   const q = lower(filters.q);
+  const model = normalizeVariantValue(filters.model);
+  const hasModel = (values: readonly string[] | undefined) => (values ?? []).some((v) => normalizeVariantValue(v) === model);
   const visible = templates.filter((tpl) => {
     if (filters.status === "active" && !tpl.active) return false;
     if (filters.status === "inactive" && tpl.active) return false;
     if (filters.appliesTo && tpl.appliesTo !== filters.appliesTo) return false;
-    if (filters.model && tpl.appliesTo === "products" && !tpl.products.some((p) => modelsByProduct.get(p.id)?.includes(filters.model))) return false;
+    if (model) {
+      // Фільтр моделі шаблону — головний; без нього: «усі товари» підходять будь-якій моделі, інакше — моделі цілі.
+      if (tpl.models.length > 0) {
+        if (!hasModel(tpl.models)) return false;
+      } else if (tpl.appliesTo === "products" && !tpl.products.some((p) => hasModel(modelsByProduct.get(p.id)))) return false;
+      else if (tpl.appliesTo === "collections" && !tpl.collections.some((c) => hasModel(modelsByCollection.get(c.id)))) return false;
+    }
     if (q) {
-      const haystack = [tpl.name, ...tpl.lines.flatMap((l) => [l.materialName, l.materialCode]), ...tpl.products.map((p) => p.title)].map(lower);
+      const haystack = [
+        tpl.name,
+        ...tpl.lines.flatMap((l) => [l.materialName, l.materialCode]),
+        ...tpl.products.map((p) => p.title),
+        ...tpl.collections.map((c) => c.title),
+        ...tpl.models,
+        ...tpl.colors,
+      ].map(lower);
       if (!haystack.some((h) => h.includes(q))) return false;
     }
     return true;
@@ -125,7 +159,17 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const editParam = params.get("edit");
   const editing = canEdit && editParam && UUID_RE.test(editParam) ? (templates.find((t) => t.id === editParam) ?? null) : null;
   const creating = canEdit && editParam === "new";
-  const materials = canEdit && (editing || creating) ? (await listMaterials(ctx.db, { activity: "all" })).rows : [];
+  const editorOpen = Boolean(editing || creating);
+  const materials = editorOpen ? (await listMaterials(ctx.db, { activity: "all" })).rows : [];
+  // Вибір у формі: призначені шаблону — завжди; решта — до ліміту, з пошуком у каталозі (pq / cq).
+  const productQuery = (params.get("pq") ?? "").trim().slice(0, MAX_QUERY_LENGTH);
+  const collectionQuery = (params.get("cq") ?? "").trim().slice(0, MAX_QUERY_LENGTH);
+  const [productPage, collectionPage] = editorOpen
+    ? await Promise.all([
+        listKitProductOptions(ctx.db, { includeIds: editing?.products.map((p) => p.id) ?? [], query: productQuery }),
+        listKitCollectionOptions(ctx.db, { includeIds: editing?.collections.map((c) => c.id) ?? [], query: collectionQuery }),
+      ])
+    : [null, null];
 
   // Перевірка на замовленні: матеріали комплектації й запропонована коробка (потрібен і перегляд замовлень).
   let check: ({ found: true; query: string } & OrderPackingPreview) | { found: false; query: string } | null = null;
@@ -133,6 +177,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const order = await findOrderIdByNumber(ctx.db, filters.order);
     check = order ? { found: true, query: filters.order, ...(await previewOrderPacking(ctx.db, order.id)) } : { found: false, query: filters.order };
   }
+
+  // Стан синхронізації колекцій (робочий режим): коли востаннє повністю синхронізовано; кнопка — для warehouse.adjust.
+  const shop = ctx.mode === "production" ? await currentShop(ctx.db) : null;
 
   return {
     filters,
@@ -149,7 +196,19 @@ export async function loader({ request }: LoaderFunctionArgs) {
     canEdit,
     canCheckOrders: can(ctx.actor, "orders.view"),
     materials: materials.map((m) => ({ id: m.id, code: m.code, name: m.name, kind: m.kind, unit: m.unit, active: m.active })),
-    productOptions: canEdit && (editing || creating) ? productOptions : [],
+    productOptions: productPage?.options ?? [],
+    productOptionsInfo: productPage ? { total: productPage.total, truncated: productPage.truncated, limit: productPage.limit, query: productQuery } : null,
+    collectionOptions: collectionPage?.options ?? [],
+    collectionOptionsInfo: collectionPage
+      ? { total: collectionPage.total, truncated: collectionPage.truncated, limit: collectionPage.limit, query: collectionQuery }
+      : null,
+    variantAttributes: editorOpen ? attributes : { models: [], colors: [] },
+    collectionsSync: {
+      mode: ctx.mode,
+      connected: Boolean(shop),
+      syncedAt: shop?.collectionsSyncedAt ?? null,
+      canSync: canEdit && ctx.mode === "production" && Boolean(shop),
+    },
     check,
   };
 }
@@ -170,11 +229,14 @@ function kitFormInput(form: FormData) {
   return {
     input: {
       name: formString(form, "name"),
-      appliesTo: formString(form, "appliesTo") as "all" | "products",
+      appliesTo: formString(form, "appliesTo") as KitAppliesTo,
       priority: formString(form, "priority"),
       active: form.has("active"),
       lines: kept.map(({ materialId, quantity, per }) => ({ materialId, quantity, per })),
       productIds: form.getAll("productIds").map(String),
+      collectionIds: form.getAll("collectionIds").map(String),
+      models: form.getAll("models").map(String),
+      colors: form.getAll("colors").map(String),
     },
     lineIndex: kept.map((l) => l.index),
   };
@@ -218,6 +280,16 @@ export async function action({ request }: ActionFunctionArgs): Promise<KitsActio
       if (!UUID_RE.test(id)) return { ok: false, intent, error: "error.notFound" };
       await deleteKitTemplate(ctx, id);
       return { ok: true, intent, message: "packaging.kits.result.deleted" };
+    }
+    if (intent === "syncCollections") {
+      // Повна синхронізація колекцій з Shopify (лише робочий режим; та сама, що після повної синхронізації товарів).
+      requirePermission(ctx.actor, "warehouse.adjust");
+      if (ctx.mode !== "production") throw new DomainError("shopify.demoUnavailable", 409);
+      const shop = await currentShop(ctx.db);
+      if (!shop) throw new DomainError("shopify.notInstalled", 409);
+      await startCollectionsSync(ctx.db, shop.shop);
+      await writeAudit(ctx.db, ctx.actor, "shopify.collections_sync_requested", { type: "shop", id: shop.shop });
+      return { ok: true, intent, message: "packaging.kits.result.collectionsQueued" };
     }
     if (intent === "setActive") {
       const ids = form.getAll("templateIds").filter((v): v is string => typeof v === "string" && UUID_RE.test(v));
@@ -280,22 +352,7 @@ export default function KitsPage() {
     {
       key: "applies",
       header: t("packaging.kits.col.appliesTo"),
-      render: (r) => (
-        <Stack gap={1}>
-          <Text as="span" variant="body-sm">
-            {r.appliesTo === "all" ? t("packaging.kits.appliesTo.all") : t("packaging.kits.appliesTo.productsCount", { count: r.products.length })}
-          </Text>
-          {r.appliesTo === "products" && r.products.length > 0 ? (
-            <Text as="span" variant="caption" tone="subdued">
-              {r.products
-                .slice(0, 3)
-                .map((p) => p.title)
-                .join(", ")}
-              {r.products.length > 3 ? ` +${r.products.length - 3}` : ""}
-            </Text>
-          ) : null}
-        </Stack>
-      ),
+      render: (r) => <AppliesSummary row={r} />,
     },
     {
       key: "lines",
@@ -351,12 +408,19 @@ export default function KitsPage() {
             template={data.editing}
             materials={data.materials}
             products={data.productOptions}
+            productsInfo={data.productOptionsInfo}
+            collections={data.collectionOptions}
+            collectionsInfo={data.collectionOptionsInfo}
+            attributes={data.variantAttributes}
+            searchHref={`${basePath}?edit=${data.editing?.id ?? "new"}`}
             closeHref={closeHref}
             result={actionData && !actionData.ok && isFormIntent ? actionData : null}
             busy={busyIntent === "createKit" || busyIntent === "updateKit"}
             deleting={busyIntent === "deleteKit"}
           />
         ) : null}
+
+        <CollectionsSyncCard sync={data.collectionsSync} busy={busyIntent === "syncCollections"} />
 
         <Tabs items={tabs} selected={filters.status} ariaLabel={t("packaging.kits.tabsLabel")} />
 
@@ -587,10 +651,182 @@ interface EditorLine {
   per: KitLinePer;
 }
 
+type ProductOption = Data["productOptions"][number];
+type CollectionOption = Data["collectionOptions"][number];
+type OptionsInfo = NonNullable<Data["productOptionsInfo"]>;
+
+/** «Застосовується до» у списку: ціль, перші назви, фільтр моделі/кольору, попередження про видалені колекції. */
+function AppliesSummary({ row }: { row: Row }) {
+  const t = useT();
+  const names = (titles: string[]) => `${titles.slice(0, 3).join(", ")}${titles.length > 3 ? ` +${titles.length - 3}` : ""}`;
+  const deleted = row.collections.filter((c) => c.deleted).length;
+  const filter = [...row.models, ...row.colors];
+  return (
+    <Stack gap={1}>
+      <Text as="span" variant="body-sm">
+        {row.appliesTo === "all"
+          ? t("packaging.kits.appliesTo.all")
+          : row.appliesTo === "products"
+            ? t("packaging.kits.appliesTo.productsCount", { count: row.products.length })
+            : t("packaging.kits.appliesTo.collectionsCount", { count: row.collections.length })}
+      </Text>
+      {row.appliesTo === "products" && row.products.length > 0 ? (
+        <Text as="span" variant="caption" tone="subdued">
+          {names(row.products.map((p) => p.title))}
+        </Text>
+      ) : null}
+      {row.appliesTo === "collections" && row.collections.length > 0 ? (
+        <Text as="span" variant="caption" tone="subdued">
+          {names(row.collections.map((c) => c.title))}
+        </Text>
+      ) : null}
+      {filter.length > 0 ? (
+        <Text as="span" variant="caption">
+          {t("packaging.kits.variantFilter.summary", { values: filter.join(", ") })}
+        </Text>
+      ) : null}
+      {row.appliesTo === "collections" && deleted > 0 ? (
+        <Text as="span" variant="caption" tone="warning">
+          {t("packaging.kits.collectionsDeletedCount", { count: deleted })}
+        </Text>
+      ) : null}
+    </Stack>
+  );
+}
+
+/** Звідки беруться колекції: демо — вигадані; робочий режим — синхронізація з Shopify (і кнопка для власника). */
+function CollectionsSyncCard({ sync, busy }: { sync: Data["collectionsSync"]; busy: boolean }) {
+  const t = useT();
+  const locale = useLocale();
+  if (sync.mode !== "production") {
+    return (
+      <Text variant="body-sm" tone="subdued">
+        {t("packaging.kits.sync.demo")}
+      </Text>
+    );
+  }
+  return (
+    <Card>
+      <Stack direction="horizontal" gap={3} align="center" justify="between">
+        <Stack gap={1}>
+          <Text weight="semibold">{t("packaging.kits.sync.title")}</Text>
+          <Text variant="body-sm" tone="subdued">
+            {sync.syncedAt ? t("packaging.kits.sync.syncedAt", { date: formatDateTime(sync.syncedAt, locale) }) : t("packaging.kits.sync.never")}
+          </Text>
+          <Text variant="caption" tone="subdued">
+            {t("packaging.kits.sync.help")}
+          </Text>
+        </Stack>
+        {sync.canSync ? (
+          <Form method="post">
+            <input type="hidden" name="intent" value="syncCollections" />
+            <Button type="submit" loading={busy}>
+              {t("packaging.kits.sync.button")}
+            </Button>
+          </Form>
+        ) : null}
+      </Stack>
+    </Card>
+  );
+}
+
+/** Об'єднання варіантів вибору: початкові (з призначеними) + знайдені пошуком у каталозі; порядок — за назвою. */
+function mergeOptions<T extends { id: string; title: string }>(base: readonly T[], extra: ReadonlyMap<string, T>): T[] {
+  const byId = new Map(base.map((o) => [o.id, o]));
+  for (const [id, o] of extra) if (!byId.has(id)) byId.set(id, o);
+  return [...byId.values()].sort((a, b) => a.title.localeCompare(b.title) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+/** Повідомлення «показано не всі» + пошук у каталозі (на сервері, без втрати стану форми). */
+function CatalogSearch({
+  info,
+  shown,
+  query,
+  loading,
+  onSearch,
+}: {
+  info: OptionsInfo | null;
+  shown: number;
+  query: string;
+  loading: boolean;
+  onSearch: () => void;
+}) {
+  const t = useT();
+  if (!info?.truncated) return null;
+  return (
+    <Banner tone="warning">
+      <Stack gap={2}>
+        <Text variant="body-sm">{t("packaging.kits.optionsTruncated", { shown, total: info.total })}</Text>
+        <div>
+          <Button size="sm" onClick={onSearch} disabled={!query.trim()} loading={loading}>
+            {t("packaging.kits.searchCatalog")}
+          </Button>
+        </div>
+      </Stack>
+    </Banner>
+  );
+}
+
+/** Групи прапорців фільтра моделі/кольору (значення шаблону, яких уже немає в каталозі, теж показуються). */
+function VariantFilter({ template, attributes }: { template: Row | null; attributes: Data["variantAttributes"] }) {
+  const t = useT();
+  const groups = (
+    [
+      ["models", attributes.models, template?.models ?? []],
+      ["colors", attributes.colors, template?.colors ?? []],
+    ] as const
+  ).map(([name, catalog, saved]) => {
+    const known = new Set(catalog.map(normalizeVariantValue));
+    return { name, values: [...catalog, ...saved.filter((v) => !known.has(normalizeVariantValue(v)))], saved: new Set(saved.map(normalizeVariantValue)) };
+  });
+  const active = (template?.models.length ?? 0) + (template?.colors.length ?? 0);
+  return (
+    <Disclosure
+      defaultOpen={active > 0}
+      summary={active > 0 ? t("packaging.kits.variantFilter.titleActive", { count: active }) : t("packaging.kits.variantFilter.title")}
+    >
+      <Stack gap={3}>
+        <Text variant="body-sm" tone="subdued">
+          {t("packaging.kits.variantFilter.help")}
+        </Text>
+        {groups.every((g) => g.values.length === 0) ? <Text tone="subdued">{t("packaging.kits.variantFilter.none")}</Text> : null}
+        <Grid columns={{ xs: 1, md: 2 }} gap={3}>
+          {groups.map((g) =>
+            g.values.length > 0 ? (
+              <fieldset key={g.name} style={{ border: 0, margin: 0, padding: 0, minWidth: 0, display: "grid", gap: "4px" }}>
+                <legend style={{ padding: 0, marginBottom: "4px" }}>
+                  <Text as="span" variant="body-sm" weight="semibold">
+                    {t(`packaging.kits.variantFilter.${g.name}`)}
+                  </Text>
+                </legend>
+                {g.values.map((v, i) => (
+                  <Checkbox
+                    key={v}
+                    id={`kit-${g.name}-${i}`}
+                    name={g.name}
+                    value={v}
+                    defaultChecked={g.saved.has(normalizeVariantValue(v))}
+                    label={v}
+                  />
+                ))}
+              </fieldset>
+            ) : null,
+          )}
+        </Grid>
+      </Stack>
+    </Disclosure>
+  );
+}
+
 function KitForm({
   template,
   materials,
-  products,
+  products: initialProducts,
+  productsInfo,
+  collections: initialCollections,
+  collectionsInfo,
+  attributes,
+  searchHref,
   closeHref,
   result,
   busy,
@@ -599,6 +835,11 @@ function KitForm({
   template: Row | null;
   materials: Data["materials"];
   products: Data["productOptions"];
+  productsInfo: Data["productOptionsInfo"];
+  collections: Data["collectionOptions"];
+  collectionsInfo: Data["collectionOptionsInfo"];
+  attributes: Data["variantAttributes"];
+  searchHref: string;
   closeHref: string;
   result: KitsActionResult | null;
   busy: boolean;
@@ -607,16 +848,36 @@ function KitForm({
   const t = useT();
   const fieldError = fieldErrorFn(t, result);
   const nextKey = useRef(1000);
-  const [appliesTo, setAppliesTo] = useState<"all" | "products">(template?.appliesTo ?? "all");
+  const [appliesTo, setAppliesTo] = useState<KitAppliesTo>(template?.appliesTo ?? "all");
   const [lines, setLines] = useState<EditorLine[]>(() =>
     template && template.lines.length > 0
       ? template.lines.map((l, i) => ({ key: i, materialId: l.materialId, quantity: String(l.quantity), per: l.per }))
       : [{ key: 0, materialId: "", quantity: "1", per: "order" }],
   );
   const [chosen, setChosen] = useState<Set<string>>(() => new Set(template?.products.map((p) => p.id) ?? []));
+  const [chosenCollections, setChosenCollections] = useState<Set<string>>(() => new Set(template?.collections.map((c) => c.id) ?? []));
   const [search, setSearch] = useState("");
+  const [collectionSearch, setCollectionSearch] = useState("");
   const [model, setModel] = useState("");
   const [color, setColor] = useState("");
+
+  // Пошук у каталозі поза лімітом списку: той самий loader (pq / cq), знайдене додається до списку вибору.
+  const productFetcher = useFetcher<typeof loader>();
+  const collectionFetcher = useFetcher<typeof loader>();
+  const [foundProducts, setFoundProducts] = useState<Map<string, ProductOption>>(() => new Map());
+  const [foundCollections, setFoundCollections] = useState<Map<string, CollectionOption>>(() => new Map());
+  useEffect(() => {
+    const found = productFetcher.data?.productOptions;
+    if (found) setFoundProducts((prev) => new Map([...prev, ...found.map((o) => [o.id, o] as const)]));
+  }, [productFetcher.data]);
+  useEffect(() => {
+    const found = collectionFetcher.data?.collectionOptions;
+    if (found) setFoundCollections((prev) => new Map([...prev, ...found.map((o) => [o.id, o] as const)]));
+  }, [collectionFetcher.data]);
+  const products = useMemo(() => mergeOptions(initialProducts, foundProducts), [initialProducts, foundProducts]);
+  const collectionOptions = useMemo(() => mergeOptions(initialCollections, foundCollections), [initialCollections, foundCollections]);
+  const productIdsShown = new Set(products.map((p) => p.id));
+  const collectionIdsShown = new Set(collectionOptions.map((c) => c.id));
 
   const models = useMemo(() => [...new Set(products.flatMap((p) => p.models))].sort((a, b) => a.localeCompare(b)), [products]);
   const colors = useMemo(() => [...new Set(products.flatMap((p) => p.colors))].sort((a, b) => a.localeCompare(b)), [products]);
@@ -629,6 +890,10 @@ function KitForm({
         .map((p) => p.id),
     );
   }, [products, search, model, color]);
+  const visibleCollectionIds = useMemo(() => {
+    const q = lower(collectionSearch.trim());
+    return new Set(collectionOptions.filter((c) => !q || [c.title, c.handle ?? ""].some((v) => lower(v).includes(q))).map((c) => c.id));
+  }, [collectionOptions, collectionSearch]);
 
   const materialOptions = materials
     .filter((m) => m.active || lines.some((l) => l.materialId === m.id))
@@ -637,6 +902,13 @@ function KitForm({
       label: `${m.name} (${m.code})${m.active ? "" : ` — ${t("packaging.kits.materialInactive")}`}`,
     }));
   const updateLine = (key: number, patch: Partial<EditorLine>) => setLines((prev) => prev.map((l) => (l.key === key ? { ...l, ...patch } : l)));
+  const toggle = (setter: typeof setChosen, id: string, on: boolean) =>
+    setter((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(id);
+      else next.delete(id);
+      return next;
+    });
 
   return (
     <Card
@@ -677,11 +949,17 @@ function KitForm({
                 label={t("packaging.kits.col.appliesTo")}
                 options={APPLIES.map((a) => ({ value: a, label: t(`packaging.kits.appliesTo.${a}`) }))}
                 value={appliesTo}
-                onChange={(e) => setAppliesTo(e.currentTarget.value === "products" ? "products" : "all")}
+                onChange={(e) => {
+                  const v = e.currentTarget.value;
+                  setAppliesTo(isApplies(v) ? v : "all");
+                }}
                 helpText={t(`packaging.kits.appliesToHelp.${appliesTo}`)}
               />
             </FormLayout>
             <Checkbox id="kit-active" name="active" label={t("packaging.kits.field.active")} defaultChecked={template?.active ?? true} />
+            <Text variant="caption" tone="subdued">
+              {t("packaging.kits.precedenceHelp")}
+            </Text>
 
             <Stack gap={3}>
               <Text as="h3" variant="heading-sm">
@@ -751,6 +1029,9 @@ function KitForm({
                   {t("packaging.kits.field.products", { count: chosen.size })}
                 </Text>
                 {fieldError("productIds") ? <Text tone="critical">{fieldError("productIds")}</Text> : null}
+                <Text variant="caption" tone="subdued">
+                  {t("packaging.kits.productPickerHelp")}
+                </Text>
                 <Grid columns={{ xs: 1, md: 3 }} gap={2}>
                   <TextField
                     id="kit-products-search"
@@ -760,6 +1041,7 @@ function KitForm({
                     placeholder={t("packaging.kits.productSearchPlaceholder")}
                     value={search}
                     onChange={(e) => setSearch(e.currentTarget.value)}
+                    maxLength={MAX_QUERY_LENGTH}
                     autoComplete="off"
                   />
                   <Select
@@ -781,6 +1063,13 @@ function KitForm({
                     onChange={(e) => setColor(e.currentTarget.value)}
                   />
                 </Grid>
+                <CatalogSearch
+                  info={productsInfo}
+                  shown={initialProducts.length}
+                  query={search}
+                  loading={productFetcher.state !== "idle"}
+                  onSearch={() => productFetcher.load(`${searchHref}&pq=${encodeURIComponent(search.trim())}`)}
+                />
                 <Stack direction="horizontal" gap={2}>
                   <Button size="sm" onClick={() => setChosen((prev) => new Set([...prev, ...visibleIds]))} disabled={visibleIds.size === 0}>
                     {t("packaging.kits.selectVisible", { count: visibleIds.size })}
@@ -789,6 +1078,12 @@ function KitForm({
                     {t("packaging.kits.clearVisible")}
                   </Button>
                 </Stack>
+                {/* Вибране, якого немає в списку (не повинно траплятися), усе одно надсилається — шаблон не втрачає товарів. */}
+                {[...chosen]
+                  .filter((id) => !productIdsShown.has(id))
+                  .map((id) => (
+                    <input key={id} type="hidden" name="productIds" value={id} />
+                  ))}
                 <Stack as="ul" gap={1}>
                   {products.map((p) => (
                     <li key={p.id} hidden={!visibleIds.has(p.id)}>
@@ -799,15 +1094,7 @@ function KitForm({
                           name="productIds"
                           value={p.id}
                           checked={chosen.has(p.id)}
-                          onChange={(e) => {
-                            const on = e.currentTarget.checked;
-                            setChosen((prev) => {
-                              const next = new Set(prev);
-                              if (on) next.add(p.id);
-                              else next.delete(p.id);
-                              return next;
-                            });
-                          }}
+                          onChange={(e) => toggle(setChosen, p.id, e.currentTarget.checked)}
                           label={
                             <Stack as="span" gap={0}>
                               <span>{p.title}</span>
@@ -826,6 +1113,70 @@ function KitForm({
                 {visibleIds.size === 0 ? <Text tone="subdued">{t("packaging.kits.noProducts")}</Text> : null}
               </Stack>
             ) : null}
+
+            {appliesTo === "collections" ? (
+              <Stack gap={3}>
+                <Text as="h3" variant="heading-sm">
+                  {t("packaging.kits.field.collections", { count: chosenCollections.size })}
+                </Text>
+                {fieldError("collectionIds") ? <Text tone="critical">{fieldError("collectionIds")}</Text> : null}
+                <Text variant="caption" tone="subdued">
+                  {t("packaging.kits.collectionPickerHelp")}
+                </Text>
+                {collectionOptions.length === 0 ? (
+                  <Text tone="subdued">{t("packaging.kits.collectionsNoneYet")}</Text>
+                ) : (
+                  <TextField
+                    id="kit-collections-search"
+                    name="collectionSearch"
+                    type="search"
+                    label={t("common.search")}
+                    placeholder={t("packaging.kits.collectionSearchPlaceholder")}
+                    value={collectionSearch}
+                    onChange={(e) => setCollectionSearch(e.currentTarget.value)}
+                    maxLength={MAX_QUERY_LENGTH}
+                    autoComplete="off"
+                  />
+                )}
+                <CatalogSearch
+                  info={collectionsInfo}
+                  shown={initialCollections.length}
+                  query={collectionSearch}
+                  loading={collectionFetcher.state !== "idle"}
+                  onSearch={() => collectionFetcher.load(`${searchHref}&cq=${encodeURIComponent(collectionSearch.trim())}`)}
+                />
+                {[...chosenCollections]
+                  .filter((id) => !collectionIdsShown.has(id))
+                  .map((id) => (
+                    <input key={id} type="hidden" name="collectionIds" value={id} />
+                  ))}
+                <Stack as="ul" gap={1}>
+                  {collectionOptions.map((c) => (
+                    <li key={c.id} hidden={!visibleCollectionIds.has(c.id)}>
+                      <Checkbox
+                        id={`kit-collection-${c.id}`}
+                        name="collectionIds"
+                        value={c.id}
+                        checked={chosenCollections.has(c.id)}
+                        onChange={(e) => toggle(setChosenCollections, c.id, e.currentTarget.checked)}
+                        label={
+                          <Stack as="span" gap={0}>
+                            <span>{c.title}</span>
+                            <Text as="span" variant="caption" tone={c.deleted ? "warning" : "subdued"}>
+                              {c.deleted ? t("packaging.kits.collectionDeleted") : t("packaging.kits.collectionProducts", { count: c.productsCount })}
+                            </Text>
+                          </Stack>
+                        }
+                      />
+                    </li>
+                  ))}
+                </Stack>
+                {collectionOptions.length > 0 && visibleCollectionIds.size === 0 ? <Text tone="subdued">{t("packaging.kits.noCollections")}</Text> : null}
+              </Stack>
+            ) : null}
+
+            <VariantFilter template={template} attributes={attributes} />
+            {fieldError("models") || fieldError("colors") ? <Text tone="critical">{fieldError("models") ?? fieldError("colors")}</Text> : null}
 
             <Stack direction="horizontal" gap={2}>
               <Button type="submit" variant="primary" loading={busy}>

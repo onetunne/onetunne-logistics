@@ -32,7 +32,7 @@ import { displayVariantTitle } from "~/modules/warehouse/constants";
 import { businessDate, businessDayEnd, businessDayStart } from "~/modules/warehouse/dates";
 import type { ServiceContext } from "~/server/types";
 import { resolvePeriod, roundTo, type ResolvedPeriod } from "./calc";
-import { buildCsv, csvDecimal, csvFileName, type CsvColumn, type CsvSeparatorKey } from "./csv";
+import { buildCsv, csvAmount, csvDecimal, csvFileName, type CsvColumn, type CsvSeparatorKey } from "./csv";
 import { MAX_EXPORT_MOVEMENTS } from "./export-contract";
 import type { ExportDataset } from "./params";
 import {
@@ -65,12 +65,13 @@ export interface ExportRequest {
   filters?: AnalyticsFilters;
 }
 
+/** Суми — CsvDecimal: у файлі з «;» (Excel uk/EU) — з десятковою комою, з «,» — з крапкою (csv.ts). */
 const costColumns = <T>(withCosts: boolean, pick: (row: T) => { unitCost: string; currency: string } | null, value?: (row: T) => string | null): CsvColumn<T>[] =>
   withCosts
     ? [
-        { header: "unit_cost", value: (r) => pick(r)?.unitCost ?? null },
+        { header: "unit_cost", value: (r) => csvAmount(pick(r)?.unitCost) },
         { header: "cost_currency", value: (r) => pick(r)?.currency ?? null },
-        ...(value ? [{ header: "stock_value", value } as CsvColumn<T>] : []),
+        ...(value ? [{ header: "stock_value", value: (r: T) => csvAmount(value(r)) } as CsvColumn<T>] : []),
       ]
     : [];
 

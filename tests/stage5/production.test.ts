@@ -34,7 +34,7 @@ import {
   statusAfterReceipt,
 } from "~/modules/production/calc";
 import { ProductionValidationError } from "~/modules/production/errors";
-import { getBatchDetail, listBatchFilterOptions, listBatches, loadVariantGrid, openProductionByVariant } from "~/modules/production/queries.server";
+import { countProductionDue, getBatchDetail, listBatchFilterOptions, listBatches, loadVariantGrid, openProductionByVariant } from "~/modules/production/queries.server";
 import { OWNER, STAFF, createTestEnv, type TestEnv } from "../helpers";
 import { balance, insertProduct, movementCount } from "./helpers";
 
@@ -653,5 +653,22 @@ describe("list, filters and open production", () => {
     expect(open).toEqual([{ variantId: other.variantIds[0]!, inProduction: 0, planned: 3, nextReadyDate: "2020-05-01", batchIds: [bag.batchId] }]);
     await startProduction(env.ctx(OWNER), bag.batchId, 1);
     expect((await openProductionByVariant(db(), [other.variantIds[0]!]))[0]).toMatchObject({ inProduction: 3, planned: 0 });
+  });
+});
+
+describe("countProductionDue (dashboard)", () => {
+  it("counts active, overdue and due-soon batches by the planned ready date", async () => {
+    const [soonBefore, lateBefore] = [await countProductionDue(db(), "2031-06-10"), await countProductionDue(db(), "2031-06-13")];
+    const { batchId } = await createBatch(env.ctx(OWNER), input({ plannedReadyDate: "2031-06-12" }));
+    const soon = await countProductionDue(db(), "2031-06-10");
+    expect(soon.active).toBe(soonBefore.active + 1);
+    expect(soon.dueSoon).toBe(soonBefore.dueSoon + 1);
+    expect(soon.overdue).toBe(soonBefore.overdue);
+    const late = await countProductionDue(db(), "2031-06-13");
+    expect(late.overdue).toBe(lateBefore.overdue + 1);
+    expect(late.dueSoon).toBe(lateBefore.dueSoon);
+    // Скасована партія не рахується.
+    await cancelBatch(env.ctx(OWNER), batchId, (await batchRow(batchId)).version);
+    expect(await countProductionDue(db(), "2031-06-13")).toEqual(lateBefore);
   });
 });

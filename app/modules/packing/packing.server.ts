@@ -17,32 +17,33 @@
  * - Журнал (audit_log) — лише ідентифікатори й коди; вільний текст (причина рішення власника) — лише в історії
  *   замовлення (shipment_events.message, з маскуванням телефонів/email).
  */
-import { and, count, desc, eq, inArray, max, sql } from "drizzle-orm";
+import { and, count, eq, inArray, max, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { DbOrTx, Tx } from "~/db/client.server";
 import {
   inventoryMovements,
+  issues,
   orderChanges,
   orderPacking,
   orders,
   packagingMaterials,
   productVariants,
   products,
-  shipmentEvents,
   shipments,
   type OrderPriority,
 } from "~/db/schema";
-import { isShipped, type OrderStatus } from "~/domain/order-status";
+import { isFulfilledInShopify, isShipped, type OrderStatus } from "~/domain/order-status";
 import { requirePermission } from "~/domain/permissions";
 import { ConflictError, DomainError, NotFoundError } from "~/lib/errors";
 import { redact } from "~/lib/logger.server";
 import { writeAudit } from "~/modules/audit/audit.server";
-import { effectiveLineQuantity } from "~/modules/inventory/quantities";
 import { loadLineItems, loadOrderRow, type LineItemWithVariant, type OrderRow, type ShipmentRow } from "~/modules/orders/repository.server";
 import { BOX_KINDS } from "~/modules/packaging/box-selection";
 import { consumeMaterialsForPacking, type ConsumeMaterialsResult } from "~/modules/packaging/consumption.server";
 import { selectBoxForOrder } from "~/modules/packaging/parcel.server";
 import { ACTIVE_SHIPMENT_STATUSES, findActiveShipment } from "~/modules/shipments/waybill.server";
+import { enqueueOrderResync, shopifyLinesPending, type ResyncQueueResult } from "~/modules/shopify-sync/pending-lines.server";
+import { addPackingEvent, ORDER_CANCELLED_AFTER_PACKING, toChecklistLines } from "./lifecycle.server";
 import type { ServiceContext } from "~/server/types";
 import {
   ACTIVE_PACKING_STATUSES,
@@ -57,7 +58,7 @@ import {
   type PackingEventType,
 } from "./constants";
 import { compareParcels, dimsOf, waybillParcel, type ParcelMeasure, type ParcelMismatch } from "./parcel-compare";
-import { adjustChecklist, applyScan, checklistProgress, codeKey, normalizeScanCode, type ChecklistLine, type ChecklistProgress } from "./scan";
+import { adjustChecklist, applyScan, checklistProgress, codeKey, normalizeScanCode, type ChecklistProgress } from "./scan";
 
 export type PackingRow = typeof orderPacking.$inferSelect;
 
@@ -84,38 +85,39 @@ export async function loadActivePacking(db: DbOrTx, orderId: string, opts: { loc
   return row ?? null;
 }
 
-/** Позиції чекліста: лише товари з варіантом (довільні позиції без товару не пакуються — як у «Упаковці»). */
-export function toChecklistLines(items: readonly LineItemWithVariant[]): ChecklistLine[] {
-  return items
-    .filter((i) => i.variant !== null)
-    .map((i) => ({
-      id: i.id,
-      variantId: i.variant!.id,
-      sku: i.variant!.sku ?? i.sku,
-      barcode: i.variant!.barcode,
-      required: effectiveLineQuantity(i),
-    }));
+export { toChecklistLines };
+
+/**
+ * Накладна, з якою можна пакувати: створена, ще не передана перевізнику й не видалена у перевізника (відстеження
+ * повідомило «скасовано» — CARRIER_SHIPMENT_DELETED: з «мертвою» етикеткою посилку не передати).
+ * Той самий предикат — в екрані пакування, картці замовлення й черзі (SQL — packableShipmentSql у queue.server.ts).
+ */
+export function isPackableShipment(
+  s: Pick<ShipmentRow, "status" | "waybillNumber" | "handedOverAt" | "trackingStatus"> | null,
+): s is ShipmentRow {
+  return Boolean(s && s.status === "created" && s.waybillNumber && !s.handedOverAt && s.trackingStatus !== "cancelled");
 }
 
-/** Накладна, з якою можна пакувати: створена й ще не передана перевізнику. */
-function isPackableShipment(s: ShipmentRow | null): s is ShipmentRow {
-  return Boolean(s && s.status === "created" && s.waybillNumber && !s.handedOverAt);
+/** Накладну видалено у перевізника (відстеження: «скасовано», посилку ще не передано). */
+export function isDeletedAtCarrier(s: Pick<ShipmentRow, "status" | "handedOverAt" | "trackingStatus"> | null): boolean {
+  return Boolean(s && s.status === "created" && !s.handedOverAt && s.trackingStatus === "cancelled");
 }
 
-/** Подія пакування в історії замовлення (події активної накладної; без неї — останньої накладної замовлення). */
-async function addPackingEvent(
-  tx: DbOrTx,
-  orderId: string,
-  type: PackingEventType,
-  data: Record<string, unknown>,
-  message: string | null = null,
-): Promise<void> {
-  const active = await findActiveShipment(tx, orderId);
-  const shipmentId =
-    active?.id ??
-    (await tx.select({ id: shipments.id }).from(shipments).where(eq(shipments.orderId, orderId)).orderBy(desc(shipments.createdAt)).limit(1))[0]?.id;
-  if (!shipmentId) return;
-  await tx.insert(shipmentEvents).values({ shipmentId, type, message, data });
+/**
+ * Блокування пакування станом синхронізації з Shopify (під блокуванням рядка замовлення):
+ * - замовлення вже виконане (частково) в Shopify поза застосунком → пакувати не можна нікому (повторне відправлення;
+ *   шлях — скасувати накладну й «Відправлено поза застосунком»);
+ * - Shopify змінив позиції, а застосунок їх ще не застосував (orders.shopify_lines_pending_at) → чекліст зі старими
+ *   кількостями: лише власник (почати — бачачи попередження; «Запаковано» — з причиною), інакше
+ *   packing.error.shopifyLinesPending. Шлях — скасувати накладну (застосунок перечитає замовлення з Shopify).
+ */
+function assertShopifyAllowsPacking(order: OrderRow, actor: ServiceContext["actor"], ownerDecision: boolean): void {
+  if (isFulfilledInShopify(order.fulfillmentStatus)) {
+    throw new DomainError("packing.error.fulfilledInShopify", 409, { fulfillment: order.fulfillmentStatus ?? "" });
+  }
+  if (shopifyLinesPending(order) && !(ownerDecision && actor.role === "owner")) {
+    throw new DomainError("packing.error.shopifyLinesPending", 409);
+  }
 }
 
 /** Перехід статусу замовлення compare-and-set. false — статус уже інший (паралельний запит). */
@@ -192,7 +194,8 @@ export async function parcelMismatchFor(
   packing: PackingRow | null,
   shipment: ShipmentRow | null,
 ): Promise<ParcelMismatch | null> {
-  if (!shipment || shipment.status !== "created") return null;
+  // Після фактичної передачі перевізнику переоформити вже не можна — порада «переоформіть до передачі» хибна.
+  if (!shipment || shipment.status !== "created" || shipment.handedOverAt || isShipped(order.status)) return null;
   return compareParcels(waybillParcel(shipment), await packedParcelOf(db, packing, order));
 }
 
@@ -241,7 +244,11 @@ export async function startPacking(ctx: ServiceContext, orderId: string): Promis
       throw new DomainError("packing.error.status", 409, { status: order.status });
     }
     const shipment = await findActiveShipment(tx, id);
-    if (!isPackableShipment(shipment)) throw new DomainError("packing.error.noWaybill", 409);
+    if (!isPackableShipment(shipment)) {
+      throw new DomainError(isDeletedAtCarrier(shipment) ? "packing.error.deletedAtCarrier" : "packing.error.noWaybill", 409);
+    }
+    // Етап 5: позиції застаріли щодо Shopify / уже виконано в Shopify — власник може почати (бачить попередження).
+    assertShopifyAllowsPacking(order, ctx.actor, true);
     const now = ctx.now();
     let result: StartPackingResult;
     if (!active) {
@@ -647,13 +654,18 @@ export async function confirmPacked(
     if (order.status === "packed") return { kind: "already_packed", packingId: packing?.id ?? null, mismatch: null };
     assertPackingOpen(order, packing);
     if (!Number.isSafeInteger(expectedVersion) || packing.version !== expectedVersion) throw new ConflictError();
-    if (!isPackableShipment(shipment)) throw new DomainError("packing.error.noWaybill", 409);
+    if (!isPackableShipment(shipment)) {
+      throw new DomainError(isDeletedAtCarrier(shipment) ? "packing.error.deletedAtCarrier" : "packing.error.noWaybill", 409);
+    }
+    // Етап 5: неперенесені зміни позицій із Shopify — «Запаковано» лише рішенням власника з причиною.
+    const linesPending = shopifyLinesPending(order);
+    assertShopifyAllowsPacking(order, ctx.actor, Boolean(overrideReason));
 
     const items = await loadLineItems(tx, id);
     const lines = toChecklistLines(items);
     const progress = checklistProgress(lines, packing.checklist ?? {});
-    const override = !progress.complete;
-    if (override && !overrideReason) {
+    const override = !progress.complete || linesPending;
+    if (!progress.complete && !overrideReason) {
       throw new DomainError("packing.error.checklistIncomplete", 409, { packed: progress.packedUnits, required: progress.requiredUnits, over: progress.overUnits });
     }
 
@@ -678,7 +690,13 @@ export async function confirmPacked(
 
     const type: PackingEventType = override ? "packed_override" : "packed";
     const message = override ? String(redact(overrideReason ?? "")).slice(0, MAX_OVERRIDE_REASON_LENGTH) : null;
-    await addPackingEvent(tx, id, type, { packingId: packing.id, packed: progress.packedUnits, required: progress.requiredUnits }, message);
+    await addPackingEvent(
+      tx,
+      id,
+      type,
+      { packingId: packing.id, packed: progress.packedUnits, required: progress.requiredUnits, ...(linesPending ? { shopifyLinesPending: true } : {}) },
+      message,
+    );
     await writeAudit(tx, ctx.actor, override ? "packing.confirmed_override" : "packing.confirmed", { type: "order", id }, {
       packingId: packing.id,
       packedUnits: progress.packedUnits,
@@ -686,6 +704,7 @@ export async function confirmPacked(
       overUnits: progress.overUnits,
       materialsAlreadyConsumed: consumed.alreadyConsumed,
       materialShortage: consumed.totalShortage,
+      ...(linesPending ? { shopifyLinesPendingAcknowledged: true } : {}),
     });
     return {
       kind: "packed",
@@ -711,6 +730,11 @@ export type UnpackResult =
        * після «Запаковано»): лише з цього статусу можна створити нову накладну.
        */
       status: Extract<OrderStatus, "awaiting_picking" | "awaiting_review">;
+      /**
+       * Етап 5: повернуто до «Очікує перевірки», а Shopify змінив позиції під час накладної — поставлено повторне
+       * читання замовлення (як після скасування накладної); undefined — не потрібно.
+       */
+      shopifyResync?: ResyncQueueResult;
     }
   /** Замовлення не запаковане (вже розпаковане паралельним запитом) — нічого не змінено. */
   | { kind: "not_packed" };
@@ -772,6 +796,9 @@ export async function unpackOrder(ctx: ServiceContext, orderId: string, opts: { 
         .returning({ id: orderPacking.id });
       packingId = row!.id;
     }
+    // Етап 5: накладну скасовано, поки замовлення було запаковане (скасування не повертає «Запаковано» до перевірки й
+    // тому не ставило повторне читання з Shopify) — тепер позиції можна застосувати.
+    const shopifyResync = status === "awaiting_review" && shopifyLinesPending(order) ? await enqueueOrderResync(tx, order) : undefined;
     const materialsConsumed = await materialsConsumedFor(tx, packingId);
     await addPackingEvent(tx, id, "unpacked", { packingId, resetChecklist: Boolean(opts.resetChecklist), status });
     await writeAudit(tx, ctx.actor, "packing.unpacked", { type: "order", id }, {
@@ -779,8 +806,48 @@ export async function unpackOrder(ctx: ServiceContext, orderId: string, opts: { 
       resetChecklist: Boolean(opts.resetChecklist),
       materialsConsumed,
       noActiveWaybill: !shipment,
+      ...(shopifyResync ? { shopifyResync } : {}),
     });
-    return { kind: "unpacked", packingId, materialsConsumed, status };
+    return { kind: "unpacked", packingId, materialsConsumed, status, ...(shopifyResync ? { shopifyResync } : {}) };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Скасовано після пакування: «Повернуто на склад»
+// ---------------------------------------------------------------------------
+
+export type ReturnCancelledResult =
+  /** Попередження закрито: товар повернуто на полицю, посилку розібрано. */
+  | { kind: "returned"; issueId: string }
+  /** Немає відкритого попередження (уже закрито) — нічого не змінено. */
+  | { kind: "nothing" };
+
+/**
+ * Склад підтверджує, що посилку скасованого після пакування замовлення розібрано й товар повернуто на полицю:
+ * закриває ORDER_CANCELLED_AFTER_PACKING (подія packing_returned, журнал). Резерв уже знято скасуванням, залишок
+ * товару не змінюється (товар не списувався — списання лише при передачі перевізнику). Матеріали автоматично не
+ * повертаються — коригування на сторінці матеріалів (як і при розпакуванні).
+ */
+export async function confirmCancelledPackingReturned(ctx: ServiceContext, orderId: string): Promise<ReturnCancelledResult> {
+  requirePermission(ctx.actor, "packing.perform");
+  const id = normalizeId(orderId, "order");
+  return ctx.db.transaction(async (tx): Promise<ReturnCancelledResult> => {
+    const order = await loadOrderRow(tx, id, { forUpdate: true });
+    if (order.status !== "cancelled") throw new DomainError("packing.error.status", 409, { status: order.status });
+    const [issue] = await tx
+      .select({ id: issues.id, params: issues.params })
+      .from(issues)
+      .where(and(eq(issues.orderId, id), eq(issues.code, ORDER_CANCELLED_AFTER_PACKING), eq(issues.status, "open")))
+      .for("update");
+    if (!issue) return { kind: "nothing" };
+    const now = ctx.now();
+    await tx
+      .update(issues)
+      .set({ status: "resolved", resolvedAt: now, resolvedBy: ctx.actor.id, resolution: "returned_to_stock", updatedAt: now })
+      .where(eq(issues.id, issue.id));
+    await addPackingEvent(tx, id, "packing_returned", { packingId: typeof issue.params.packingId === "string" ? issue.params.packingId : null });
+    await writeAudit(tx, ctx.actor, "packing.returned_to_stock", { type: "order", id }, { issueId: issue.id });
+    return { kind: "returned", issueId: issue.id };
   });
 }
 

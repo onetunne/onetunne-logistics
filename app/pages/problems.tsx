@@ -12,12 +12,15 @@ import {
 import { ActionBanner, type ActionResult } from "~/components/action-banner";
 import { useCan, useHref } from "~/components/shell";
 import { OrderStatusBadge, SeverityBadge } from "~/components/status-badge";
-import { isOrderStatus, type OrderStatus } from "~/domain/order-status";
+import { canMarkShippedOutsideApp, isOrderStatus, type OrderStatus } from "~/domain/order-status";
 import { requirePermission } from "~/domain/permissions";
 import { hasKey, makeT, useLocale, useT, type Locale } from "~/i18n";
 import { localizeCode, localizeParams } from "~/i18n/localize";
 import { countryName, formatDateTime, formatNumber } from "~/lib/format";
+import { and, eq } from "drizzle-orm";
+import { issues } from "~/db/schema";
 import { countOpenIssues } from "~/modules/orders/repository.server";
+import { confirmShippedOutsideApp } from "~/modules/orders/shipped-outside.server";
 import { VALIDATABLE_STATUSES, acceptSuggestion, dismissIssue, validateOrders } from "~/modules/orders/workflow.server";
 import {
   PROBLEM_CATEGORIES,
@@ -246,7 +249,7 @@ function parseOrderIds(form: FormData): string[] {
   return [...ids];
 }
 
-const INTENTS = new Set(["acceptSuggestion", "dismissIssue", "bulkRevalidate", "bulkDismissWarnings"]);
+const INTENTS = new Set(["acceptSuggestion", "dismissIssue", "bulkRevalidate", "bulkDismissWarnings", "shippedOutside"]);
 
 export async function action({ request }: ActionFunctionArgs): Promise<ActionResult> {
   const ctx = await getRequestContext(request);
@@ -301,6 +304,19 @@ export async function action({ request }: ActionFunctionArgs): Promise<ActionRes
     if (intent === "dismissIssue") {
       await dismissIssue(ctx, issueId.toLowerCase());
       return { ok: true, message: "result.issue.dismissed" };
+    }
+
+    if (intent === "shippedOutside") {
+      // Етап 5: «Відправлено поза застосунком» з проблеми SHOPIFY_FULFILLED_OUTSIDE_APP (дозвіл waybills.manage — у сервісі).
+      const [issue] = await ctx.db
+        .select({ orderId: issues.orderId })
+        .from(issues)
+        .where(and(eq(issues.id, issueId.toLowerCase()), eq(issues.status, "open"), eq(issues.code, "SHOPIFY_FULFILLED_OUTSIDE_APP")));
+      if (!issue?.orderId) return { ok: false, error: "problems.error.notFound" };
+      const r = await confirmShippedOutsideApp(ctx, issue.orderId);
+      return r.kind === "already_shipped"
+        ? { ok: true, message: "order.shippedOutside.result.already", tone: "info" }
+        : { ok: true, message: "order.shippedOutside.result.done", tone: "success" };
     }
 
     // Значення має бути одним зі збережених варіантів — перевіряє acceptSuggestion (issue.invalidCandidate).
@@ -801,6 +817,8 @@ function IssueItem({
 }) {
   const t = useT();
   const locale = useLocale();
+  const can = useCan();
+  const canManageWaybills = canEdit && can("waybills.manage");
   const fieldKey = fieldLabelKey(issue.field);
   const resolutionKey = `problems.resolution.${issue.resolution ?? "other"}`;
   const titleKey = `issue.${issue.code}.title`;
@@ -891,6 +909,36 @@ function IssueItem({
             </Button>
             <Text as="span" variant="caption" tone="subdued">
               {t("problems.dismiss.help")}
+            </Text>
+          </Stack>
+        </Form>
+      ) : null}
+
+      {isOpen && canManageWaybills && issue.code === "SHOPIFY_FULFILLED_OUTSIDE_APP" && group.orderStatus && canMarkShippedOutsideApp(group.orderStatus) ? (
+        <Form method="post">
+          <input type="hidden" name="intent" value="shippedOutside" />
+          <input type="hidden" name="issueId" value={issue.id} />
+          <Stack gap={1}>
+            <div>
+              <ConfirmSubmitButton
+                size="sm"
+                loading={busy && pending.intent === "shippedOutside"}
+                disabled={busy}
+                title={t("order.shippedOutside.confirmTitle")}
+                confirmLabel={t("order.shippedOutside.confirm")}
+                cancelLabel={t("common.cancel")}
+                message={
+                  <Stack gap={2}>
+                    <Text>{t("order.shippedOutside.confirmBody")}</Text>
+                    <Text weight="semibold">{t("order.shippedOutside.confirmStock")}</Text>
+                  </Stack>
+                }
+              >
+                {t("order.shippedOutside.button")}
+              </ConfirmSubmitButton>
+            </div>
+            <Text variant="caption" tone="subdued">
+              {t("order.shippedOutside.help")}
             </Text>
           </Stack>
         </Form>

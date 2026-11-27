@@ -83,7 +83,7 @@ describe("demo warehouse data", () => {
   });
 });
 
-describe("stage-5 placeholder pages", () => {
+describe("stage-5 section pages: access", () => {
   const load = async (path: "warehouse" | "production" | "picking") => {
     const page = await import(`~/pages/${path}.tsx`);
     return page.loader({ request: new Request(`http://localhost/demo/${path}`), params: {}, context: {} } as never);
@@ -136,7 +136,9 @@ describe("manual parcel correction is used by waybill creation", () => {
     ).parcels[0]!;
     expect(corrected).toMatchObject({ lengthCm: 31, widthCm: 20, heightCm: 10, actualWeightGrams: 1234 });
     expect(corrected.chargeableWeightGrams).toBe(Math.max(1234, corrected.volumetricWeightGrams ?? 0));
-    const weightOnly = buildShipmentRequest({ ...order, parcelWeightGrams: 50 }, items, settings, "OT-T-3", new Date()).parcels[0]!;
-    expect(weightOnly).toMatchObject({ lengthCm: pkg.lengthCm, actualWeightGrams: 50 });
+    const weightOnly = buildShipmentRequest({ ...order, parcelWeightGrams: 250 }, items, settings, "OT-T-3", new Date()).parcels[0]!;
+    expect(weightOnly).toMatchObject({ lengthCm: pkg.lengthCm, actualWeightGrams: 250 });
+    // Вага, менша за вагу самих товарів (210 г), — застаріла або описка: не надсилається (production-3).
+    expect(buildShipmentRequest({ ...order, parcelWeightGrams: 50 }, items, settings, "OT-T-4", new Date()).parcels[0]!.actualWeightGrams).toBe(plain.actualWeightGrams);
   });
 });

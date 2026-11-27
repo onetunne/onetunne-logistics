@@ -281,9 +281,16 @@ describe("manually chosen box together with manual parcel dimensions", () => {
     expect(req).toMatchObject({ parcelSource: "manual", packageCode: "mailer_nodims", parcelBoxMaterialId: mailerId });
     expect(req.parcels[0]).toMatchObject({ lengthCm: 26, widthCm: 18, heightCm: 3, actualWeightGrams: 210 + 35 });
 
-    // Та сама коробка без ручних габаритів посилки не може описати посилку → автоматичний підбір (задокументовано).
+    // Регресія (production-4): та сама коробка без ручних габаритів посилки НЕ підміняється автоматично підібраною
+    // іншою коробкою — код, тара й id вибраної, габарити — типової упаковки (manual_box_default_dims).
     const noDims = { ...base, parcelBoxMaterialId: mailerId };
-    expect((await planParcelBox(env.handle.db, noDims, items)).box).toMatchObject({ source: "auto_box", code: "box_s" });
+    const noDimsPlan = await planParcelBox(env.handle.db, noDims, items);
+    expect(noDimsPlan.box).toMatchObject({ source: "manual_box", code: "mailer_nodims", materialId: mailerId });
+    const s0 = await settings();
+    const pkg0 = s0.packaging.packages.find((p) => p.code === s0.packaging.defaultPackageCode)!;
+    const noDimsReq = buildShipmentRequest(noDims, items, s0, "OT-T-11b", new Date(), noDimsPlan);
+    expect(noDimsReq).toMatchObject({ parcelSource: "manual_box_default_dims", packageCode: "mailer_nodims", parcelBoxMaterialId: mailerId });
+    expect(noDimsReq.parcels[0]).toMatchObject({ lengthCm: pkg0.lengthCm, widthCm: pkg0.widthCm, heightCm: pkg0.heightCm, actualWeightGrams: 210 + 35 });
 
     // Матеріал не-коробка (наклейка) як «коробка» ігнорується: ручні габарити + тара типової упаковки.
     const s = await settings();
@@ -296,13 +303,19 @@ describe("manually chosen box together with manual parcel dimensions", () => {
     expect(stickerReq.parcels[0]!.actualWeightGrams).toBe(210 + pkg.tareWeightGrams);
   });
 
-  it("chooseParcelPackage ignores a box without dimensions unless the parcel dimensions are manual", () => {
+  it("chooseParcelPackage keeps a manual box without dimensions (its code and tare, default dims) and uses manual dims when given", () => {
     const pkg = { code: "default", lengthCm: 30, widthCm: 20, heightCm: 10, tareWeightGrams: 50 };
     const plan = {
       box: { source: "manual_box" as const, materialId: "m", code: "nodims", innerLengthMm: null, innerWidthMm: null, innerHeightMm: null, tareWeightGrams: 20 },
       autoReason: null,
     };
     expect(chooseParcelPackage({ parcelLengthMm: null, parcelWidthMm: null, parcelHeightMm: null }, pkg, plan)).toEqual({
+      pkg: { code: "nodims", lengthCm: 30, widthCm: 20, heightCm: 10, tareWeightGrams: 20 },
+      source: "manual_box_default_dims",
+      boxMaterialId: "m",
+    });
+    // Автоматично підібрана коробка без габаритів (не буває, але) — типова упаковка.
+    expect(chooseParcelPackage({ parcelLengthMm: null, parcelWidthMm: null, parcelHeightMm: null }, pkg, { ...plan, box: { ...plan.box, source: "auto_box" as const } })).toEqual({
       pkg,
       source: "default_package",
       boxMaterialId: null,

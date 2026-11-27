@@ -25,6 +25,7 @@ import { z } from "zod";
 import { inventoryMovements, orderLineItems, orders, productionBatches, productVariants, products, type StockAlertKind } from "~/db/schema";
 import { can, ForbiddenError, requirePermission, type Actor, type Permission } from "~/domain/permissions";
 import { hasKey, makeT, type Locale } from "~/i18n";
+import { formatDecimal, formatIsoDate, formatNumber } from "~/lib/format";
 import { DomainError, NotFoundError } from "~/lib/errors";
 import { writeAudit } from "~/modules/audit/audit.server";
 import { STOCK_LEVEL_STATUSES, type StockLevelStatus } from "~/modules/inventory/alerts";
@@ -830,12 +831,32 @@ export function isWarehouseCommandName(value: unknown): value is WarehouseComman
 }
 
 /** Команди, доступні актору (для меню бота / довідки). */
+/**
+ * Команди, доступні актору. `label` — локалізована назва для меню бота (warehouseCommands.name.<команда>, uk/en);
+ * `description` — англійський опис для моделі/розробника (не для людей).
+ */
 export function warehouseCommandsFor(
   actor: Actor,
-): Array<{ name: WarehouseCommandName; description: string; permission: Permission; risk: WarehouseCommandRisk; requiresConfirmation: boolean }> {
+  locale: Locale = "uk",
+): Array<{
+  name: WarehouseCommandName;
+  label: string;
+  description: string;
+  permission: Permission;
+  risk: WarehouseCommandRisk;
+  requiresConfirmation: boolean;
+}> {
+  const t = makeT(locale);
   return [...WAREHOUSE_COMMANDS.values()]
     .filter((c) => can(actor, c.permission))
-    .map((c) => ({ name: c.name, description: c.description, permission: c.permission, risk: c.risk, requiresConfirmation: c.requiresConfirmation }));
+    .map((c) => ({
+      name: c.name,
+      label: t(`warehouseCommands.name.${c.name}`),
+      description: c.description,
+      permission: c.permission,
+      risk: c.risk,
+      requiresConfirmation: c.requiresConfirmation,
+    }));
 }
 
 export type WarehouseCommandRefusal = "unknown_command" | "forbidden" | "invalid_input";
@@ -928,6 +949,10 @@ const ERROR_ALIASES: Record<string, string> = {
  */
 export function formatWarehouseCommandOutcome(outcome: WarehouseCommandOutcome, locale: Locale = "uk"): string {
   const t = makeT(locale);
+  // Числа й дати — тим самим форматером, що й сторінки (uk «1 234», «0,78», «11.12.2026»; en «1,234», «0.78», «11/12/2026»).
+  const n = (v: number) => formatNumber(v, locale);
+  const dec = (v: number) => formatDecimal(v, locale, { maximumFractionDigits: 2 });
+  const date = (iso: string | null | undefined) => (iso ? formatIsoDate(iso, locale) : "—");
   if (outcome.status === "refused") {
     if (outcome.reason === "forbidden") return t("warehouseCommands.refused.forbidden");
     if (outcome.reason === "invalid_input") return t("warehouseCommands.refused.invalidInput");
@@ -940,7 +965,7 @@ export function formatWarehouseCommandOutcome(outcome: WarehouseCommandOutcome, 
   if (outcome.status === "confirmation_required") {
     if ((outcome.preview as { kind?: string } | null)?.kind === "start_packing") {
       const p = outcome.preview as StartPackingPreview;
-      const lines = [t("warehouseCommands.confirm.startPacking", { order: p.orderNumber, units: p.units, status: t(`status.${p.status}`) })];
+      const lines = [t("warehouseCommands.confirm.startPacking", { order: p.orderNumber, units: n(p.units), status: t(`status.${p.status}`) })];
       if (p.alreadyPacked) lines.push(t("warehouseCommands.packing.already_packed", { order: p.orderNumber }));
       else if (p.blockedReason) lines.push(t(`warehouseCommands.packing.blocked.${p.blockedReason}`));
       return lines.join("\n");
@@ -949,12 +974,12 @@ export function formatWarehouseCommandOutcome(outcome: WarehouseCommandOutcome, 
     const lines = [
       t(p.kind === "receive_stock" ? "warehouseCommands.confirm.receive" : "warehouseCommands.confirm.defect", {
         item: itemLabel({ ...p.item }),
-        quantity: p.quantity,
-        defective: p.defectiveQuantity,
+        quantity: n(p.quantity),
+        defective: n(p.defectiveQuantity),
       }),
-      t("warehouseCommands.confirm.change", { before: p.current.available, after: p.after.available }),
+      t("warehouseCommands.confirm.change", { before: n(p.current.available), after: n(p.after.available) }),
     ];
-    if (p.insufficient) lines.push(t("warehouseCommands.confirm.insufficient", { onHand: p.current.onHand }));
+    if (p.insufficient) lines.push(t("warehouseCommands.confirm.insufficient", { onHand: n(p.current.onHand) }));
     if (p.alreadyApplied) lines.push(t("warehouseCommands.replay"));
     return lines.join("\n");
   }
@@ -970,25 +995,25 @@ export function formatWarehouseCommandOutcome(outcome: WarehouseCommandOutcome, 
     case "stock_summary":
       return [
         t("warehouseCommands.summary", {
-          variants: d.variants,
-          available: d.available,
-          onHand: d.onHand,
-          reserved: d.reserved,
-          defective: d.defective,
-          inProduction: d.inProduction,
+          variants: n(d.variants),
+          available: n(d.available),
+          onHand: n(d.onHand),
+          reserved: n(d.reserved),
+          defective: n(d.defective),
+          inProduction: n(d.inProduction),
         }),
         t("warehouseCommands.summary.alerts", {
-          low: d.openAlerts.low_stock,
-          out: d.openAlerts.out_of_stock,
-          oversold: d.openAlerts.oversold,
-          negative: d.openAlerts.negative_on_hand,
+          low: n(d.openAlerts.low_stock),
+          out: n(d.openAlerts.out_of_stock),
+          oversold: n(d.openAlerts.oversold),
+          negative: n(d.openAlerts.negative_on_hand),
         }),
       ].join("\n");
     case "low_stock":
       if (d.items.length === 0) return t("warehouseCommands.lowStock.empty");
       return [
-        t("warehouseCommands.lowStock.title", { total: d.total }),
-        ...d.items.map((i) => t("warehouseCommands.lowStock.line", { item: itemLabel(i), available: i.available, status: t(`stockLevel.${i.status}`) })),
+        t("warehouseCommands.lowStock.title", { total: n(d.total) }),
+        ...d.items.map((i) => t("warehouseCommands.lowStock.line", { item: itemLabel(i), available: n(i.available), status: t(`stockLevel.${i.status}`) })),
       ].join("\n");
     case "item_stock":
       if (d.matches.length === 0) return t("warehouseCommands.item.none");
@@ -996,34 +1021,34 @@ export function formatWarehouseCommandOutcome(outcome: WarehouseCommandOutcome, 
         ...d.matches.map((i) =>
           t("warehouseCommands.item.line", {
             item: itemLabel(i),
-            available: i.available,
-            onHand: i.onHand,
-            reserved: i.reserved,
-            defective: i.defective,
-            inProduction: i.inProduction,
+            available: n(i.available),
+            onHand: n(i.onHand),
+            reserved: n(i.reserved),
+            defective: n(i.defective),
+            inProduction: n(i.inProduction),
           }),
         ),
-        ...(d.truncated || d.total > d.matches.length ? [t("warehouseCommands.item.more", { total: d.total, shown: d.matches.length })] : []),
+        ...(d.truncated || d.total > d.matches.length ? [t("warehouseCommands.item.more", { total: n(d.total), shown: n(d.matches.length) })] : []),
       ].join("\n");
     case "production_status":
       return [
         t("warehouseCommands.production.title", { number: d.number, status: t(`productionStatus.${d.status}`) }),
-        t("warehouseCommands.production.totals", { ordered: d.ordered, received: d.received, defective: d.defective, remaining: d.remaining }),
+        t("warehouseCommands.production.totals", { ordered: n(d.ordered), received: n(d.received), defective: n(d.defective), remaining: n(d.remaining) }),
         ...(d.plannedReadyDate
-          ? [t(d.overdue ? "warehouseCommands.production.overdue" : "warehouseCommands.production.planned", { date: d.plannedReadyDate })]
+          ? [t(d.overdue ? "warehouseCommands.production.overdue" : "warehouseCommands.production.planned", { date: date(d.plannedReadyDate) })]
           : []),
       ].join("\n");
     case "recommendations":
       if (d.items.length === 0) return t("warehouseCommands.recommendations.empty");
       return [
-        t("warehouseCommands.recommendations.title", { total: d.total }),
+        t("warehouseCommands.recommendations.title", { total: n(d.total) }),
         ...d.items.map((i) =>
           t("warehouseCommands.recommendations.line", {
             item: itemLabel(i),
-            quantity: i.quantity,
-            velocity: i.velocity,
-            available: i.available,
-            date: i.stockOutDate ?? "—",
+            quantity: n(i.quantity),
+            velocity: dec(i.velocity),
+            available: n(i.available),
+            date: date(i.stockOutDate),
           }),
         ),
       ].join("\n");
@@ -1034,9 +1059,9 @@ export function formatWarehouseCommandOutcome(outcome: WarehouseCommandOutcome, 
       if (d.result === "replay") return t("warehouseCommands.replay");
       return t(d.kind === "receive_stock" ? "warehouseCommands.received" : "warehouseCommands.marked", {
         item: itemLabel(d),
-        quantity: d.quantity,
-        defective: d.defectiveQuantity,
-        available: d.balance.available,
+        quantity: n(d.quantity),
+        defective: n(d.defectiveQuantity),
+        available: n(d.balance.available),
       });
   }
 }

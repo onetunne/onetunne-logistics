@@ -196,6 +196,11 @@ export const products = pgTable("products", {
   imageUrl: text("image_url"),
   status: text("status"),
   shopifyUpdatedAt: timestamp("shopify_updated_at", { withTimezone: true }),
+  /**
+   * Етап 5: момент ПЕРЕД читанням колекцій товару (Product.collections), дані якого застосовано до product_collections.
+   * Старіше читання (паралельне завдання) членство не перезаписує — modules/shopify-sync/collections.server.ts.
+   */
+  collectionsSyncedAt: timestamp("collections_synced_at", { withTimezone: true }),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 });
@@ -248,6 +253,46 @@ export const productVariants = pgTable(
     index("product_variants_sku_idx").on(t.sku),
     index("product_variants_barcode_idx").on(t.barcode),
     index("product_variants_inventory_item_idx").on(t.inventoryItemId),
+  ],
+);
+
+/**
+ * Етап 5: колекції Shopify (ручні й автоматичні — обидва види повертає запит `collections`, read_products).
+ * Видалена в Shopify колекція не видаляється з бази (deleted_at): шаблони комплектації, що на неї посилаються, не
+ * змінюють ціль мовчки — сторінка «Комплектація» показує, що колекцію видалено. Демо-колекції — без shopify_collection_id.
+ */
+export const collections = pgTable(
+  "collections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    shopifyCollectionId: text("shopify_collection_id").unique(),
+    title: text("title").notNull(),
+    handle: text("handle"),
+    shopifyUpdatedAt: timestamp("shopify_updated_at", { withTimezone: true }),
+    /** Коли колекцію востаннє бачили в повному списку Shopify (для виявлення видалених без webhook). */
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index("collections_title_idx").on(t.title)],
+);
+
+/** Етап 5: членство товарів у колекціях (з Product.collections; змінюється лише синхронізацією або демо-даними). */
+export const productCollections = pgTable(
+  "product_collections",
+  {
+    productId: uuid("product_id")
+      .notNull()
+      .references(() => products.id, { onDelete: "cascade" }),
+    collectionId: uuid("collection_id")
+      .notNull()
+      .references(() => collections.id, { onDelete: "cascade" }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.productId, t.collectionId], name: "product_collections_pk" }),
+    index("product_collections_collection_idx").on(t.collectionId),
   ],
 );
 
@@ -307,6 +352,15 @@ export const orders = pgTable(
     parcelWidthMm: integer("parcel_width_mm"),
     parcelHeightMm: integer("parcel_height_mm"),
     parcelBoxMaterialId: uuid("parcel_box_material_id").references((): AnyPgColumn => packagingMaterials.id),
+    /**
+     * Етап 5: Shopify повідомив зміну позицій (кількість/видалення/заміна), яку НЕ застосовано — замовлення мало активну
+     * накладну або статус уже не дозволяв змін (modules/shopify-sync/sync.server.ts). Поки значення задане (і замовлення
+     * не передане/не скасоване), позиції застосунку застарілі: створення/переоформлення накладної й ручна передача
+     * перевізнику заблоковані (modules/shopify-sync/pending-lines.server.ts). Скасування накладної ставить у чергу
+     * повторне читання замовлення з Shopify; синхронізація, що застосувала позиції (або побачила, що вони збігаються),
+     * очищає значення. null — розбіжностей позицій із Shopify немає.
+     */
+    shopifyLinesPendingAt: timestamp("shopify_lines_pending_at", { withTimezone: true }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -346,6 +400,14 @@ export const orderLineItems = pgTable(
      * (демо-замовлення й позиції, збережені до етапу 5).
      */
     currentQuantity: integer("current_quantity"),
+    /**
+     * Етап 5: коли позицію додано в Shopify — LineItem.createdAt (2026-10); для позиції, уперше побаченої під час
+     * ОНОВЛЕННЯ вже збереженого замовлення без цього поля, — updatedAt замовлення в Shopify цієї синхронізації (верхня
+     * межа). Порівнюється з часом знімка складу: позиція, додана редагуванням ПІСЛЯ знімка, — новий продаж (без
+     * корекції opening_line), навіть якщо саме замовлення створене до знімка (modules/inventory/reservations.server.ts).
+     * null — невідомо (демо, позиції до етапу 5): діє правило за orders.placed_at.
+     */
+    shopifyAddedAt: timestamp("shopify_added_at", { withTimezone: true }),
     unitPrice: money("unit_price").notNull(),
     currency: char("currency", { length: 3 }).notNull(),
     imageUrl: text("image_url"),
@@ -570,6 +632,8 @@ export const shopInstallations = pgTable("shop_installations", {
   scopes: text("scopes"),
   webhooksRegisteredAt: timestamp("webhooks_registered_at", { withTimezone: true }),
   productsSyncedAt: timestamp("products_synced_at", { withTimezone: true }),
+  /** Етап 5: остання завершена повна синхронізація колекцій і членства товарів (collections.server.ts). */
+  collectionsSyncedAt: timestamp("collections_synced_at", { withTimezone: true }),
   ordersSyncedAt: timestamp("orders_synced_at", { withTimezone: true }),
   /** Стан імпорту старих замовлень: { status, since, imported, skipped, startedAt, finishedAt, error }. */
   importState: jsonb("import_state").$type<Record<string, unknown>>(),
@@ -661,7 +725,8 @@ export type StockAlertKind = (typeof STOCK_ALERT_KINDS)[number];
 export const INVENTORY_CONFLICT_STATUSES = ["open", "accepted_shopify", "pushed_app", "dismissed"] as const;
 export type InventoryConflictStatus = (typeof INVENTORY_CONFLICT_STATUSES)[number];
 
-export const KIT_APPLIES_TO = ["all", "products"] as const;
+export const KIT_APPLIES_TO = ["all", "products", "collections"] as const;
+export type KitAppliesTo = (typeof KIT_APPLIES_TO)[number];
 export const KIT_LINE_PER = ["order", "item"] as const;
 
 export const PRODUCTION_BATCH_STATUSES = ["planned", "in_production", "partially_received", "received", "closed", "cancelled"] as const;
@@ -1082,9 +1147,18 @@ export const kitTemplates = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     name: text("name").notNull(),
-    /** all — усі замовлення; products — лише замовлення з товарами з kit_template_products. */
+    /**
+     * all — усі товари; products — товари з kit_template_products; collections — товари колекцій з
+     * kit_template_collections (членство з Shopify, нові товари колекції — автоматично). Правила — kit-resolution.ts.
+     */
     appliesTo: text("applies_to", { enum: KIT_APPLIES_TO }).notNull().default("all"),
-    /** Більший пріоритет застосовується першим. */
+    /**
+     * Необов'язковий фільтр за атрибутами варіанта (product_variants.model / color) для будь-якої цілі: порожній —
+     * без фільтра; інакше рахуються лише одиниці варіантів із моделлю (кольором) зі списку.
+     */
+    variantModels: text("variant_models").array().notNull().default(sql`'{}'::text[]`),
+    variantColors: text("variant_colors").array().notNull().default(sql`'{}'::text[]`),
+    /** Більший пріоритет показується пакувальнику першим (застосовуються всі шаблони, що підходять). */
     priority: integer("priority").notNull().default(0),
     active: boolean("active").notNull().default(true),
     createdAt: createdAt(),
@@ -1126,5 +1200,22 @@ export const kitTemplateProducts = pgTable(
   (t) => [
     primaryKey({ columns: [t.templateId, t.productId], name: "kit_template_products_pk" }),
     index("kit_template_products_product_idx").on(t.productId),
+  ],
+);
+
+/** Етап 5: колекції шаблону (applies_to = collections). Колекцію не видаляють, лише позначають deleted_at. */
+export const kitTemplateCollections = pgTable(
+  "kit_template_collections",
+  {
+    templateId: uuid("template_id")
+      .notNull()
+      .references(() => kitTemplates.id, { onDelete: "cascade" }),
+    collectionId: uuid("collection_id")
+      .notNull()
+      .references(() => collections.id),
+  },
+  (t) => [
+    primaryKey({ columns: [t.templateId, t.collectionId], name: "kit_template_collections_pk" }),
+    index("kit_template_collections_collection_idx").on(t.collectionId),
   ],
 );

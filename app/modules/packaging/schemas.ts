@@ -13,6 +13,10 @@ export const MAX_STOCK_QUANTITY = 1_000_000;
 export const MAX_KIT_LINES = 50;
 export const MAX_KIT_LINE_QUANTITY = 1000;
 export const MAX_KIT_PRODUCTS = 2000;
+export const MAX_KIT_COLLECTIONS = 500;
+/** Фільтр шаблону за моделлю/кольором варіанта: до 50 значень, кожне до 255 символів. */
+export const MAX_KIT_VARIANT_VALUES = 50;
+export const MAX_KIT_VARIANT_VALUE_LENGTH = 255;
 export const MAX_STOCK_LINES = 500;
 export const MATERIAL_CODE_RE = /^[a-z0-9][a-z0-9_-]{0,39}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -95,6 +99,23 @@ export const kitLineInputSchema = z.object({
   per: z.enum(KIT_PER, { message: "packaging.error.invalid" }),
 });
 
+/** Значення фільтра моделі/кольору: обрізані, без порожніх, без повторів (порівняння без регістру), порядок збережено. */
+const variantValuesSchema = z
+  .array(z.preprocess(trimmed, z.string().max(MAX_KIT_VARIANT_VALUE_LENGTH, "packaging.error.tooLong")))
+  .max(MAX_KIT_VARIANT_VALUES, "packaging.error.tooMany")
+  .default([])
+  .transform((values) => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const v of values) {
+      const key = v.toLocaleLowerCase("uk");
+      if (v === "" || seen.has(key)) continue;
+      seen.add(key);
+      out.push(v);
+    }
+    return out;
+  });
+
 export const kitTemplateInputSchema = z
   .object({
     name: z.preprocess(trimmed, z.string().min(1, "packaging.error.required").max(120, "packaging.error.tooLong")),
@@ -109,6 +130,10 @@ export const kitTemplateInputSchema = z
     active: z.boolean().default(true),
     lines: z.array(kitLineInputSchema).max(MAX_KIT_LINES, "packaging.error.tooMany"),
     productIds: z.array(uuidSchema).max(MAX_KIT_PRODUCTS, "packaging.error.tooMany").default([]),
+    collectionIds: z.array(uuidSchema).max(MAX_KIT_COLLECTIONS, "packaging.error.tooMany").default([]),
+    /** Необов'язковий фільтр варіантів (для будь-якої цілі): лише одиниці з такою моделлю / таким кольором. */
+    models: variantValuesSchema,
+    colors: variantValuesSchema,
   })
   .superRefine((v, ctx) => {
     if (v.lines.length === 0) ctx.addIssue({ code: "custom", path: ["lines"], message: "packaging.error.kitNoLines" });
@@ -120,6 +145,9 @@ export const kitTemplateInputSchema = z
     });
     if (v.appliesTo === "products" && v.productIds.length === 0) {
       ctx.addIssue({ code: "custom", path: ["productIds"], message: "packaging.error.kitNoProducts" });
+    }
+    if (v.appliesTo === "collections" && v.collectionIds.length === 0) {
+      ctx.addIssue({ code: "custom", path: ["collectionIds"], message: "packaging.error.kitNoCollections" });
     }
   });
 

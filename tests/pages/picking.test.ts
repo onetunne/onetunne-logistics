@@ -411,17 +411,21 @@ describe("merged labels (/picking/labels)", () => {
     expect(await empty.json()).toMatchObject({ error: "packing.bulk.noneSelected" });
   });
 
-  it("demo test carrier has no documents → 409 with every order skipped as not_supported", async () => {
+  it("demo test carrier: a sample TEST label is merged into the PDF (gap-9); other orders are listed as skipped", async () => {
     const r = await labels(`?ids=${ids["#0998"]}&ids=${ids["#1004"]}`);
+    expect(r.status).toBe(200);
+    expect(r.headers.get("Content-Type")).toBe("application/pdf");
+    expect(r.headers.get("X-OT-Labels-Included")).toBe("1");
+    expect(JSON.parse(decodeURIComponent(r.headers.get("X-OT-Labels-Skipped") ?? "[]"))).toEqual([{ n: "#1004", r: "not_in_queue" }]);
+    const { PDFDocument } = await import("pdf-lib");
+    expect((await PDFDocument.load(new Uint8Array(await r.arrayBuffer()))).getPageCount()).toBe(1);
+  });
+
+  it("nothing mergeable → 409 with every order skipped", async () => {
+    const r = await labels(`?ids=${ids["#1004"]}`);
     expect(r.status).toBe(409);
     expect(r.headers.get("Content-Type")).toContain("application/json");
-    expect(await r.json()).toEqual({
-      error: "packing.labels.noneAvailable",
-      skipped: expect.arrayContaining([
-        { n: "#0998", r: "not_supported" },
-        { n: "#1004", r: "not_in_queue" },
-      ]),
-    });
+    expect(await r.json()).toEqual({ error: "packing.labels.noneAvailable", skipped: [{ n: "#1004", r: "not_in_queue" }] });
   });
 });
 

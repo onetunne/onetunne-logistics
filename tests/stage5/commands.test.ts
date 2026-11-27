@@ -88,6 +88,10 @@ describe("registry", () => {
     expect(warehouseCommandsFor(STAFF).map((c) => c.name)).toEqual([...WAREHOUSE_COMMAND_NAMES]);
     expect(warehouseCommandsFor(VIEWER).map((c) => c.name)).toEqual(["stock_summary", "low_stock", "item_stock", "production_status", "recommendations"]);
     expect(warehouseCommandsFor(NO_VIEW).map((c) => c.name)).not.toContain("stock_summary");
+    // Локалізована назва для меню бота (ui-8): uk за замовчуванням, en — за мовою.
+    expect(warehouseCommandsFor(STAFF).find((c) => c.name === "low_stock")?.label).toBe("Мало на складі");
+    expect(warehouseCommandsFor(STAFF, "en").find((c) => c.name === "receive_stock")?.label).toBe("Receive stock");
+    for (const c of warehouseCommandsFor(STAFF, "en")) expect(c.label, c.name).not.toMatch(/^warehouseCommands\./);
   });
 
   it("generates UUID operation ids", () => {
@@ -105,8 +109,8 @@ describe("read commands", () => {
     expect(d.opened).toBeGreaterThanOrEqual(9);
     expect(Object.keys(d.openAlerts).sort()).toEqual(["low_stock", "negative_on_hand", "out_of_stock", "oversold"]);
     const text = formatWarehouseCommandOutcome(o);
-    expect(text).toMatch(/^Склад: \d+ позицій\. Доступно/);
-    expect(formatWarehouseCommandOutcome(o, "en")).toMatch(/^Warehouse: \d+ items\./);
+    expect(text).toMatch(/^Склад: [\d\u00A0]+ позиц(ія|ії|ій)\. Доступно/);
+    expect(formatWarehouseCommandOutcome(o, "en")).toMatch(/^Warehouse: [\d,]+ items?\./);
     for (const s of PII) expect(JSON.stringify(o) + text, s).not.toContain(s);
     // Читання не журналюється як зміна.
     const [row] = await env.handle.db.select({ c: count() }).from(auditLog).where(like(auditLog.action, "warehouse.command%"));
@@ -467,5 +471,62 @@ describe("assistant tools", () => {
     const rows = await env.handle.db.select().from(auditLog).where(like(auditLog.action, "assistant.%"));
     const json = JSON.stringify(rows.map((r) => r.details));
     for (const s of PII) expect(json, s).not.toContain(s);
+  });
+});
+
+describe("bot texts: localized numbers, dates and plurals (ui-10, ui-9)", () => {
+  const recommendations = {
+    status: "ok" as const,
+    command: "recommendations" as const,
+    risk: "read" as const,
+    data: {
+      kind: "recommendations",
+      total: 1,
+      items: [{ title: "Тримач", variant: null, sku: "OT-1", quantity: 1200, velocity: 0.78, available: 3, stockOutDate: "2026-12-11" }],
+    },
+  };
+
+  it("formats decimals, grouping and ISO dates per language", () => {
+    const uk = formatWarehouseCommandOutcome(recommendations as never, "uk");
+    expect(uk).toContain("Рекомендовано виготовити: 1 поз.");
+    expect(uk).toContain("виготовити 1\u00A0200 шт.");
+    expect(uk).toContain("швидкість 0,78 шт./день");
+    expect(uk).toContain("закінчиться 11.12.2026");
+    expect(uk).not.toContain("2026-12-11");
+    const en = formatWarehouseCommandOutcome(recommendations as never, "en");
+    expect(en).toContain("Recommended to produce: 1 item");
+    expect(en).toContain("produce 1,200 units");
+    expect(en).toContain("velocity 0.78 units/day");
+    expect(en).toContain("runs out 11/12/2026");
+  });
+
+  it("formats the planned ready date of a batch", () => {
+    const o = {
+      status: "ok" as const,
+      command: "production_status" as const,
+      risk: "read" as const,
+      data: { kind: "production_status", number: "PB-2026-0001", status: "in_production", ordered: 1500, received: 0, defective: 0, remaining: 1500, plannedReadyDate: "2026-12-01", overdue: false },
+    };
+    const uk = formatWarehouseCommandOutcome(o as never, "uk");
+    expect(uk).toContain("Замовлено 1\u00A0500");
+    expect(uk).toContain("Планова готовність: 01.12.2026");
+    expect(formatWarehouseCommandOutcome(o as never, "en")).toContain("Planned ready date: 01/12/2026");
+  });
+
+  it("uses correct plural forms for one item", () => {
+    const more = {
+      status: "ok" as const,
+      command: "item_stock" as const,
+      risk: "read" as const,
+      data: {
+        kind: "item_stock",
+        total: 21,
+        truncated: true,
+        matches: [{ title: "Тримач", variant: null, sku: "OT-1", available: 1, onHand: 1, reserved: 0, defective: 0, inProduction: 0 }],
+      },
+    };
+    expect(formatWarehouseCommandOutcome(more as never, "uk")).toContain("Знайдено 21 позицію, показано 1");
+    expect(formatWarehouseCommandOutcome({ ...more, data: { ...more.data, total: 3 } } as never, "uk")).toContain("Знайдено 3 позиції");
+    expect(formatWarehouseCommandOutcome({ ...more, data: { ...more.data, total: 2 } } as never, "en")).toContain("Found 2 items");
   });
 });

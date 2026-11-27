@@ -2,12 +2,14 @@ import { count, eq, sql } from "drizzle-orm";
 import type { Db, DbOrTx } from "~/db/client.server";
 import {
   auditLog,
+  collections,
   countryRules,
   inventoryBalances,
   inventoryConflicts,
   inventoryMovements,
   issues,
   jobs,
+  kitTemplateCollections,
   kitTemplateLines,
   kitTemplateProducts,
   kitTemplates,
@@ -20,6 +22,7 @@ import {
   productionBatches,
   productionReceiptLines,
   productionReceipts,
+  productCollections,
   productVariants,
   products,
   sandboxCarrierShipments,
@@ -47,7 +50,7 @@ import { DEFAULT_COUNTRY_RULES } from "~/modules/validation/default-country-rule
 import type { ServiceContext } from "~/server/types";
 import { ensureDefaultWarehouse } from "~/modules/inventory/warehouse.server";
 import { syncOrderReservations } from "~/modules/inventory/reservations.server";
-import { DEMO_ORDERS, DEMO_PRODUCTS, DEMO_SHIPPER, SIMULATED_ORDER_TEMPLATES, type DemoOrderSeed } from "./demo-data";
+import { DEMO_COLLECTIONS, DEMO_ORDERS, DEMO_PRODUCTS, DEMO_SHIPPER, SIMULATED_ORDER_TEMPLATES, type DemoOrderSeed } from "./demo-data";
 import { seedDemoWarehouse } from "./demo-warehouse.server";
 
 /** Довідкові дані, потрібні в обох режимах (ідемпотентно; наявні записи не перезаписуються). */
@@ -102,6 +105,9 @@ async function insertDemoCatalog(db: Db): Promise<Map<string, { id: string; titl
           price: v.price,
           currency: "EUR",
           weightGrams: v.weightGrams,
+          lengthMm: v.dimsMm?.[0] ?? null,
+          widthMm: v.dimsMm?.[1] ?? null,
+          heightMm: v.dimsMm?.[2] ?? null,
           hsCode: v.hsCode,
           countryOfOrigin: v.countryOfOrigin,
           customsDescription: v.customsDescription,
@@ -201,8 +207,25 @@ export async function seedDemoData(ctx: ServiceContext): Promise<void> {
   const db = ctx.db;
   await seedReferenceData(db, DEMO_SETTINGS);
   if (!(await isDemoSeeded(db))) await seedDemoOrders(ctx);
-  // Етап 5: склад (окремо ідемпотентно — і для демо-баз, заповнених до етапу 5).
+  // Етап 5: колекції й склад (окремо ідемпотентно — і для демо-баз, заповнених до етапу 5).
+  await seedDemoCollections(db);
   await seedDemoWarehouse(ctx);
+}
+
+/** Вигадані колекції й членство товарів (за handle товару). Ідемпотентно: якщо колекції вже є — нічого не робить. */
+export async function seedDemoCollections(db: Db): Promise<void> {
+  const [row] = await db.select({ c: count() }).from(collections);
+  if (Number(row?.c ?? 0) > 0) return;
+  const catalog = await db.select({ id: products.id, handle: products.handle }).from(products);
+  const byHandle = new Map(catalog.map((p) => [p.handle, p.id]));
+  const handleOf = new Map(DEMO_PRODUCTS.map((p) => [p.key, p.handle]));
+  await db.transaction(async (tx) => {
+    for (const c of DEMO_COLLECTIONS) {
+      const [inserted] = await tx.insert(collections).values({ title: c.title, handle: c.handle }).returning({ id: collections.id });
+      const members = c.products.map((key) => byHandle.get(handleOf.get(key) ?? "")).filter((id): id is string => Boolean(id));
+      if (members.length) await tx.insert(productCollections).values(members.map((productId) => ({ productId, collectionId: inserted!.id })));
+    }
+  });
 }
 
 async function seedDemoOrders(ctx: ServiceContext): Promise<void> {
@@ -242,8 +265,11 @@ export async function resetDemoData(ctx: ServiceContext): Promise<void> {
       productionBatches,
       orderPacking,
       kitTemplateProducts,
+      kitTemplateCollections,
       kitTemplateLines,
       kitTemplates,
+      productCollections,
+      collections,
       stockItems,
       shipmentTrackingEvents,
       shipmentEvents,

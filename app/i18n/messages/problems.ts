@@ -59,6 +59,8 @@ const messages: MessageModule = {
     "problems.resolution.found_cancelled": "Звірка: накладна у перевізника скасована",
     "problems.resolution.order_cancelled": "Замовлення скасовано",
     "problems.resolution.shopify_synced": "Зміни успішно передано в Shopify",
+    "problems.resolution.shopify_applied": "Зміни з Shopify застосовано в застосунку",
+    "problems.resolution.shipped_outside_app": "Підтверджено: відправлено поза застосунком",
     "problems.resolution.other": "Вирішено",
 
     // Порожні стани та обмеження
@@ -179,6 +181,8 @@ const messages: MessageModule = {
     "problems.resolution.found_cancelled": "Reconciliation: the waybill is cancelled at the carrier",
     "problems.resolution.order_cancelled": "Order cancelled",
     "problems.resolution.shopify_synced": "Changes successfully sent to Shopify",
+    "problems.resolution.shopify_applied": "Shopify changes applied in the app",
+    "problems.resolution.shipped_outside_app": "Confirmed: shipped outside the app",
     "problems.resolution.other": "Resolved",
 
     "problems.empty.open.title": "No problems",

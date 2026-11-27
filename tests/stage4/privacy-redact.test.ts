@@ -56,6 +56,29 @@ describe("redactPii", () => {
     }
   });
 
+  it("masks phones whose groups are separated by a spaced hyphen or by Unicode dashes (N5)", () => {
+    for (const phone of [
+      "067 - 123 - 45 - 67",
+      "067–123–45–67",
+      "067 – 123 – 45 – 67",
+      "067—123—45—67",
+      "067 − 123 − 45 − 67",
+      "+380 67 ‐ 123 ‐ 45 ‐ 67",
+      "067\u2009123\u202F45 67",
+    ]) {
+      const r = redactPii(`Call me at ${phone}, thanks`);
+      expect(r.text, phone).toBe("Call me at [phone], thanks");
+      expect(r.counts.phone, phone).toBe(1);
+    }
+  });
+
+  it("dates, time ranges and short ranges written with dashes are still not masked", () => {
+    const text = "27.11.2026 – 28.11.2026, 2026-11-27 - 2026-12-01, 10:30 – 12:00, 5 - 10 pcs, 100 – 200 EUR, item 17 — 3 pcs";
+    expect(redactText(text)).toBe(text);
+    // Перенос рядка не з'єднує групи цифр.
+    expect(redactText("qty 1234 -\n5678 90")).toBe("qty 1234 -\n5678 90");
+  });
+
   it("does not mask dates, times, prices, postal codes, order numbers or quantities", () => {
     const text = "Order #1004 from 2026-11-27 10:30 (27.11.2026): 2 × 34.50 EUR, postal code 69001, model 10x2.5";
     expect(redactText(text)).toBe(text);

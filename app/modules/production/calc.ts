@@ -27,7 +27,7 @@
  * Округлення — до копійки, половина вгору (BigInt, без float).
  */
 import type { ProductionBatchStatus } from "~/db/schema";
-import { fromMinor, toMinor } from "~/lib/money";
+import { formatMoney, fromMinor, toMinor } from "~/lib/money";
 
 export const BATCH_NUMBER_PREFIX = "PB";
 
@@ -368,12 +368,11 @@ export function parseQuantityInput(raw: string | null | undefined, max: number =
 // ---------------------------------------------------------------------------
 
 /**
- * Сума з кодом валюти: «21 600,00 UAH» / «21,600.00 UAH». Детерміновано на сервері й у браузері: символ валюти
- * Intl відрізняється між Node і браузерами (UAH: «₴» у Node, «грн» у Chrome) → помилка гідратації React.
+ * Сума для відображення — через спільний детермінований форматер (lib/money formatMoney): однаково на сервері й
+ * у браузері (без Intl style:"currency", символ якого відрізняється між Node і браузерами) і так само, як на
+ * інших сторінках складу.
  */
 export function formatCost(amount: string | null | undefined, currency: string | null | undefined, locale: "uk" | "en"): string {
   if (!amount || !currency) return "—";
-  const minor = toMinor(amount);
-  const formatter = new Intl.NumberFormat(locale === "uk" ? "uk-UA" : "en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return `${formatter.format(Number(minor) / 100)} ${currency}`;
+  return formatMoney(amount, currency, locale);
 }

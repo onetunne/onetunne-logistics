@@ -67,6 +67,7 @@ import {
   type TimelineItem,
 } from "~/ui";
 import { parseProductionPrefill } from "~/modules/warehouse-analytics/calc";
+import { DEFAULT_COST_CURRENCY } from "~/modules/warehouse/constants";
 
 /**
  * Виробнича партія (етап 5): /production/new — створення; /production/:id — картка (позиції, брак, надходження,
@@ -795,7 +796,7 @@ function CostsCard({ data, detail }: { data: Data; detail: Detail }) {
                     name="costCurrency"
                     label={t("production.cost.currency")}
                     options={currencies.map((c) => ({ value: c, label: c }))}
-                    defaultValue={costs.currency ?? "UAH"}
+                    defaultValue={costs.currency ?? DEFAULT_COST_CURRENCY}
                     error={errors.costCurrency ? t(errors.costCurrency) : undefined}
                   />
                 </FormLayout>
@@ -1088,7 +1089,7 @@ function BatchEditor({ data, editor }: { data: Data; editor: Editor }) {
                     name="costCurrency"
                     label={t("production.cost.currency")}
                     options={data.currencies.map((c) => ({ value: c, label: c }))}
-                    defaultValue={costs?.currency ?? "UAH"}
+                    defaultValue={costs?.currency ?? DEFAULT_COST_CURRENCY}
                     error={err("costCurrency")}
                   />
                 ) : null}

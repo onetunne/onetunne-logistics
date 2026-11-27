@@ -11,9 +11,7 @@ import { DEFAULT_SETTINGS, warehouseSchema } from "~/modules/settings/schema";
 import {
   MATERIAL_UNITS,
   PACKAGING_MATERIAL_KINDS,
-  PACKING_STATUSES,
   PRODUCTION_BATCH_STATUSES,
-  RESERVATION_STATUSES,
   SHOPIFY_SYNC_STATES,
   STOCK_ALERT_KINDS,
 } from "~/db/schema";
@@ -181,9 +179,7 @@ describe("i18n for stage-5 enums", () => {
       ...MOVEMENT_TYPES.map((t) => `movementType.${t}`),
       ...STOCK_ALERT_KINDS.map((k) => `stockAlert.${k}`),
       ...STOCK_LEVEL_STATUSES.map((k) => `stockLevel.${k}`),
-      ...RESERVATION_STATUSES.map((k) => `reservationStatus.${k}`),
       ...PRODUCTION_BATCH_STATUSES.map((k) => `productionStatus.${k}`),
-      ...PACKING_STATUSES.map((k) => `packingStatus.${k}`),
       ...PACKAGING_MATERIAL_KINDS.map((k) => `materialKind.${k}`),
       ...MATERIAL_UNITS.map((k) => `materialUnit.${k}`),
       ...SHOPIFY_SYNC_STATES.map((k) => `shopifySyncState.${k}`),

@@ -16,6 +16,10 @@ const messages: MessageModule = {
     "result.waybill.blocked.no_carrier": "Перевізника не налаштовано.",
     "result.waybill.blocked.carrier_not_configured": "{carrier}: інтеграцію ще не налаштовано (етап 3).",
     "result.waybill.blocked.in_progress": "Накладна вже створюється. Зачекайте кілька секунд і оновіть сторінку.",
+    "result.waybill.blocked.shopify_lines_pending":
+      "Shopify змінив позиції замовлення, а застосунок їх ще не застосував — накладна була б зі старими позиціями. Зачекайте повторного читання замовлення з Shopify (або поставте його на сторінці замовлення) і спробуйте знову.",
+    "result.waybill.blocked.fulfilled_in_shopify":
+      "Замовлення вже виконане (повністю або частково) у Shopify поза застосунком — накладна була б повторним відправленням. Якщо товари відправлено, підтвердьте «Відправлено поза застосунком» на сторінці замовлення.",
     "result.waybill.linked": "Накладну {number} прив’язано вручну.",
     "result.waybill.cancelled": "Накладну скасовано.",
     "result.waybill.confirmedNotCreated": "Позначено, що накладну не створено. Можна створити повторно.",
@@ -73,6 +77,10 @@ const messages: MessageModule = {
     "result.waybill.blocked.no_carrier": "No carrier is configured.",
     "result.waybill.blocked.carrier_not_configured": "{carrier}: integration is not configured yet (stage 3).",
     "result.waybill.blocked.in_progress": "The waybill is being created. Wait a few seconds and refresh.",
+    "result.waybill.blocked.shopify_lines_pending":
+      "Shopify changed the order items and the app has not applied them yet — the waybill would use the old items. Wait for the fresh read of the order from Shopify (or queue it on the order page) and try again.",
+    "result.waybill.blocked.fulfilled_in_shopify":
+      "The order is already fulfilled (fully or partially) in Shopify outside the app — a waybill would ship it twice. If the goods were shipped, confirm “Shipped outside the app” on the order page.",
     "result.waybill.linked": "Waybill {number} linked manually.",
     "result.waybill.cancelled": "Waybill cancelled.",
     "result.waybill.confirmedNotCreated": "Marked as not created. You can create it again.",

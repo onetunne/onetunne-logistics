@@ -21,6 +21,8 @@ import { loadOrderRow, type OrderRow, type ShipmentRow } from "~/modules/orders/
 import { getSetting } from "~/modules/settings/settings.server";
 import { syncOrderReservations } from "~/modules/inventory/reservations.server";
 import { JOB } from "~/modules/shopify-sync/sync.server";
+import { shopifyLinesPending } from "~/modules/shopify-sync/pending-lines.server";
+import { recordPackingGapAtCarrierHandover, settlePackingForManualHandover } from "~/modules/packing/lifecycle.server";
 import { FULFILL_DEDUPE_PREFIX } from "~/integrations/shopify/queueing-gateway.server";
 import type { CarrierAdapter, TrackingSnapshot, TrackingStatus } from "~/integrations/carriers/types";
 import type { ServiceContext } from "~/server/types";
@@ -219,6 +221,12 @@ export async function applyTrackingSnapshot(
       // Якщо перевізник фактично прийняв посилку — фіксуємо передачу навіть при статусі «створено» зараз.
       const target = orderStatusForTracking(snapshot.status) ?? (handover && !isShipped(order.status) ? "handed_to_carrier" : null);
       const steps = planOrderTransitions(order.status, target);
+      // Етап 5: перевізник прийняв посилку без «Запаковано» — факт перевізника не блокуємо, але пакування закриваємо
+      // й фіксуємо розрив контролю комплектації (подія; розпочата й не завершена комплектація → попередження).
+      // Порядок блокувань: замовлення → пакування → баланси (резерв нижче).
+      if (steps.includes("handed_to_carrier")) {
+        await recordPackingGapAtCarrierHandover(tx, ctx.actor, order, order.status, shipmentId, now);
+      }
       await applyOrderSteps(tx, ctx, order, steps, "tracking");
       orderStatus = steps.at(-1) ?? order.status;
       // Етап 5: фактична передача → списання зарезервованого товару (один раз на позицію) у цій транзакції.
@@ -264,11 +272,30 @@ export async function requestShopifyFulfillment(ctx: ServiceContext, shipmentId:
   return result.status === "skipped" ? `skipped:${result.reason}` : result.status;
 }
 
+export interface MarkHandedOverOptions {
+  /**
+   * Етап 5: власник свідомо підтверджує передачу, хоча Shopify змінив позиції після створення накладної, а застосунок
+   * їх ще не застосував (orders.shopify_lines_pending_at): списання — за позиціями застосунку (тим, що запаковано).
+   * Іншим (і без цього прапорця) ручна передача в такому стані заборонена (shipment.shopifyLinesPending).
+   */
+  acknowledgeShopifyLineChanges?: boolean;
+  /**
+   * Етап 5: власник свідомо передає посилку, пакування якої розпочато, але не підтверджено «Запаковано» (контроль
+   * комплектації не пройдено). Причина — в історії замовлення; пакування фіксується як запаковане під час передачі,
+   * матеріали списуються один раз. Без нього (або не власнику) — shipment.packingIncomplete.
+   */
+  packingOverride?: { reason: string } | null;
+}
+
 /**
  * Ручне підтвердження передачі перевізнику (менеджер передав посилку у відділенні),
  * коли перевізник не підтримує відстеження або статус ще не оновився.
+ * Передачу за даними перевізника (відстеження) ці блокування не зупиняють — факт перевізника головніший.
+ * Етап 5, контроль комплектації (packing/lifecycle.server.ts): «Запаковано» — передача; пакування розпочато, але не
+ * підтверджено — лише рішенням власника з причиною (packingOverride); пакування не розпочинали — передача дозволена,
+ * розрив фіксується в історії й журналі (packing: "not_started").
  */
-export async function markHandedOver(ctx: ServiceContext, shipmentId: string): Promise<string> {
+export async function markHandedOver(ctx: ServiceContext, shipmentId: string, opts: MarkHandedOverOptions = {}): Promise<string> {
   requirePermission(ctx.actor, "waybills.manage");
   await ctx.db.transaction(async (tx) => {
     const [shipment] = await tx.select().from(shipments).where(eq(shipments.id, shipmentId)).for("update");
@@ -278,8 +305,15 @@ export async function markHandedOver(ctx: ServiceContext, shipmentId: string): P
     if (shipment.trackingStatus === "cancelled") throw new DomainError("shipment.deletedAtCarrier", 409);
     const order = await loadOrderRow(tx, shipment.orderId, { forUpdate: true });
     if (shipment.handedOverAt || isShipped(order.status)) throw new DomainError("shipment.alreadyHandedOver", 409);
+    // Етап 5: позиції застаріли щодо Shopify — списання зі старими кількостями лише з явним рішенням власника.
+    const linesPending = shopifyLinesPending(order);
+    if (linesPending && !(opts.acknowledgeShopifyLineChanges && ctx.actor.role === "owner")) {
+      throw new DomainError("shipment.shopifyLinesPending", 409);
+    }
     const steps = planOrderTransitions(order.status, "handed_to_carrier");
     if (steps.length === 0) throw new DomainError("order.notEditable", 409, { status: order.status });
+    // Етап 5: контроль комплектації (порядок блокувань: накладна → замовлення → пакування → баланси).
+    const packing = await settlePackingForManualHandover(tx, ctx.actor, order, shipment, { override: opts.packingOverride ?? null, now: ctx.now() });
     await tx
       .update(shipments)
       .set({ handedOverAt: ctx.now(), updatedAt: ctx.now() })
@@ -287,8 +321,14 @@ export async function markHandedOver(ctx: ServiceContext, shipmentId: string): P
     await applyOrderSteps(tx, ctx, order, steps, "manual");
     // Етап 5: списання зарезервованого товару при фактичній передачі.
     await syncOrderReservations(tx, order.id, ctx.actor);
-    await tx.insert(shipmentEvents).values({ shipmentId, type: "handed_over", message: "manual", data: null });
-    await writeAudit(tx, ctx.actor, "shipment.handed_over", { type: "shipment", id: shipmentId }, { orderId: order.id, source: "manual" });
+    await tx.insert(shipmentEvents).values({ shipmentId, type: "handed_over", message: "manual", data: { packing: packing.state } });
+    await writeAudit(tx, ctx.actor, "shipment.handed_over", { type: "shipment", id: shipmentId }, {
+      orderId: order.id,
+      source: "manual",
+      packing: packing.state,
+      ...(packing.finalized ? { packingConfirmedAtHandover: true } : {}),
+      ...(linesPending ? { shopifyLinesPendingAcknowledged: true } : {}),
+    });
   });
   // Передачу вже збережено: збій постановки в чергу не скасовує її (повтор — ensurePendingFulfillments під час опитування).
   return requestShopifyFulfillment(ctx, shipmentId).catch((e: unknown) => {

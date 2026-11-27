@@ -104,7 +104,9 @@ const messages: MessageModule = {
     "settings.warehouse.externalShopifyChanges.review": "Показувати як розбіжність (рішення власника)",
     "settings.warehouse.externalShopifyChanges.apply": "Приймати автоматично, якщо різниця однозначна",
     "settings.warehouse.externalShopifyChangesHelp":
-      "Рекомендовано «Показувати як розбіжність». Автоматичне прийняття — лише коли різницю нічим іншим не пояснити.",
+      "Рекомендовано «Показувати як розбіжність». Автоматичне прийняття діє лише з передачею змін складу в Shopify і дозволом write_inventory, і лише коли різницю нічим іншим не пояснити (немає змін складу, яких Shopify не отримав, невдалих передач, замовлень і повернень, що ще синхронізуються, одиниць у станах «брак/резерв» Shopify).",
+    "settings.warehouse.applyWithoutPushWarning":
+      "Автоматичне прийняття не діятиме, поки передачу змін складу в Shopify вимкнено: Shopify не знає про надходження, брак і коригування складу, і прийняття його значення скасувало б їх. Усі різниці йтимуть на розгляд власника.",
     "settings.warehouse.allowNegativeOnHand": "Дозволити від'ємний фактичний залишок при прийнятті значення Shopify",
     "settings.warehouse.allowNegativeOnHandHelp":
       "Передача посилки перевізнику списує товар завжди (посилка вже фізично передана). Інші операції ніколи не роблять залишок від'ємним.",
@@ -281,7 +283,9 @@ const messages: MessageModule = {
     "settings.warehouse.externalShopifyChanges.review": "Show as a difference (owner decides)",
     "settings.warehouse.externalShopifyChanges.apply": "Accept automatically when the difference is unambiguous",
     "settings.warehouse.externalShopifyChangesHelp":
-      "«Show as a difference» is recommended. Automatic acceptance happens only when nothing else explains the difference.",
+      "«Show as a difference» is recommended. Automatic acceptance works only while warehouse changes are sent to Shopify with the write_inventory permission, and only when nothing else explains the difference (no warehouse changes Shopify did not receive, no failed sends, no orders or returns still syncing, no units in Shopify «damaged/reserved» states).",
+    "settings.warehouse.applyWithoutPushWarning":
+      "Automatic acceptance will not work while sending warehouse changes to Shopify is off: Shopify does not know about warehouse receipts, defects and adjustments, and accepting its value would cancel them. Every difference goes to owner review.",
     "settings.warehouse.allowNegativeOnHand": "Allow negative on-hand stock when accepting a Shopify value",
     "settings.warehouse.allowNegativeOnHandHelp":
       "Handing a parcel to the carrier always writes the goods off (the parcel has physically left). Other operations never make stock negative.",

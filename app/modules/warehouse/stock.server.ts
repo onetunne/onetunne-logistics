@@ -28,7 +28,7 @@ import { availableOf, stockLevelStatus, type StockLevelStatus } from "~/modules/
 import type { AlertView } from "~/modules/inventory/ledger.server";
 import { getDefaultWarehouse } from "~/modules/inventory/warehouse.server";
 import { getSetting } from "~/modules/settings/settings.server";
-import { DEFAULT_STOCK_SORT, MAX_SEARCH_LENGTH, STOCKTAKE_REASON, type StockSort, type StockTrackingState } from "./constants";
+import { DEFAULT_COST_CURRENCY, DEFAULT_STOCK_SORT, MAX_SEARCH_LENGTH, STOCKTAKE_REASON, type StockSort, type StockTrackingState } from "./constants";
 
 export interface StockListFilters {
   /** Назва товару/варіанта, SKU, штрихкод. */
@@ -416,7 +416,11 @@ export interface StockItemCard {
   unit: MaterialUnit;
   /** Статус товару в Shopify (ACTIVE/ARCHIVED/…); null — матеріал/невідомо. */
   productStatus: string | null;
-  /** Валюта за замовчуванням для собівартості надходження. */
+  /**
+   * Валюта за замовчуванням для собівартості надходження: валюта останньої відомої собівартості позиції
+   * (рух із unit_cost; для матеріалу — валюта його собівартості), інакше DEFAULT_COST_CURRENCY (UAH, як у партіях і
+   * матеріалах). Не валюта продажу варіанта (Shopify) — інакше собівартість записувалася б у EUR.
+   */
   defaultCostCurrency: string;
   onHand: number;
   reserved: number;
@@ -435,6 +439,17 @@ export interface StockItemCard {
   openedAt: Date | null;
   openingSnapshotAt: Date | null;
   updatedAt: Date | null;
+}
+
+/** Валюта собівартості останнього руху позиції з unit_cost (надходження з виробництва/вручну) або null. */
+async function lastCostCurrency(db: DbOrTx, stockItemId: string): Promise<string | null> {
+  const [row] = await db
+    .select({ currency: inventoryMovements.costCurrency })
+    .from(inventoryMovements)
+    .where(and(eq(inventoryMovements.stockItemId, stockItemId), sql`${inventoryMovements.unitCost} is not null`, sql`${inventoryMovements.costCurrency} is not null`))
+    .orderBy(desc(inventoryMovements.createdAt), desc(inventoryMovements.id))
+    .limit(1);
+  return row?.currency ?? null;
 }
 
 /** Картка за id позиції обліку АБО id варіанта / матеріалу (без руху ще немає позиції обліку). null — не знайдено. */
@@ -487,7 +502,7 @@ export async function getStockItemCard(db: DbOrTx, id: string): Promise<StockIte
         materialKind: null,
         unit: "pcs",
         productStatus: v.p.status,
-        defaultCostCurrency: v.v.currency,
+        defaultCostCurrency: (item ? await lastCostCurrency(db, item.id) : null) ?? DEFAULT_COST_CURRENCY,
         lowStockThreshold: item?.lowStockThreshold ?? null,
         defaultThreshold,
         shopifyAvailable: v.v.inventoryAvailable,
@@ -516,7 +531,7 @@ export async function getStockItemCard(db: DbOrTx, id: string): Promise<StockIte
         materialKind: m.kind,
         unit: m.unit,
         productStatus: null,
-        defaultCostCurrency: m.costCurrency ?? "UAH",
+        defaultCostCurrency: m.costCurrency ?? (item ? await lastCostCurrency(db, item.id) : null) ?? DEFAULT_COST_CURRENCY,
         lowStockThreshold: item?.lowStockThreshold ?? null,
         defaultThreshold,
         shopifyAvailable: null,

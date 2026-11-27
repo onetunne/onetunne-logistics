@@ -11,6 +11,7 @@ import { ensureStockItemForMaterial, ensureStockItemForVariant, movementHistory,
 import { getDefaultWarehouse } from "~/modules/inventory/warehouse.server";
 import { getSetting } from "~/modules/settings/settings.server";
 import {
+  DEFAULT_COST_CURRENCY,
   DEFECT_REASONS,
   ITEM_RECENT_MOVEMENTS,
   MAX_COUNTED_QUANTITY,
@@ -80,6 +81,19 @@ import {
  */
 
 /** Собівартість форматується на сервері: символ гривні в ICU Node і браузера різний (₴ / грн) — без розбіжності гідратації. */
+/**
+ * Чи надсилаються внутрішні зміни цього товару в Shopify: робочий режим (у демо Shopify не підключено — ledger
+ * movementOptionsFor нічого не надсилає), товар, відкритий в обліку, передачу ввімкнено. Одне правило для підказок
+ * картки (loader) і для повідомлень після операції (action), щоб у демо не з'являлися тексти про Shopify.
+ */
+function itemPushesToShopify(
+  mode: string,
+  card: { kind: string; tracking: string | null },
+  shopifyPush: string,
+): boolean {
+  return mode === "production" && card.kind === "product" && card.tracking === "opened" && shopifyPush === "deltas";
+}
+
 function serializeMovement(m: MovementView, locale: Locale) {
   return {
     id: m.id,
@@ -124,6 +138,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   return {
     item: {
       ...card,
+      // Валюта останньої собівартості — лише власнику (поле собівартості бачить лише finance.view).
+      defaultCostCurrency: includeCosts ? card.defaultCostCurrency : DEFAULT_COST_CURRENCY,
       variantTitle: displayVariantTitle(card.variantTitle),
       shopifySyncedAt: card.shopifySyncedAt?.toISOString() ?? null,
       openedAt: card.openedAt?.toISOString() ?? null,
@@ -142,7 +158,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     lastStocktake: last ? { at: last.at.toISOString(), actorName: last.actorName, delta: last.delta } : null,
     canSeeCosts: includeCosts,
     /** Внутрішні зміни цього товару надсилаються в Shopify (передачу ввімкнено, товар відкрито). */
-    pushesToShopify: card.kind === "product" && card.tracking === "opened" && settings.shopifyPush === "deltas",
+    // У демо Shopify не підключено: нічого не надсилається (ledger movementOptionsFor), тож і підказок про передачу немає.
+    pushesToShopify: itemPushesToShopify(ctx.mode, card, settings.shopifyPush),
     operationIds: {
       receive: newOperationId(),
       defect: newOperationId(),
@@ -260,13 +277,13 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<I
           costCurrency: formString(form, "costCurrency") || null,
           note,
         });
+        // «Повернення не надсилається в Shopify…» — лише коли передача справді діє (не в демо: N3).
         const notPushed =
           (SHOPIFY_RESTOCK_REASONS as readonly string[]).includes(reason) &&
           restockedInShopify &&
           (quantity ?? 0) > 0 &&
           r.shopifySyncState === "skipped" &&
-          card.tracking === "opened" &&
-          (await getSetting(ctx.db, "warehouse")).shopifyPush === "deltas";
+          itemPushesToShopify(ctx.mode, card, (await getSetting(ctx.db, "warehouse")).shopifyPush);
         return operationResult(
           intent,
           r,

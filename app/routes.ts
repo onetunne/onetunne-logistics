@@ -29,6 +29,7 @@ const pages = (prefix: "demo" | "app") => [
   route("picking", "pages/picking.tsx", { id: `${prefix}-picking` }),
   route("picking/print", "pages/print-batch.tsx", { id: `${prefix}-picking-print` }),
   route("picking/labels", "pages/labels-batch.tsx", { id: `${prefix}-picking-labels` }),
+  route("picking/handover", "pages/handover-list.tsx", { id: `${prefix}-picking-handover` }),
   route("picking/:orderId", "pages/packing-order.tsx", { id: `${prefix}-packing-order` }),
   route("warehouse/materials", "pages/materials.tsx", { id: `${prefix}-materials` }),
   route("warehouse/kits", "pages/kits.tsx", { id: `${prefix}-kits` }),

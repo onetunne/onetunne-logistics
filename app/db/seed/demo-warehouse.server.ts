@@ -5,6 +5,8 @@
  */
 import { count, eq, inArray } from "drizzle-orm";
 import {
+  collections,
+  kitTemplateCollections,
   kitTemplateLines,
   kitTemplateProducts,
   kitTemplates,
@@ -118,6 +120,27 @@ export async function seedDemoWarehouse(ctx: ServiceContext): Promise<void> {
         { templateId: fender!.id, materialId: materialIds.get("instruction_fender")!, quantity: 1, per: "item" },
       ]);
       await tx.insert(kitTemplateProducts).values({ templateId: fender!.id, productId: fenderProduct.id });
+    }
+
+    // 3a. Шаблони «на колекцію» (вигадані колекції — seedDemoCollections): покришки колекції «Шини та колеса» —
+    //     скотч для фіксації; крила Model S колекції «Крила та захист» — скотч для кронштейна (фільтр моделі:
+    //     Model X тієї самої колекції його не отримує).
+    const demoCollections = new Map(
+      (await tx.select({ id: collections.id, handle: collections.handle }).from(collections)).map((c) => [c.handle, c.id]),
+    );
+    const collectionTemplates = [
+      { name: "Шини: фіксація скотчем", collection: "tires-and-wheels", priority: 5, models: [] as string[], quantity: 2 },
+      { name: "Крило Model S: скотч для кронштейна", collection: "fenders-and-protection", priority: 9, models: ["Model S"], quantity: 1 },
+    ];
+    for (const ct of collectionTemplates) {
+      const collectionId = demoCollections.get(ct.collection);
+      if (!collectionId) continue;
+      const [tpl] = await tx
+        .insert(kitTemplates)
+        .values({ name: ct.name, appliesTo: "collections", priority: ct.priority, variantModels: ct.models })
+        .returning({ id: kitTemplates.id });
+      await tx.insert(kitTemplateLines).values({ templateId: tpl!.id, materialId: materialIds.get("tape")!, quantity: ct.quantity, per: "item" });
+      await tx.insert(kitTemplateCollections).values({ templateId: tpl!.id, collectionId });
     }
 
     // 4. Виробнича партія у виробництві (запуск: in_production +).

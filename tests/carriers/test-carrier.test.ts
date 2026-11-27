@@ -103,12 +103,42 @@ describe("TestCarrierAdapter metadata", () => {
       createShipment: true,
       updateShipment: false,
       cancelShipment: true,
-      documents: false,
+      documents: true,
       tracking: false,
       returns: false,
       findByReference: true,
       referenceLookupAuthoritative: true,
+      documentKinds: ["label"],
     });
+  });
+});
+
+describe("TestCarrierAdapter.getDocument (sample TEST label)", () => {
+  it("returns a one-page A6 PDF marked TEST for an active test waybill, with no personal data", async () => {
+    const { adapter } = setup();
+    const created = await adapter.createShipment(makeRequest());
+    const doc = await adapter.getDocument({ carrierShipmentId: created.carrierShipmentId, waybillNumber: created.waybillNumber }, "label");
+    expect(doc).toMatchObject({ kind: "label", format: "pdf", contentType: "application/pdf", fileName: `test-label-${created.waybillNumber}.pdf` });
+    const { PDFDocument } = await import("pdf-lib");
+    const pdf = await PDFDocument.load(doc.content);
+    expect(pdf.getPageCount()).toBe(1);
+    expect(pdf.getTitle()).toBe(`TEST LABEL ${created.waybillNumber}`);
+    // Стандартний шрифт без стиснення потоків не гарантований — перевіряємо, що в документі немає імен/телефонів/адрес запиту.
+    const raw = Buffer.from(doc.content).toString("latin1");
+    for (const pd of ["Demo Sender", "+15555550199", "1 Example Street", "Sampleville"]) expect(raw).not.toContain(pd);
+  });
+
+  it("refuses other document kinds, unknown and cancelled waybills; respects an aborted signal", async () => {
+    const { adapter } = setup();
+    const created = await adapter.createShipment(makeRequest({ reference: "shp-demo-0002-g1" }));
+    const ref = { carrierShipmentId: created.carrierShipmentId, waybillNumber: created.waybillNumber };
+    await expect(adapter.getDocument(ref, "invoice")).rejects.toMatchObject({ kind: "not_supported" });
+    await expect(adapter.getDocument({ carrierShipmentId: null, waybillNumber: "TEST0000000000" }, "label")).rejects.toMatchObject({ kind: "rejected" });
+    const ac = new AbortController();
+    ac.abort();
+    await expect(adapter.getDocument(ref, "label", { signal: ac.signal })).rejects.toMatchObject({ kind: "unavailable" });
+    await adapter.cancelShipment(created.waybillNumber);
+    await expect(adapter.getDocument(ref, "label")).rejects.toMatchObject({ kind: "rejected" });
   });
 });
 

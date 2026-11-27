@@ -17,7 +17,9 @@ import { useLocale, useT } from "~/i18n";
 import { formatDateTime, formatNumber } from "~/lib/format";
 import { STOCK_LEVEL_STATUSES, type StockLevelStatus } from "~/modules/inventory/alerts";
 import { ensureStockItemsForVariants } from "~/modules/inventory/ledger.server";
-import { getInventoryOpeningStatus, initializeInventory } from "~/modules/inventory/opening.server";
+import { getInventoryOpeningStatus, initializeInventory, type InitializeInventoryResult } from "~/modules/inventory/opening.server";
+import { loadSyncEnvironment } from "~/modules/inventory-sync/environment.server";
+import { initializeInventoryFromShopify } from "~/modules/shopify-sync/inventory-opening.server";
 import { getDefaultWarehouse } from "~/modules/inventory/warehouse.server";
 import { getSetting } from "~/modules/settings/settings.server";
 import {
@@ -218,6 +220,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
       untrackedVariants: opening.untrackedVariants,
     },
     canAdjust,
+    /** Робочий режим: відкриття — зі знімка локації складу Shopify (пояснення в картці ініціалізації). */
+    isProduction: ctx.mode === "production",
     operationIds: { stocktake: newOperationId() },
   };
 
@@ -289,6 +293,71 @@ function parseVariantIds(form: FormData, name: string): string[] {
   return [...ids];
 }
 
+/** Результат відкриття → повідомлення. */
+function initializationResult(r: InitializeInventoryResult, refreshedOrders: number): WarehouseActionResult {
+  const extra: string[] = [];
+  if (refreshedOrders > 0) extra.push("warehouse.init.result.refreshed");
+  if (r.clampedNegative > 0) extra.push("warehouse.init.result.clamped");
+  if (r.openedWithHistory > 0) extra.push("warehouse.init.result.history");
+  if (r.excludedFulfilledLines > 0) extra.push("warehouse.init.result.excludedFulfilled");
+  if (r.skippedNotStocked > 0) extra.push("warehouse.init.result.notStocked");
+  if (r.skippedUntracked > 0) extra.push("warehouse.init.result.untracked");
+  return {
+    ok: true,
+    intent: "initialize",
+    message: r.opened > 0 ? "warehouse.init.result.opened" : "warehouse.init.result.nothing",
+    params: {
+      opened: r.opened,
+      alreadyOpened: r.alreadyOpened,
+      untracked: r.skippedUntracked,
+      notStocked: r.skippedNotStocked,
+      excluded: r.excludedFulfilledLines,
+      clamped: r.clampedNegative,
+      history: r.openedWithHistory,
+      orders: r.ordersSynced,
+      refreshed: refreshedOrders,
+    },
+    extra,
+    tone: r.clampedNegative > 0 || r.openedWithHistory > 0 || r.excludedFulfilledLines > 0 ? "warning" : r.opened > 0 ? "success" : "info",
+  };
+}
+
+/**
+ * Відкриття обліку. Робочий режим — знімок «доступно» у ЛОКАЦІЇ складу Shopify (та сама, що для звірки й передачі),
+ * перед цим — перечитування замовлень із позиціями до етапу 5 (inventory-opening.server.ts). Демо — знімок товарів.
+ */
+async function runInitialization(ctx: Awaited<ReturnType<typeof getRequestContext>>): Promise<WarehouseActionResult> {
+  const intent = "initialize";
+  if (ctx.mode !== "production") return initializationResult(await initializeInventory(ctx), 0);
+  const env = await loadSyncEnvironment(ctx.db);
+  if (!env.shop) return { ok: false, intent, error: "warehouse.init.error.noShop" };
+  if (!env.canRead) return { ok: false, intent, error: "warehouse.init.error.noReadScope" };
+  const { adminClientFor } = await import("~/integrations/shopify/admin-client.server");
+  const outcome = await initializeInventoryFromShopify(ctx, await adminClientFor(env.shop));
+  if (outcome.kind === "location_required") {
+    return { ok: true, intent, message: `warehouse.init.location.${outcome.state}`, tone: "warning" };
+  }
+  if (outcome.kind === "orders_not_ready") {
+    const extra: string[] = [];
+    if (outcome.staleOrders > 0 || outcome.failedOrders > 0) extra.push("warehouse.init.notReady.stale");
+    if (outcome.pendingOrders > 0) extra.push("warehouse.init.notReady.pending");
+    return {
+      ok: true,
+      intent,
+      message: "warehouse.init.notReady.title",
+      params: {
+        refreshed: outcome.refreshedOrders,
+        failed: outcome.failedOrders,
+        stale: outcome.staleOrders,
+        pending: outcome.pendingOrders,
+      },
+      extra,
+      tone: "warning",
+    };
+  }
+  return initializationResult(outcome.result, outcome.refreshedOrders);
+}
+
 export async function action({ request }: ActionFunctionArgs): Promise<WarehouseActionResult> {
   const ctx = await getRequestContext(request);
   let intent = "";
@@ -300,26 +369,7 @@ export async function action({ request }: ActionFunctionArgs): Promise<Warehouse
 
     if (intent === "initialize") {
       requirePermission(ctx.actor, "warehouse.adjust");
-      const r = await initializeInventory(ctx);
-      const extra: string[] = [];
-      if (r.clampedNegative > 0) extra.push("warehouse.init.result.clamped");
-      if (r.openedWithHistory > 0) extra.push("warehouse.init.result.history");
-      if (r.skippedUntracked > 0) extra.push("warehouse.init.result.untracked");
-      return {
-        ok: true,
-        intent,
-        message: r.opened > 0 ? "warehouse.init.result.opened" : "warehouse.init.result.nothing",
-        params: {
-          opened: r.opened,
-          alreadyOpened: r.alreadyOpened,
-          untracked: r.skippedUntracked,
-          clamped: r.clampedNegative,
-          history: r.openedWithHistory,
-          orders: r.ordersSynced,
-        },
-        extra,
-        tone: r.clampedNegative > 0 || r.openedWithHistory > 0 ? "warning" : r.opened > 0 ? "success" : "info",
-      };
+      return await runInitialization(ctx);
     }
 
     if (intent === "bulkThreshold") {
@@ -972,6 +1022,9 @@ function InitializationCard({ data, busy }: { data: LoaderData; busy: boolean })
       <Text variant="body-sm">{t("warehouse.init.why")}</Text>
       <Text variant="body-sm">{t("warehouse.init.oneTime")}</Text>
       <Text variant="body-sm">{t("warehouse.init.history")}</Text>
+      {data.isProduction ? <Text variant="body-sm">{t("warehouse.init.locationNote")}</Text> : null}
+      <Text variant="body-sm">{t("warehouse.init.fulfilledNote")}</Text>
+      {data.isProduction ? <Text variant="body-sm">{t("warehouse.init.autoNote")}</Text> : null}
       <Text variant="body-sm" tone="subdued">
         {t("warehouse.init.untrackedNote")}
       </Text>

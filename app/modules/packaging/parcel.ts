@@ -6,12 +6,15 @@
  *    коробки, вибраної вручну (orders.parcel_box_material_id, вид box | mailer; її внутрішні габарити тут не потрібні),
  *    інакше типової упаковки з налаштувань.
  * 2. "manual_box" — коробка, вибрана вручну (orders.parcel_box_material_id) з відомими внутрішніми габаритами.
- *    Вибрана вручну коробка БЕЗ габаритів і без ручних габаритів посилки описати посилку не може → далі п. 3–4
- *    (пакувальнику варто ввести габарити посилки вручну).
+ *    "manual_box_default_dims" — вибрана вручну коробка БЕЗ габаритів і без ручних габаритів посилки: код, тара й id —
+ *    цієї коробки (людина її вибрала — іншу не підставляємо), габарити — типової упаковки (пакувальнику варто ввести
+ *    габарити посилки вручну).
  * 3. "auto_box" — автоматично підібрана коробка (selectBoxForOrder) — ЛИШЕ якщо всі товари мають габарити
  *    (reason = "fits"); неточний підбір (лише за вагою / частина без габаритів) для накладної не використовується.
  * 4. "default_package" — типова упаковка з налаштувань «Упаковка».
- * Вага: orders.parcel_weight_grams (зважена посилка) замінює розрахункову фактичну — незалежно від джерела габаритів.
+ * Вага: orders.parcel_weight_grams (зважена посилка) замінює розрахункову фактичну — незалежно від джерела габаритів,
+ * якщо вона правдоподібна (isManualWeightPlausible: не менша за 90 % розрахункової ваги товарів); неправдоподібна
+ * (застаріла після зміни позицій або описка 30 замість 300) — не надсилається, береться розрахункова.
  * Розрахункова вага товарів — parcelGoods (ті самі позиції й кількості, що й для підбору коробки): автоматично
  * підібрана коробка завжди перевірена саме на ту вагу товарів, яку отримує накладна.
  *
@@ -21,7 +24,11 @@
 import { effectiveLineQuantity } from "~/modules/inventory/quantities";
 import type { BoxSelectionItem, SelectBoxReason } from "./box-selection";
 
-export const PARCEL_SOURCES = ["manual", "manual_box", "auto_box", "default_package"] as const;
+/**
+ * manual_box_default_dims — коробка/пакет, вибрані вручну, без внутрішніх габаритів і без ручних габаритів посилки:
+ * код, тара й id — вибраної коробки (нічого не підміняється іншою коробкою), габарити — типової упаковки.
+ */
+export const PARCEL_SOURCES = ["manual", "manual_box", "manual_box_default_dims", "auto_box", "default_package"] as const;
 export type ParcelSource = (typeof PARCEL_SOURCES)[number];
 
 /** Коробка для посилки, визначена до побудови запиту (planParcelBox у parcel.server.ts). */
@@ -30,8 +37,8 @@ export interface ParcelBoxChoice {
   materialId: string;
   code: string;
   /**
-   * Внутрішні габарити. null — не задані: лише для manual_box разом із ручними габаритами посилки (тоді від коробки
-   * потрібні тільки тара, код і id). Коробка без габаритів і без ручних габаритів посилки ігнорується.
+   * Внутрішні габарити. null — не задані: лише для manual_box (тоді від коробки потрібні тільки тара, код і id; габарити —
+   * ручні габарити посилки або, без них, типової упаковки).
    */
   innerLengthMm: number | null;
   innerWidthMm: number | null;
@@ -123,6 +130,14 @@ export function chooseParcelPackage(
       boxMaterialId: manualBox?.materialId ?? null,
     };
   }
+  if (manualBox && !(positive(manualBox.innerLengthMm) && positive(manualBox.innerWidthMm) && positive(manualBox.innerHeightMm))) {
+    // Вибрану вручну коробку без габаритів не підміняємо іншою (код і тара — її), габарити — типової упаковки.
+    return {
+      pkg: { ...defaultPkg, code: manualBox.code, tareWeightGrams: manualBox.tareWeightGrams ?? 0 },
+      source: "manual_box_default_dims",
+      boxMaterialId: manualBox.materialId,
+    };
+  }
   if (box && positive(box.innerLengthMm) && positive(box.innerWidthMm) && positive(box.innerHeightMm)) {
     return {
       pkg: {
@@ -137,4 +152,16 @@ export function chooseParcelPackage(
     };
   }
   return { pkg: { ...defaultPkg }, source: "default_package", boxMaterialId: null };
+}
+
+/**
+ * Найменша частка розрахункової ваги товарів (%), яку може мати зважена вручну посилка разом з упаковкою: допуск на
+ * неточні ваги товарів у Shopify. Менше — значення застаріле (позиції змінилися після зважування) або описка.
+ */
+export const MANUAL_WEIGHT_MIN_GOODS_PERCENT = 90;
+
+/** Чи правдоподібна зважена вручну вага посилки щодо розрахункової ваги товарів (без тари). */
+export function isManualWeightPlausible(manualGrams: number, goodsGrams: number): boolean {
+  if (!positive(manualGrams)) return false;
+  return manualGrams * 100 >= Math.max(0, goodsGrams) * MANUAL_WEIGHT_MIN_GOODS_PERCENT;
 }

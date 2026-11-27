@@ -16,7 +16,7 @@ import type { OrderPriority } from "~/db/schema";
 import { requirePermission } from "~/domain/permissions";
 import { hasKey, makeT, useLocale, useT, type TFunction } from "~/i18n";
 import { countryName, formatDateTime } from "~/lib/format";
-import { MAX_BULK_ORDERS, MAX_LABEL_ORDERS, MAX_PRINT_ORDERS, PRIORITIES, PRIORITY_KEYS, parsePriority } from "~/modules/packing/constants";
+import { MAX_BULK_ORDERS, MAX_HANDOVER_ORDERS, MAX_LABEL_ORDERS, MAX_PRINT_ORDERS, PRIORITIES, PRIORITY_KEYS, parsePriority } from "~/modules/packing/constants";
 import { setOrdersPriority, startPackingBulk, type BulkStartSummary } from "~/modules/packing/packing.server";
 import {
   QUEUE_TABS,
@@ -305,7 +305,12 @@ export default function PickingPage() {
           ) : null}
           {!needsWaybill && !r.waybill?.packable ? (
             <Badge tone="warning" size="sm">
-              {t("packing.queue.noWaybill")}
+              {t(r.waybill?.deletedAtCarrier ? "packing.queue.deletedAtCarrier" : "packing.queue.noWaybill")}
+            </Badge>
+          ) : null}
+          {r.shopifyLinesPending ? (
+            <Badge tone="critical" size="sm">
+              {t("packing.queue.shopifyLinesPending")}
             </Badge>
           ) : null}
           {needsWaybill && r.status === "packed" ? (
@@ -389,6 +394,14 @@ export default function PickingPage() {
         {labels ? <LabelsBanner outcome={labels} isDemo={mode === "demo"} /> : null}
 
         <Tabs items={tabs} selected={filters.tab} ariaLabel={t("packing.tabs.label")} />
+        {data.counts.packed > 0 && !needsWaybill ? (
+          <Stack direction="horizontal" gap={2} align="center" wrap>
+            <Button to={href("picking/handover")}>{t("packing.handover.open", { count: data.counts.packed })}</Button>
+            <Text variant="caption" tone="subdued">
+              {t("packing.handover.openHint")}
+            </Text>
+          </Stack>
+        ) : null}
 
         <Card>
           <Disclosure collapsedOnMobile summary={active > 0 ? t("packing.filters.titleActive", { count: active }) : t("common.filters")}>
@@ -514,6 +527,12 @@ export default function PickingPage() {
                   </Button>
                   <Button disabled={preview.total === 0 || labelsBusy} loading={labelsBusy} onClick={() => void onLabels()}>
                     {t("packing.bulk.labels", { count: preview.withLabel })}
+                  </Button>
+                  <Button
+                    disabled={preview.packed === 0}
+                    onClick={() => navigate(`${href("picking/handover")}?${idsQuery(MAX_HANDOVER_ORDERS)}`)}
+                  >
+                    {t("packing.bulk.handover", { count: preview.packed })}
                   </Button>
                 </Stack>
                 {preview.total > MAX_PRINT_ORDERS || preview.total > MAX_LABEL_ORDERS ? (

@@ -11,10 +11,10 @@
  * 4. Повторне натискання/повторний запит повертає наявну накладну без звернення до перевізника.
  */
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, inArray, isNull, like } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, like, max, sql } from "drizzle-orm";
 import type { DbOrTx, Tx } from "~/db/client.server";
-import { issues, orders, shipmentEvents, shipments } from "~/db/schema";
-import { assertTransition, isShipped } from "~/domain/order-status";
+import { issues, orderChanges, orderPacking, orders, shipmentEvents, shipments } from "~/db/schema";
+import { assertTransition, isFulfilledInShopify, isShipped } from "~/domain/order-status";
 import { requirePermission } from "~/domain/permissions";
 import { DomainError, NotFoundError } from "~/lib/errors";
 import { redact } from "~/lib/logger.server";
@@ -34,11 +34,20 @@ import { getSettings } from "~/modules/settings/settings.server";
 import { computeParcelWeights } from "~/modules/shipments/weight";
 import { validateOrder } from "~/modules/validation";
 import { buildCommercialInvoice, toCustomsDeclaration, toCustomsItems } from "~/modules/customs/invoice";
+import { effectiveLineQuantity } from "~/modules/inventory/quantities";
 import { splitStreetAndBuilding } from "~/modules/customs/address-parts";
 import { syncOrderReservations } from "~/modules/inventory/reservations.server";
 import type { SelectBoxReason } from "~/modules/packaging/box-selection";
-import { chooseParcelPackage, parcelWeightItems, type ParcelBoxPlan, type ParcelSource } from "~/modules/packaging/parcel";
+import {
+  chooseParcelPackage,
+  isManualWeightPlausible,
+  parcelWeightItems,
+  type ParcelBoxPlan,
+  type ParcelSource,
+} from "~/modules/packaging/parcel";
 import { planParcelBox } from "~/modules/packaging/parcel.server";
+import { closePackingOnOrderCancel, openCancelledAfterPackingIssue } from "~/modules/packing/lifecycle.server";
+import { enqueueOrderResync, shopifyLinesPending, type ResyncQueueResult } from "~/modules/shopify-sync/pending-lines.server";
 
 function streetParts(address1: string | null | undefined): { street: string | null; building: string | null } {
   const parts = splitStreetAndBuilding(address1);
@@ -67,7 +76,11 @@ export type BlockedReason =
   | "shipper_incomplete"
   | "no_carrier"
   | "carrier_not_configured"
-  | "in_progress";
+  | "in_progress"
+  /** Shopify змінив позиції, а застосунок їх ще не застосував (orders.shopify_lines_pending_at) — накладна була б зі старими. */
+  | "shopify_lines_pending"
+  /** Замовлення вже виконане (частково) в Shopify поза застосунком — накладна була б повторним відправленням. */
+  | "fulfilled_in_shopify";
 
 export type CreateWaybillResult =
   | { kind: "created"; shipment: ShipmentRow }
@@ -172,6 +185,11 @@ export type BuiltShipmentRequest = CreateShipmentRequest & {
   parcelBoxMaterialId: string | null;
   autoBoxReason: SelectBoxReason | null;
   parcelWeightSource: "manual" | "computed";
+  /**
+   * Зважену вручну вагу (orders.parcel_weight_grams) не надіслано: вона менша за розрахункову вагу товарів
+   * (isManualWeightPlausible) — застаріла або описка; надіслано розрахункову. null — не було або прийнято.
+   */
+  manualWeightIgnored: { manualGrams: number; goodsGrams: number } | null;
 };
 
 /**
@@ -198,15 +216,22 @@ export function buildShipmentRequest(
     pkg,
     volumetricDivisor: settings.packaging.volumetricDivisor,
   });
-  // Етап 5: зважена вага посилки (разом з упаковкою) замінює розрахункову фактичну.
-  const weights = order.parcelWeightGrams
+  // Етап 5: зважена вага посилки (разом з упаковкою) замінює розрахункову фактичну — якщо правдоподібна: вага, менша
+  // за вагу самих товарів, застаріла (позиції змінилися після зважування) або описка — недодекларування перевізнику
+  // й митниці не допускаємо, надсилаємо розрахункову (відмінність видно у знімку запиту й на екрані пакування).
+  const goodsGrams = computed.actualWeightGrams - pkg.tareWeightGrams;
+  const manualWeight =
+    order.parcelWeightGrams && isManualWeightPlausible(order.parcelWeightGrams, goodsGrams) ? order.parcelWeightGrams : null;
+  const weights = manualWeight
     ? {
-        actualWeightGrams: order.parcelWeightGrams,
+        actualWeightGrams: manualWeight,
         volumetricWeightGrams: computed.volumetricWeightGrams,
-        chargeableWeightGrams: Math.max(order.parcelWeightGrams, computed.volumetricWeightGrams),
+        chargeableWeightGrams: Math.max(manualWeight, computed.volumetricWeightGrams),
       }
     : computed;
-  const declared = addMoney("0.00", ...items.map((i) => multiplyMoney(i.unitPrice, i.quantity)));
+  // Вартість і митні позиції — ті самі одиниці, що пакуються й зважуються (effectiveLineQuantity): повернені/видалені
+  // одиниці не декларуються (інвойс — shippedInvoiceLines у customs/invoice.ts). Страхова вартість — ціни до знижок.
+  const declared = addMoney("0.00", ...items.map((i) => multiplyMoney(i.unitPrice, effectiveLineQuantity(i))));
   const invoice = buildCommercialInvoice({ order, items, settings, issuedAt: issuedAt ?? new Date() });
   const s = settings.shipper;
   return {
@@ -216,7 +241,8 @@ export function buildShipmentRequest(
     parcelSource: chosen.source,
     parcelBoxMaterialId: chosen.boxMaterialId,
     autoBoxReason: parcelPlan?.autoReason ?? null,
-    parcelWeightSource: order.parcelWeightGrams ? "manual" : "computed",
+    parcelWeightSource: manualWeight ? "manual" : "computed",
+    manualWeightIgnored: order.parcelWeightGrams && !manualWeight ? { manualGrams: order.parcelWeightGrams, goodsGrams } : null,
     sender: {
       name: s.contactName,
       company: s.companyName || null,
@@ -290,12 +316,77 @@ function requestSnapshot(req: BuiltShipmentRequest) {
     parcelBoxMaterialId: req.parcelBoxMaterialId,
     autoBoxReason: req.autoBoxReason,
     parcelWeightSource: req.parcelWeightSource,
+    manualWeightIgnored: req.manualWeightIgnored,
     destinationCountry: req.recipient.address.countryCode,
     parcels: req.parcels,
     customsItems: req.customsItems,
     customs: req.customs ?? null,
     declaredValue: req.declaredValue,
   };
+}
+
+/** Поля ручного коригування посилки на рівні замовлення (зберігає savePackingParcel). */
+const PARCEL_OVERRIDE_FIELDS = [
+  ["weightGrams", "parcelWeightGrams"],
+  ["lengthMm", "parcelLengthMm"],
+  ["widthMm", "parcelWidthMm"],
+  ["heightMm", "parcelHeightMm"],
+  ["box", "parcelBoxMaterialId"],
+] as const;
+
+/** Причина скидання в історії замовлення (order_changes.reason; перекладається на сторінці замовлення). */
+export const PARCEL_RESET_REASON = "packing.history.parcelResetLinesChanged";
+
+/**
+ * Ручне коригування посилки (orders.parcel_*: вага, габарити, коробка) описує посилку, яку зважили/виміряли для
+ * тодішніх позицій. Якщо позиції замовлення змінилися ПІСЛЯ останнього коригування (order_changes: поле lineItems
+ * новіше за останнє parcel.*; без історії коригування — будь-яка зміна позицій), воно застаріле: значення скидаються
+ * (історія — order_changes з причиною PARCEL_RESET_REASON; у розпочатому пакуванні скидаються вага й габарити), і
+ * накладна будується з розрахункових значень. Викликати під блокуванням рядка замовлення.
+ * Повертає назви скинутих полів (порожньо — нічого не скинуто).
+ */
+export async function resetStaleParcelOverride(
+  tx: Tx,
+  ctx: Pick<ServiceContext, "actor" | "now">,
+  order: OrderRow,
+): Promise<string[]> {
+  const set = PARCEL_OVERRIDE_FIELDS.filter(([, column]) => order[column] !== null);
+  if (set.length === 0) return [];
+  const [lines] = await tx
+    .select({ at: max(orderChanges.createdAt) })
+    .from(orderChanges)
+    .where(and(eq(orderChanges.orderId, order.id), eq(orderChanges.field, "lineItems")));
+  if (!lines?.at) return [];
+  const [parcel] = await tx
+    .select({ at: max(orderChanges.createdAt) })
+    .from(orderChanges)
+    .where(and(eq(orderChanges.orderId, order.id), like(orderChanges.field, "parcel.%")));
+  if (parcel?.at && parcel.at.getTime() > lines.at.getTime()) return [];
+  const patch: Partial<OrderRow> = {};
+  for (const [, column] of set) (patch as Record<string, null>)[column] = null;
+  await tx
+    .update(orders)
+    .set({ ...patch, version: sql`${orders.version} + 1`, updatedAt: ctx.now() })
+    .where(eq(orders.id, order.id));
+  await tx.insert(orderChanges).values(
+    set.map(([key, column]) => ({
+      orderId: order.id,
+      field: `parcel.${key}`,
+      oldValue: String(order[column]),
+      newValue: null,
+      source: "system" as const,
+      reason: PARCEL_RESET_REASON,
+      actorId: ctx.actor.id,
+    })),
+  );
+  // Розпочате пакування теж тримає зважені вагу/габарити (порівняння з накладною) — вони так само застарілі.
+  await tx
+    .update(orderPacking)
+    .set({ parcelWeightGrams: null, parcelLengthMm: null, parcelWidthMm: null, parcelHeightMm: null, version: sql`${orderPacking.version} + 1`, updatedAt: ctx.now() })
+    .where(and(eq(orderPacking.orderId, order.id), inArray(orderPacking.status, ["queued", "in_progress"])));
+  const fields = set.map(([key]) => `parcel.${key}`);
+  await writeAudit(tx, ctx.actor, "order.parcel_reset", { type: "order", id: order.id }, { fields, reason: "lines_changed" });
+  return fields;
 }
 
 type Prepared =
@@ -331,6 +422,12 @@ export async function createWaybill(
     if (order.status !== "awaiting_review") {
       return { kind: "result", result: { kind: "blocked", reason: "status", params: { status: order.status } } };
     }
+    // Етап 5: будь-яке джерело (вручну, масово, автоматизація, переоформлення). Перевіряється під блокуванням рядка
+    // замовлення — паралельна синхронізація Shopify не проскочить між перевіркою й записом «creating».
+    if (shopifyLinesPending(order)) return { kind: "result", result: { kind: "blocked", reason: "shopify_lines_pending" } };
+    if (isFulfilledInShopify(order.fulfillmentStatus)) {
+      return { kind: "result", result: { kind: "blocked", reason: "fulfilled_in_shopify", params: { fulfillment: order.fulfillmentStatus ?? "" } } };
+    }
     if (source === "automation") {
       const decision = await automationDecision(tx, order);
       if (!decision.run || decision.mode !== "auto") {
@@ -358,6 +455,8 @@ export async function createWaybill(
       .where(and(eq(shipments.orderId, orderId), eq(shipments.carrierCode, carrier.code)))
       .orderBy(desc(shipments.generation))
       .limit(1);
+    // Етап 5: ручне коригування посилки, зроблене до зміни позицій, описує іншу посилку — скидаємо (з історією).
+    await resetStaleParcelOverride(tx, ctx, order);
     const freshOrder = await loadOrderRow(tx, orderId);
     const parcelPlan = await planParcelBox(tx, freshOrder, items);
     let shipment: ShipmentRow;
@@ -745,6 +844,11 @@ export interface CancelWaybillOutcome {
   transitioned: boolean;
   shipment: ShipmentRow;
   manual: boolean;
+  /**
+   * Етап 5: у замовлення були неперенесені зміни позицій із Shopify — у тій самій транзакції поставлено повторне читання
+   * замовлення (queued); no_shop — магазин не встановлено (читання не поставлено); undefined — не потрібно.
+   */
+  shopifyResync?: ResyncQueueResult;
 }
 
 /**
@@ -826,15 +930,21 @@ export async function cancelWaybillDetailed(
     await resolveCarrierIssues(tx, shipment.orderId, ctx.actor.id, "cancelled", ["CARRIER_CANCEL_UNKNOWN"]);
     const fresh = await loadOrderRow(tx, shipment.orderId, { forUpdate: true });
     const stillActive = await findActiveShipment(tx, shipment.orderId);
-    if (!stillActive && (fresh.status === "waybill_created" || fresh.status === "awaiting_picking")) {
-      await setOrderStatus(tx, fresh, "awaiting_review");
+    const reopened = !stillActive && (fresh.status === "waybill_created" || fresh.status === "awaiting_picking");
+    if (reopened) await setOrderStatus(tx, fresh, "awaiting_review");
+    // Етап 5: зміни позицій із Shopify, які не можна було застосувати під час накладної, — тепер можна: повторне
+    // читання замовлення (те саме завдання, що й webhook) у тій самій транзакції. Скасування замовлення — не потрібно.
+    let shopifyResync: ResyncQueueResult | undefined;
+    if (reopened && purpose !== "order_cancelled" && shopifyLinesPending({ ...fresh, status: "awaiting_review" })) {
+      shopifyResync = await enqueueOrderResync(tx, fresh);
     }
     await writeAudit(tx, ctx.actor, "waybill.cancelled", { type: "shipment", id: shipmentId }, {
       orderId: shipment.orderId,
       manual,
       purpose,
+      ...(shopifyResync ? { shopifyResync } : {}),
     });
-    return { transitioned: true, shipment: row, manual };
+    return { transitioned: true, shipment: row, manual, ...(shopifyResync ? { shopifyResync } : {}) };
   });
   if ("conflict" in outcome) {
     // Ручна прив'язка: у перевізника нічого не скасовано — звичайна відмова «вже передано».
@@ -861,6 +971,8 @@ export async function cancelOrder(ctx: ServiceContext, orderId: string): Promise
   if (active?.status === "created") await cancelWaybill(ctx, active.id, { purpose: "order_cancelled" });
   await ctx.db.transaction(async (tx) => {
     const fresh = await loadOrderRow(tx, orderId, { forUpdate: true });
+    // Етап 5: активне пакування закривається (порядок блокувань: замовлення → пакування → баланси резерву нижче).
+    const packing = await closePackingOnOrderCancel(tx, ctx.actor, orderId, ctx.now());
     await setOrderStatus(tx, fresh, "cancelled", { cancelledAt: ctx.now() });
     // Етап 5: зняти резерв складу в тій самій транзакції.
     await syncOrderReservations(tx, orderId, ctx.actor);
@@ -869,7 +981,9 @@ export async function cancelOrder(ctx: ServiceContext, orderId: string): Promise
       .update(issues)
       .set({ status: "resolved", resolvedAt: ctx.now(), resolvedBy: ctx.actor.id, resolution: "order_cancelled", updatedAt: ctx.now() })
       .where(and(eq(issues.orderId, orderId), eq(issues.status, "open")));
-    await writeAudit(tx, ctx.actor, "order.cancelled", { type: "order", id: orderId });
+    // …крім складу: посилку вже почали пакувати або запакували — її треба розібрати й повернути товар на полицю.
+    if (packing) await openCancelledAfterPackingIssue(tx, orderId, packing);
+    await writeAudit(tx, ctx.actor, "order.cancelled", { type: "order", id: orderId }, packing ? { packingId: packing.packingId, packingStatus: packing.previousStatus } : {});
   });
 }
 
@@ -898,6 +1012,8 @@ export async function createWaybills(ctx: ServiceContext, orderIds: string[]): P
  */
 export async function processPaidOrder(ctx: ServiceContext, orderId: string) {
   const order = await loadOrderRow(ctx.db, orderId);
+  // Етап 5: уже виконане в Shopify поза застосунком — нічого автоматично (createWaybill теж заблокує).
+  if (isFulfilledInShopify(order.fulfillmentStatus)) return { validated: false, waybill: null, reason: "fulfilled_in_shopify" } as const;
   const decision = await automationDecision(ctx.db, order);
   if (!decision.run) return { validated: false, waybill: null, reason: decision.reason } as const;
   const summary = await ctx.db.transaction((tx: Tx) => validateOrderInTx(tx, ctx, orderId, "automation"));

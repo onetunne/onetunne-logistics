@@ -38,6 +38,12 @@ export const MAX_OPERATION_QUANTITY = 100_000;
 export const MAX_COUNTED_QUANTITY = 1_000_000;
 export const MAX_THRESHOLD = 100_000;
 export const MAX_NOTE_LENGTH = 500;
+/**
+ * Валюта собівартості за замовчуванням (виробництво, матеріали, надходження на складі) — валюта витрат, а НЕ валюта
+ * продажу в Shopify (EUR тощо): партії й матеріали оплачуються в гривні. Позиція з уже відомою собівартістю
+ * пропонує валюту своєї останньої собівартості (stock.server.ts getStockItemCard).
+ */
+export const DEFAULT_COST_CURRENCY = "UAH";
 /** Позицій в одній масовій дії (поріг, лист інвентаризації). */
 export const MAX_BULK_ITEMS = 200;
 export const MAX_SEARCH_LENGTH = 100;

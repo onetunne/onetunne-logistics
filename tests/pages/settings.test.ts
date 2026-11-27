@@ -131,7 +131,8 @@ describe("settings loader", () => {
       ...data.options.simulations.flatMap((s) => [`settings.testCarrier.simulation.${s}`, `settings.testCarrier.help.${s}`]),
       ...Object.keys(data.shipper.value).map((f) => `settings.shipper.field.${f}`),
       ...Object.keys(data.integrations.carriers[0]?.capabilities ?? {})
-        .filter((k) => k !== "referenceLookupAuthoritative")
+        // documentKinds — перелік видів документів, а не ознака (сторінка показує лише CAPABILITY_KEYS).
+        .filter((k) => k !== "referenceLookupAuthoritative" && k !== "documentKinds")
         .map((k) => `settings.integrations.capability.${k}`),
     ];
     for (const locale of ["uk", "en"] as const) {

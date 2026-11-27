@@ -66,8 +66,49 @@ const messages: MessageModule = {
     "order.shopifyChanged.body":
       "У Shopify змінено: {fields}. Накладна містить дані застосунку, тому ці зміни в неї не потрапили й автоматично не застосовуються.",
     "order.shopifyChanged.how":
-      "Щоб застосувати правильні дані, накладну потрібно переоформити: «Скасувати й виправити дані» → внесіть правильні значення у формі адреси → створіть нову накладну. «Переоформити накладну» одразу створює нову накладну з поточними даними застосунку (без змін із Shopify).",
+      "Щоб застосувати правильні контакти чи адресу, накладну потрібно переоформити: «Скасувати й виправити дані» → внесіть правильні значення у формі адреси → створіть нову накладну. «Переоформити накладну» одразу створює нову накладну з поточними даними застосунку (без змін із Shopify).",
     "order.shopifyChanged.shipped": "Посилку вже передано перевізнику — накладну переоформити неможливо. Узгодьте зміни з перевізником.",
+    "order.shopifyChanged.howLines":
+      "Позиції (кількість, повернені чи видалені товари) у застосунку не редагуються: їх застосовує повторне читання замовлення з Shopify. Натисніть «Скасувати й виправити дані» — застосунок одразу поставить читання в чергу й оновить позиції та резерв складу, — потім створіть нову накладну. «Переоформити накладну» недоступне, доки позиції не оновлено.",
+
+    // --- Етап 5: неперенесені зміни позицій із Shopify ---
+    "order.shopifyLines.title": "Позиції змінено в Shopify — застосунок їх ще не застосував",
+    "order.shopifyLines.bodyActive":
+      "Після створення накладної в Shopify змінили позиції замовлення. Накладна, пакування й резерв складу досі за старими позиціями, тому переоформлення й ручна передача перевізнику заблоковані. Скасуйте накладну («Скасувати й виправити дані») — застосунок перечитає замовлення з Shopify.",
+    "order.shopifyLines.bodyNoWaybill":
+      "Застосунок чекає на повторне читання замовлення з Shopify, щоб оновити позиції й резерв складу. До того нову накладну не створити. Зазвичай це займає до хвилини; якщо стан не змінюється — поставте читання ще раз.",
+    "order.shopifyLines.resyncButton": "Прочитати замовлення з Shopify ще раз",
+    "order.shopifyLines.resyncQueued": "Застосунок перечитає замовлення з Shopify й оновить позиції та резерв складу (зазвичай до хвилини). Після цього створіть нову накладну.",
+    "order.shopifyLines.resync.queued": "Повторне читання замовлення з Shopify поставлено в чергу.",
+    "order.shopifyLines.resync.not_shopify": "Замовлення не пов’язане з Shopify — читати нічого.",
+    "order.shopifyLines.resync.no_shop": "Застосунок не встановлено в магазині Shopify — читання не поставлено.",
+    "order.shopifyLines.resync.demo": "Демо: замовлення з Shopify не читаються.",
+    "order.shopifyLines.handoverOwner":
+      "Увага: Shopify змінив позиції після створення накладної, а застосунок їх не застосував. Склад спише товари за позиціями застосунку (тим, що запаковано). Підтверджуйте, лише якщо посилку вже фактично передано.",
+    "order.shopifyLines.handoverBlocked":
+      "Ручну передачу перевізнику заблоковано: Shopify змінив позиції після створення накладної. Скасуйте накладну й створіть нову з актуальними позиціями; якщо посилку вже передано — зверніться до власника.",
+    "shipment.shopifyLinesPending":
+      "Shopify змінив позиції замовлення після створення накладної, а застосунок їх ще не застосував. Скасуйте накладну (застосунок перечитає замовлення) і створіть нову; якщо посилку вже передано — підтвердити може лише власник.",
+
+    // --- Етап 5: виконано в Shopify поза застосунком ---
+    "order.shippedOutside.title": "Замовлення виконано в Shopify поза застосунком",
+    "order.shippedOutside.body":
+      "Shopify показує замовлення виконаним, а накладної застосунку немає. Нову накладну не створити — це було б повторне відправлення. Якщо товари справді відправлено (інший перевізник, самовивіз), підтвердьте «Відправлено поза застосунком».",
+    "order.shippedOutside.bodyPartial":
+      "Shopify показує замовлення частково виконаним, а накладної застосунку немає. Накладну в застосунку не створити: пакування й накладна містили б і вже відправлені товари. Відправте решту поза застосунком і підтвердьте «Відправлено поза застосунком», коли всі товари покинуть склад.",
+    "order.shippedOutside.button": "Відправлено поза застосунком",
+    "order.shippedOutside.help": "Склад спише зарезервовані товари один раз; перевізнику й у Shopify нічого не надсилається.",
+    "order.shippedOutside.confirmTitle": "Позначити замовлення відправленим поза застосунком?",
+    "order.shippedOutside.confirm": "Так, відправлено",
+    "order.shippedOutside.confirmBody":
+      "Підтвердьте, лише якщо ВСІ товари замовлення фізично покинули склад без накладної застосунку. Статус стане «Передано перевізнику»; накладна не створюється, у Shopify нічого не змінюється (замовлення там уже виконане).",
+    "order.shippedOutside.confirmStock": "Зарезервовані товари буде списано зі складу (один раз).",
+    "order.shippedOutside.result.done": "Замовлення позначено відправленим поза застосунком; резерв складу списано.",
+    "order.shippedOutside.result.already": "Замовлення вже відправлено — нічого не змінено.",
+    "order.shippedOutside.notFulfilledInShopify":
+      "Shopify не показує це замовлення виконаним — позначити відправленим поза застосунком не можна (інакше склад застосунку й Shopify розійдуться).",
+    "order.shippedOutside.activeWaybill":
+      "У замовлення є накладна застосунку: підтвердьте передачу перевізнику в картці накладної або спершу скасуйте накладну.",
 
     // --- Стан передачі виправлених даних у Shopify ---
     "order.shopifySync.title": "Синхронізація з Shopify",
@@ -169,8 +210,47 @@ const messages: MessageModule = {
     "order.shopifyChanged.body":
       "Changed in Shopify: {fields}. The waybill contains the app's data, so these changes are not in it and are not applied automatically.",
     "order.shopifyChanged.how":
-      "To apply the correct data, the waybill has to be re-issued: “Cancel and correct data” → enter the correct values in the address form → create a new waybill. “Re-issue waybill” immediately creates a new waybill from the current app data (without the Shopify changes).",
+      "To apply the correct contacts or address, the waybill has to be re-issued: “Cancel and correct data” → enter the correct values in the address form → create a new waybill. “Re-issue waybill” immediately creates a new waybill from the current app data (without the Shopify changes).",
     "order.shopifyChanged.shipped": "The parcel has already been handed to the carrier — the waybill cannot be re-issued. Agree the changes with the carrier.",
+    "order.shopifyChanged.howLines":
+      "Items (quantities, refunded or removed products) cannot be edited in the app: a fresh read of the order from Shopify applies them. Press “Cancel and correct data” — the app queues the read right away and updates the items and the stock reservation — then create a new waybill. “Re-issue waybill” is unavailable until the items are updated.",
+
+    "order.shopifyLines.title": "Items changed in Shopify — not applied in the app yet",
+    "order.shopifyLines.bodyActive":
+      "After the waybill was created, the order items were changed in Shopify. The waybill, packing and stock reservation still use the old items, so re-issuing and manual handover to the carrier are blocked. Cancel the waybill (“Cancel and correct data”) — the app re-reads the order from Shopify.",
+    "order.shopifyLines.bodyNoWaybill":
+      "The app is waiting for a fresh read of the order from Shopify to update the items and the stock reservation. Until then a new waybill cannot be created. This usually takes up to a minute; if nothing changes, queue the read again.",
+    "order.shopifyLines.resyncButton": "Read the order from Shopify again",
+    "order.shopifyLines.resyncQueued": "The app will re-read the order from Shopify and update the items and stock reservation (usually within a minute). Then create a new waybill.",
+    "order.shopifyLines.resync.queued": "A fresh read of the order from Shopify has been queued.",
+    "order.shopifyLines.resync.not_shopify": "The order is not linked to Shopify — nothing to read.",
+    "order.shopifyLines.resync.no_shop": "The app is not installed in a Shopify store — the read was not queued.",
+    "order.shopifyLines.resync.demo": "Demo: orders are not read from Shopify.",
+    "order.shopifyLines.handoverOwner":
+      "Warning: Shopify changed the items after the waybill was created and the app has not applied them. Stock will be written off by the app's items (what was packed). Confirm only if the parcel has actually been handed over.",
+    "order.shopifyLines.handoverBlocked":
+      "Manual handover is blocked: Shopify changed the items after the waybill was created. Cancel the waybill and create a new one with the current items; if the parcel has already been handed over, ask the owner.",
+    "shipment.shopifyLinesPending":
+      "Shopify changed the order items after the waybill was created and the app has not applied them yet. Cancel the waybill (the app re-reads the order) and create a new one; if the parcel has already been handed over, only the owner can confirm.",
+
+    "order.shippedOutside.title": "Order fulfilled in Shopify outside the app",
+    "order.shippedOutside.body":
+      "Shopify shows the order as fulfilled, but there is no app waybill. A new waybill cannot be created — it would ship the order twice. If the goods were really shipped (another carrier, pickup), confirm “Shipped outside the app”.",
+    "order.shippedOutside.bodyPartial":
+      "Shopify shows the order as partially fulfilled, but there is no app waybill. A waybill cannot be created in the app: packing and the waybill would also include items already shipped. Ship the rest outside the app and confirm “Shipped outside the app” once all items have left the warehouse.",
+    "order.shippedOutside.button": "Shipped outside the app",
+    "order.shippedOutside.help": "Reserved stock is written off once; nothing is sent to the carrier or Shopify.",
+    "order.shippedOutside.confirmTitle": "Mark the order as shipped outside the app?",
+    "order.shippedOutside.confirm": "Yes, shipped",
+    "order.shippedOutside.confirmBody":
+      "Confirm only if ALL items of the order have physically left the warehouse without an app waybill. The status becomes “Handed to carrier”; no waybill is created and nothing changes in Shopify (the order is already fulfilled there).",
+    "order.shippedOutside.confirmStock": "Reserved items will be written off the stock (once).",
+    "order.shippedOutside.result.done": "The order is marked as shipped outside the app; the stock reservation was written off.",
+    "order.shippedOutside.result.already": "The order has already been shipped — nothing changed.",
+    "order.shippedOutside.notFulfilledInShopify":
+      "Shopify does not show this order as fulfilled — it cannot be marked as shipped outside the app (the app's and Shopify's stock would diverge).",
+    "order.shippedOutside.activeWaybill":
+      "The order has an app waybill: confirm the handover to the carrier in the waybill card or cancel the waybill first.",
 
     "order.shopifySync.title": "Shopify sync",
     "order.shopifySync.label": "Corrected contacts and address in Shopify",

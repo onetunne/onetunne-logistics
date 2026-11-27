@@ -175,10 +175,11 @@ describe("availableDocumentKinds", () => {
       expect(availableDocumentKinds(ctx, { ...base, status })).toEqual([]);
     }
     expect(availableDocumentKinds(ctx, { ...base, waybillNumber: null })).toEqual([]);
-    // Перевізник без документів, невідомий перевізник, тестовий перевізник демо.
+    // Перевізник без документів, невідомий перевізник.
     expect(availableDocumentKinds(ctx, { ...base, carrierCode: "nodocs" })).toEqual([]);
     expect(availableDocumentKinds(ctx, { ...base, carrierCode: "missing" })).toEqual([]);
-    expect(availableDocumentKinds(ctx, { ...base, carrierCode: TEST_CARRIER_CODE })).toEqual([]);
+    // Етап 5: тестовий перевізник демо видає лише зразок етикетки (TEST), щоб друк етикеток можна було перевірити в демо.
+    expect(availableDocumentKinds(ctx, { ...base, carrierCode: TEST_CARRIER_CODE })).toEqual(["label"]);
   });
 });
 

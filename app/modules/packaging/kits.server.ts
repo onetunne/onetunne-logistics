@@ -1,20 +1,29 @@
 /**
- * Шаблони комплектації (kit_templates + рядки + товари) і розрахунок матеріалів для замовлення
- * (docs/stage5-design.md §5). Правила об'єднання — kit-resolution.ts (чиста функція).
+ * Шаблони комплектації (kit_templates + рядки + товари/колекції + фільтр моделі/кольору) і розрахунок матеріалів для
+ * замовлення (docs/stage5-design.md §5). Правила застосування й об'єднання — kit-resolution.ts (чиста функція).
  *
  * Дозволи: перегляд — warehouse.view; створення/зміна/видалення — warehouse.adjust (типово власник).
- * «Колекція/група» товарів — перелік товарів шаблону (kit_template_products); у формі — пошук і фільтр за моделлю/кольором.
+ * Цілі шаблону: усі товари / вибрані товари / колекції Shopify (членство — modules/shopify-sync/collections.server.ts;
+ * новий товар колекції охоплюється автоматично) + необов'язковий фільтр за моделлю/кольором варіанта.
+ *
+ * Список товарів і колекцій для форми обмежений (MAX_KIT_*_OPTIONS) і НЕ обрізається мовчки: товари/колекції, уже
+ * призначені шаблонам, завжди входять у список (окремим запитом без ліміту), а `truncated` + пошук на сервері
+ * (`query`) дають знайти решту. Збереження замінює перелік повністю, тому все призначене мусить потрапити у форму.
  */
-import { and, asc, desc, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, or, sql, type SQL } from "drizzle-orm";
 import type { DbOrTx } from "~/db/client.server";
 import {
+  collections,
+  kitTemplateCollections,
   kitTemplateLines,
   kitTemplateProducts,
   kitTemplates,
   orderLineItems,
   packagingMaterials,
+  productCollections,
   productVariants,
   products,
+  type KitAppliesTo,
   type MaterialUnit,
   type PackagingMaterialKind,
 } from "~/db/schema";
@@ -26,7 +35,7 @@ import { computeKitMaterials, type KitMaterialRequirement, type KitTemplateForRe
 import { kitTemplateInputSchema, type KitTemplateInput, type ParsedKitTemplateInput } from "./schemas";
 import { matchesVersion, touchedAt, versionToken } from "./version";
 
-export type KitAppliesTo = "all" | "products";
+export type { KitAppliesTo } from "~/db/schema";
 export type KitLinePer = "order" | "item";
 
 export interface KitLineView {
@@ -48,6 +57,15 @@ export interface KitProductView {
   status: string | null;
 }
 
+export interface KitCollectionView {
+  id: string;
+  title: string;
+  /** Колекцію видалено в Shopify: шаблон на неї більше не діє (видно на сторінці). */
+  deleted: boolean;
+  /** Товарів у колекції (за синхронізованим членством). */
+  productsCount: number;
+}
+
 export interface KitTemplateView {
   id: string;
   name: string;
@@ -56,11 +74,27 @@ export interface KitTemplateView {
   active: boolean;
   lines: KitLineView[];
   products: KitProductView[];
+  collections: KitCollectionView[];
+  /** Фільтр варіантів (порожній — без фільтра). */
+  models: string[];
+  colors: string[];
   /** Мітка версії для оптимістичного блокування форми (version.ts). */
   version: string;
 }
 
-/** Усі шаблони (активні спершу, пріоритет ↓, назва ↑) з рядками й товарами. */
+/** Кількість товарів (не видалених у Shopify) у кожній колекції. */
+async function collectionProductCounts(db: DbOrTx, collectionIds: readonly string[]): Promise<Map<string, number>> {
+  if (collectionIds.length === 0) return new Map();
+  const rows = await db
+    .select({ collectionId: productCollections.collectionId, c: sql<number>`count(*)::int` })
+    .from(productCollections)
+    .innerJoin(products, eq(products.id, productCollections.productId))
+    .where(and(inArray(productCollections.collectionId, [...collectionIds]), or(isNull(products.status), ne(products.status, "DELETED"))))
+    .groupBy(productCollections.collectionId);
+  return new Map(rows.map((r) => [r.collectionId, Number(r.c)]));
+}
+
+/** Усі шаблони (активні спершу, пріоритет ↓, назва ↑) з рядками, товарами й колекціями. */
 export async function listKitTemplates(db: DbOrTx, opts: { ids?: string[]; includeInactive?: boolean } = {}): Promise<KitTemplateView[]> {
   if (opts.ids && opts.ids.length === 0) return [];
   const templates = await db
@@ -75,7 +109,7 @@ export async function listKitTemplates(db: DbOrTx, opts: { ids?: string[]; inclu
     .orderBy(desc(kitTemplates.active), desc(kitTemplates.priority), asc(kitTemplates.name), asc(kitTemplates.id));
   if (templates.length === 0) return [];
   const ids = templates.map(({ t }) => t.id);
-  const [lines, links] = await Promise.all([
+  const [lines, links, collectionLinks] = await Promise.all([
     db
       .select({ line: kitTemplateLines, material: packagingMaterials })
       .from(kitTemplateLines)
@@ -88,7 +122,14 @@ export async function listKitTemplates(db: DbOrTx, opts: { ids?: string[]; inclu
       .innerJoin(products, eq(products.id, kitTemplateProducts.productId))
       .where(inArray(kitTemplateProducts.templateId, ids))
       .orderBy(asc(products.title), asc(products.id)),
+    db
+      .select({ templateId: kitTemplateCollections.templateId, collection: collections })
+      .from(kitTemplateCollections)
+      .innerJoin(collections, eq(collections.id, kitTemplateCollections.collectionId))
+      .where(inArray(kitTemplateCollections.templateId, ids))
+      .orderBy(asc(collections.title), asc(collections.id)),
   ]);
+  const counts = await collectionProductCounts(db, [...new Set(collectionLinks.map((l) => l.collection.id))]);
   return templates.map(({ t, version }) => ({
     id: t.id,
     name: t.name,
@@ -96,6 +137,8 @@ export async function listKitTemplates(db: DbOrTx, opts: { ids?: string[]; inclu
     priority: t.priority,
     active: t.active,
     version,
+    models: [...t.variantModels],
+    colors: [...t.variantColors],
     lines: lines
       .filter((l) => l.line.templateId === t.id)
       .map(({ line, material }) => ({
@@ -112,6 +155,14 @@ export async function listKitTemplates(db: DbOrTx, opts: { ids?: string[]; inclu
     products: links
       .filter((l) => l.templateId === t.id)
       .map(({ product }) => ({ id: product.id, title: product.title, imageUrl: product.imageUrl, status: product.status })),
+    collections: collectionLinks
+      .filter((l) => l.templateId === t.id)
+      .map(({ collection }) => ({
+        id: collection.id,
+        title: collection.title,
+        deleted: collection.deletedAt !== null,
+        productsCount: counts.get(collection.id) ?? 0,
+      })),
   }));
 }
 
@@ -120,6 +171,10 @@ export async function getKitTemplate(db: DbOrTx, id: string): Promise<KitTemplat
   if (!row) throw new NotFoundError("kitTemplate");
   return row;
 }
+
+// ---------------------------------------------------------------------------
+// Варіанти вибору для форми
+// ---------------------------------------------------------------------------
 
 export interface KitProductOption {
   id: string;
@@ -131,27 +186,61 @@ export interface KitProductOption {
   skus: string[];
 }
 
+export interface KitOptionsPage<T> {
+  options: T[];
+  /** Скільки варіантів відповідає умовам (без урахування ліміту; призначені поза умовами не рахуються). */
+  total: number;
+  /** Показано не всі (total > limit): решту можна знайти пошуком. */
+  truncated: boolean;
+  limit: number;
+}
+
 export const MAX_KIT_PRODUCT_OPTIONS = 2000;
+export const MAX_KIT_COLLECTION_OPTIONS = 500;
+export const MAX_KIT_OPTION_QUERY_LENGTH = 100;
+
+const likePattern = (search: string) =>
+  `%${search
+    .trim()
+    .slice(0, MAX_KIT_OPTION_QUERY_LENGTH)
+    .replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+
+const ACTIVE_PRODUCT_STATUSES = ["ACTIVE", "active", "DRAFT", "draft"];
+
+const sortedValues = (s: Set<string> | undefined) => [...(s ?? [])].sort((a, b) => a.localeCompare(b));
 
 /**
- * Товари для вибору у формі шаблону: активні/чернетки (або всі, якщо includeIds містить архівні) з моделями,
- * кольорами й SKU варіантів — для пошуку й фільтрів на клієнті. Зображення — збережені URL Shopify.
+ * Товари для вибору у формі шаблону: активні/чернетки (за пошуком `query` — назва, handle, SKU, штрихкод, модель,
+ * колір) з моделями, кольорами й SKU варіантів, до `limit`. Призначені шаблонам (`includeIds`) — ЗАВЖДИ, окремим
+ * запитом без ліміту й незалежно від статусу та пошуку (інакше збереження форми мовчки прибрало б їх із шаблону).
  */
-export async function listKitProductOptions(db: DbOrTx, opts: { includeIds?: readonly string[] } = {}): Promise<KitProductOption[]> {
+export async function listKitProductOptions(
+  db: DbOrTx,
+  opts: { includeIds?: readonly string[]; query?: string; limit?: number } = {},
+): Promise<KitOptionsPage<KitProductOption>> {
   const include = [...new Set(opts.includeIds ?? [])];
-  const rows = await db
-    .select({ product: products })
-    .from(products)
-    .where(
-      or(
-        sql`${products.status} is null`,
-        inArray(products.status, ["ACTIVE", "active", "DRAFT", "draft"]),
-        include.length ? inArray(products.id, include) : undefined,
-      ),
-    )
-    .orderBy(asc(products.title), asc(products.id))
-    .limit(MAX_KIT_PRODUCT_OPTIONS);
-  const ids = rows.map((r) => r.product.id);
+  const limit = Math.max(1, Math.min(opts.limit ?? MAX_KIT_PRODUCT_OPTIONS, MAX_KIT_PRODUCT_OPTIONS));
+  const q = opts.query?.trim() ? likePattern(opts.query) : null;
+  const where: SQL | undefined = and(
+    or(sql`${products.status} is null`, inArray(products.status, ACTIVE_PRODUCT_STATUSES)),
+    q
+      ? or(
+          sql`${products.title} ilike ${q}`,
+          sql`${products.handle} ilike ${q}`,
+          sql`exists (select 1 from ${productVariants} pv where pv.product_id = ${products.id}
+            and (pv.sku ilike ${q} or pv.barcode ilike ${q} or pv.model ilike ${q} or pv.color ilike ${q} or pv.title ilike ${q}))`,
+        )
+      : undefined,
+  );
+  const [matching, [totalRow], assigned] = await Promise.all([
+    db.select({ product: products }).from(products).where(where).orderBy(asc(products.title), asc(products.id)).limit(limit),
+    db.select({ c: sql<number>`count(*)::int` }).from(products).where(where),
+    include.length ? db.select({ product: products }).from(products).where(inArray(products.id, include)) : Promise.resolve([]),
+  ]);
+  const byId = new Map<string, typeof products.$inferSelect>();
+  for (const r of [...matching, ...assigned]) byId.set(r.product.id, r.product);
+  const rows = [...byId.values()].sort((a, b) => a.title.localeCompare(b.title) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const ids = rows.map((r) => r.id);
   const variants = ids.length
     ? await db
         .select({ productId: productVariants.productId, model: productVariants.model, color: productVariants.color, sku: productVariants.sku })
@@ -166,16 +255,106 @@ export async function listKitProductOptions(db: DbOrTx, opts: { includeIds?: rea
     if (v.sku) e.skus.add(v.sku);
     by.set(v.productId, e);
   }
-  const sorted = (s: Set<string> | undefined) => [...(s ?? [])].sort((a, b) => a.localeCompare(b));
-  return rows.map(({ product }) => ({
-    id: product.id,
-    title: product.title,
-    imageUrl: product.imageUrl,
-    status: product.status,
-    models: sorted(by.get(product.id)?.models),
-    colors: sorted(by.get(product.id)?.colors),
-    skus: sorted(by.get(product.id)?.skus),
-  }));
+  const total = Number(totalRow?.c ?? 0);
+  return {
+    options: rows.map((product) => ({
+      id: product.id,
+      title: product.title,
+      imageUrl: product.imageUrl,
+      status: product.status,
+      models: sortedValues(by.get(product.id)?.models),
+      colors: sortedValues(by.get(product.id)?.colors),
+      skus: sortedValues(by.get(product.id)?.skus),
+    })),
+    total,
+    truncated: total > limit,
+    limit,
+  };
+}
+
+export interface KitCollectionOption extends KitCollectionView {
+  handle: string | null;
+}
+
+/**
+ * Колекції для вибору у формі (не видалені; за пошуком — назва або handle), до `limit`. Призначені шаблонам — завжди
+ * (зокрема видалені в Shopify, щоб власник бачив і міг прибрати їх).
+ */
+export async function listKitCollectionOptions(
+  db: DbOrTx,
+  opts: { includeIds?: readonly string[]; query?: string; limit?: number } = {},
+): Promise<KitOptionsPage<KitCollectionOption>> {
+  const include = [...new Set(opts.includeIds ?? [])];
+  const limit = Math.max(1, Math.min(opts.limit ?? MAX_KIT_COLLECTION_OPTIONS, MAX_KIT_COLLECTION_OPTIONS));
+  const q = opts.query?.trim() ? likePattern(opts.query) : null;
+  const where = and(isNull(collections.deletedAt), q ? or(sql`${collections.title} ilike ${q}`, sql`${collections.handle} ilike ${q}`) : undefined);
+  const [matching, [totalRow], assigned] = await Promise.all([
+    db.select().from(collections).where(where).orderBy(asc(collections.title), asc(collections.id)).limit(limit),
+    db.select({ c: sql<number>`count(*)::int` }).from(collections).where(where),
+    include.length ? db.select().from(collections).where(inArray(collections.id, include)) : Promise.resolve([]),
+  ]);
+  const byId = new Map<string, typeof collections.$inferSelect>();
+  for (const r of [...matching, ...assigned]) byId.set(r.id, r);
+  const rows = [...byId.values()].sort((a, b) => a.title.localeCompare(b.title) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const counts = await collectionProductCounts(db, rows.map((r) => r.id));
+  const total = Number(totalRow?.c ?? 0);
+  return {
+    options: rows.map((c) => ({ id: c.id, title: c.title, handle: c.handle, deleted: c.deletedAt !== null, productsCount: counts.get(c.id) ?? 0 })),
+    total,
+    truncated: total > limit,
+    limit,
+  };
+}
+
+export const MAX_KIT_ATTRIBUTE_OPTIONS = 500;
+
+/** Моделі й кольори варіантів каталогу (без видалених товарів) — для фільтра шаблону. */
+export async function listKitVariantAttributes(db: DbOrTx): Promise<{ models: string[]; colors: string[] }> {
+  const live = or(isNull(products.status), ne(products.status, "DELETED"));
+  const [models, colors] = await Promise.all([
+    db
+      .selectDistinct({ v: productVariants.model })
+      .from(productVariants)
+      .innerJoin(products, eq(products.id, productVariants.productId))
+      .where(and(isNotNull(productVariants.model), live))
+      .orderBy(asc(productVariants.model))
+      .limit(MAX_KIT_ATTRIBUTE_OPTIONS),
+    db
+      .selectDistinct({ v: productVariants.color })
+      .from(productVariants)
+      .innerJoin(products, eq(products.id, productVariants.productId))
+      .where(and(isNotNull(productVariants.color), live))
+      .orderBy(asc(productVariants.color))
+      .limit(MAX_KIT_ATTRIBUTE_OPTIONS),
+  ]);
+  const clean = (rows: Array<{ v: string | null }>) =>
+    [...new Set(rows.map((r) => r.v?.trim() ?? "").filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  return { models: clean(models), colors: clean(colors) };
+}
+
+/** Моделі варіантів кожного товару (для фільтра списку шаблонів за моделлю). */
+export async function productModels(db: DbOrTx, productIds: readonly string[]): Promise<Map<string, string[]>> {
+  if (productIds.length === 0) return new Map();
+  const rows = await db
+    .selectDistinct({ productId: productVariants.productId, model: productVariants.model })
+    .from(productVariants)
+    .where(and(inArray(productVariants.productId, [...new Set(productIds)]), isNotNull(productVariants.model)));
+  const out = new Map<string, string[]>();
+  for (const r of rows) out.set(r.productId, [...(out.get(r.productId) ?? []), r.model!]);
+  return out;
+}
+
+/** Моделі варіантів товарів кожної колекції (для фільтра списку шаблонів за моделлю). */
+export async function collectionModels(db: DbOrTx, collectionIds: readonly string[]): Promise<Map<string, string[]>> {
+  if (collectionIds.length === 0) return new Map();
+  const rows = await db
+    .selectDistinct({ collectionId: productCollections.collectionId, model: productVariants.model })
+    .from(productCollections)
+    .innerJoin(productVariants, eq(productVariants.productId, productCollections.productId))
+    .where(and(inArray(productCollections.collectionId, [...collectionIds]), isNotNull(productVariants.model)));
+  const out = new Map<string, string[]>();
+  for (const r of rows) out.set(r.collectionId, [...(out.get(r.collectionId) ?? []), r.model!]);
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -191,29 +370,42 @@ async function writeChildren(tx: DbOrTx, templateId: string, parsed: ParsedKitTe
     const p = await tx.select({ id: products.id }).from(products).where(inArray(products.id, productIds));
     if (p.length !== productIds.length) throw new NotFoundError("product");
   }
+  const collectionIds = parsed.appliesTo === "collections" ? [...new Set(parsed.collectionIds)] : [];
+  if (collectionIds.length) {
+    const c = await tx.select({ id: collections.id }).from(collections).where(inArray(collections.id, collectionIds));
+    if (c.length !== collectionIds.length) throw new NotFoundError("collection");
+  }
   await tx.delete(kitTemplateLines).where(eq(kitTemplateLines.templateId, templateId));
   await tx.delete(kitTemplateProducts).where(eq(kitTemplateProducts.templateId, templateId));
+  await tx.delete(kitTemplateCollections).where(eq(kitTemplateCollections.templateId, templateId));
   await tx.insert(kitTemplateLines).values(parsed.lines.map((l) => ({ templateId, materialId: l.materialId, quantity: l.quantity, per: l.per })));
   if (productIds.length) await tx.insert(kitTemplateProducts).values(productIds.map((productId) => ({ templateId, productId })));
-  return { lines: parsed.lines.length, products: productIds.length };
+  if (collectionIds.length) await tx.insert(kitTemplateCollections).values(collectionIds.map((collectionId) => ({ templateId, collectionId })));
+  return { lines: parsed.lines.length, products: productIds.length, collections: collectionIds.length, models: parsed.models.length, colors: parsed.colors.length };
 }
+
+const templateColumns = (parsed: ParsedKitTemplateInput) => ({
+  name: parsed.name,
+  appliesTo: parsed.appliesTo,
+  priority: parsed.priority,
+  active: parsed.active,
+  variantModels: parsed.models,
+  variantColors: parsed.colors,
+});
 
 /** Новий шаблон (warehouse.adjust). */
 export async function createKitTemplate(ctx: ServiceContext, input: KitTemplateInput): Promise<{ id: string }> {
   requirePermission(ctx.actor, "warehouse.adjust");
   const parsed = kitTemplateInputSchema.parse(input);
   return ctx.db.transaction(async (tx) => {
-    const [row] = await tx
-      .insert(kitTemplates)
-      .values({ name: parsed.name, appliesTo: parsed.appliesTo, priority: parsed.priority, active: parsed.active })
-      .returning({ id: kitTemplates.id });
+    const [row] = await tx.insert(kitTemplates).values(templateColumns(parsed)).returning({ id: kitTemplates.id });
     const counts = await writeChildren(tx, row!.id, parsed);
     await writeAudit(tx, ctx.actor, "packaging.kit.created", { type: "kit_template", id: row!.id }, { appliesTo: parsed.appliesTo, ...counts });
     return { id: row!.id };
   });
 }
 
-/** Зміна шаблону: рядки й товари замінюються повністю (warehouse.adjust). expectedVersion — мітка з форми. */
+/** Зміна шаблону: рядки, товари й колекції замінюються повністю (warehouse.adjust). expectedVersion — мітка з форми. */
 export async function updateKitTemplate(
   ctx: ServiceContext,
   id: string,
@@ -225,7 +417,7 @@ export async function updateKitTemplate(
   await ctx.db.transaction(async (tx) => {
     const updated = await tx
       .update(kitTemplates)
-      .set({ name: parsed.name, appliesTo: parsed.appliesTo, priority: parsed.priority, active: parsed.active, updatedAt: touchedAt() })
+      .set({ ...templateColumns(parsed), updatedAt: touchedAt() })
       .where(and(eq(kitTemplates.id, id), opts.expectedVersion ? matchesVersion(kitTemplates.updatedAt, opts.expectedVersion) : undefined))
       .returning({ id: kitTemplates.id });
     if (updated.length === 0) {
@@ -280,18 +472,19 @@ export interface KitMaterialNeed extends KitMaterialRequirement {
   unit: MaterialUnit;
 }
 
-/** Активні шаблони з рядками (лише активні матеріали) і товарами — у вигляді для computeKitMaterials. */
+/** Активні шаблони з рядками (лише активні матеріали), товарами, колекціями й фільтрами — для computeKitMaterials. */
 export async function loadActiveKitTemplates(db: DbOrTx): Promise<KitTemplateForResolution[]> {
   const templates = await db.select().from(kitTemplates).where(eq(kitTemplates.active, true));
   if (templates.length === 0) return [];
   const ids = templates.map((t) => t.id);
-  const [lines, links] = await Promise.all([
+  const [lines, links, collectionLinks] = await Promise.all([
     db
       .select({ line: kitTemplateLines, active: packagingMaterials.active })
       .from(kitTemplateLines)
       .innerJoin(packagingMaterials, eq(packagingMaterials.id, kitTemplateLines.materialId))
       .where(inArray(kitTemplateLines.templateId, ids)),
     db.select().from(kitTemplateProducts).where(inArray(kitTemplateProducts.templateId, ids)),
+    db.select().from(kitTemplateCollections).where(inArray(kitTemplateCollections.templateId, ids)),
   ]);
   return templates.map((t) => ({
     id: t.id,
@@ -299,10 +492,39 @@ export async function loadActiveKitTemplates(db: DbOrTx): Promise<KitTemplateFor
     priority: t.priority,
     active: t.active,
     productIds: links.filter((l) => l.templateId === t.id).map((l) => l.productId),
+    collectionIds: collectionLinks.filter((l) => l.templateId === t.id).map((l) => l.collectionId),
+    models: t.variantModels,
+    colors: t.variantColors,
     lines: lines
       .filter((l) => l.line.templateId === t.id)
       .map((l) => ({ materialId: l.line.materialId, quantity: l.line.quantity, per: l.line.per, materialActive: l.active })),
   }));
+}
+
+/** Позиції замовлення для розрахунку: товар, модель/колір варіанта, колекції товару (без видалених). */
+async function loadKitOrderLines(db: DbOrTx, orderId: string) {
+  const lines = await db
+    .select({
+      productId: productVariants.productId,
+      model: productVariants.model,
+      color: productVariants.color,
+      quantity: orderLineItems.quantity,
+      currentQuantity: orderLineItems.currentQuantity,
+    })
+    .from(orderLineItems)
+    .innerJoin(productVariants, eq(productVariants.id, orderLineItems.variantId))
+    .where(and(eq(orderLineItems.orderId, orderId), isNotNull(orderLineItems.variantId)));
+  const productIds = [...new Set(lines.map((l) => l.productId))];
+  const memberships = productIds.length
+    ? await db
+        .select({ productId: productCollections.productId, collectionId: productCollections.collectionId })
+        .from(productCollections)
+        .innerJoin(collections, eq(collections.id, productCollections.collectionId))
+        .where(and(inArray(productCollections.productId, productIds), isNull(collections.deletedAt)))
+    : [];
+  const byProduct = new Map<string, string[]>();
+  for (const m of memberships) byProduct.set(m.productId, [...(byProduct.get(m.productId) ?? []), m.collectionId]);
+  return lines.map((l) => ({ ...l, collectionIds: byProduct.get(l.productId) ?? [] }));
 }
 
 /**
@@ -310,11 +532,7 @@ export async function loadActiveKitTemplates(db: DbOrTx): Promise<KitTemplateFor
  * матеріалом. Кількість одиниць — effectiveLineQuantity (без повернених/видалених). Порожній масив — нічого не потрібно.
  */
 export async function resolveKitMaterials(db: DbOrTx, orderId: string): Promise<KitMaterialNeed[]> {
-  const lines = await db
-    .select({ productId: productVariants.productId, quantity: orderLineItems.quantity, currentQuantity: orderLineItems.currentQuantity })
-    .from(orderLineItems)
-    .innerJoin(productVariants, eq(productVariants.id, orderLineItems.variantId))
-    .where(and(eq(orderLineItems.orderId, orderId), isNotNull(orderLineItems.variantId)));
+  const lines = await loadKitOrderLines(db, orderId);
   if (lines.length === 0) return [];
   const requirements = computeKitMaterials(await loadActiveKitTemplates(db), lines);
   if (requirements.length === 0) return [];

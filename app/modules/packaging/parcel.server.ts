@@ -91,8 +91,8 @@ function toChoice(
 /**
  * План коробки для накладної (передається в buildShipmentRequest; пріоритет джерел — parcel.ts):
  * 1. orders.parcel_box_material_id (коробка, вибрана вручну; вид box | mailer, активність не важлива — її вже
- *    використано) → manual_box: з ручними габаритами посилки — завжди (від коробки — тара, код, id; її габарити не
- *    потрібні), без них — лише якщо в коробки задано внутрішні габарити;
+ *    використано) → manual_box: завжди (від коробки — тара, код, id; габарити — її внутрішні, ручні габарити посилки
+ *    або, якщо немає ні тих, ні інших, — типової упаковки: chooseParcelPackage). Іншу коробку не підставляємо;
  * 2. ручні габарити посилки (усі три) без вибраної коробки → підбір не потрібен (box = null, тара — типової упаковки);
  * 3. автоматичний підбір → auto_box лише при reason = "fits" (усі товари мають габарити й вагу перевірено);
  *    неточний підбір (лише за вагою / частина без габаритів) або невдалий → null (типова упаковка), причина — у autoReason.
@@ -105,7 +105,7 @@ export async function planParcelBox(
   const manualDims = Boolean(order.parcelLengthMm && order.parcelWidthMm && order.parcelHeightMm);
   if (order.parcelBoxMaterialId) {
     const [m] = await db.select().from(packagingMaterials).where(eq(packagingMaterials.id, order.parcelBoxMaterialId));
-    if (m && BOX_KINDS.includes(m.kind) && (manualDims || boxInnerDims(m) !== null)) {
+    if (m && BOX_KINDS.includes(m.kind)) {
       return { box: toChoice("manual_box", m), autoReason: null };
     }
   }

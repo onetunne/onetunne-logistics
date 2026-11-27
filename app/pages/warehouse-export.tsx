@@ -9,6 +9,7 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { can, ForbiddenError } from "~/domain/permissions";
 import { DomainError } from "~/lib/errors";
+import { hasKey, translate, type Locale, type TranslateParams } from "~/i18n";
 import { logger } from "~/lib/logger.server";
 import { resolvePeriod } from "~/modules/warehouse-analytics/calc";
 import { CSV_CONTENT_TYPE } from "~/modules/warehouse-analytics/csv";
@@ -18,22 +19,31 @@ import { filtersOf, parseAnalyticsQuery, parseExportParams } from "~/modules/war
 import { businessDate } from "~/modules/warehouse/dates";
 import { getRequestContext } from "~/server/context.server";
 
-function text(status: number, message: string): Response {
-  return new Response(message, {
+/**
+ * Помилка — людським текстом мовою запиту (посилання можуть відкрити напряму: закладка, пересилання), а ключ i18n —
+ * у заголовку X-Export-Error (для програм). Сторінка аналітики показує власний текст за статусом (export-contract.ts).
+ */
+function text(locale: Locale, status: number, key: string, params?: TranslateParams): Response {
+  return new Response(translate(locale, hasKey(key) ? key : "warehouseAnalytics.export.error.generic", params), {
     status,
-    headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" },
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      "X-Export-Error": key,
+    },
   });
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const ctx = await getRequestContext(request);
-  if (!can(ctx.actor, "warehouse.view")) return text(403, "Forbidden");
+  if (!can(ctx.actor, "warehouse.view")) return text(ctx.locale, 403, "warehouseAnalytics.export.error.forbidden");
   const url = new URL(request.url);
   const { dataset, separator } = parseExportParams(url.searchParams);
-  if (!dataset) return text(400, "warehouseAnalytics.export.error.dataset");
+  if (!dataset) return text(ctx.locale, 400, "warehouseAnalytics.export.error.dataset");
   const query = parseAnalyticsQuery(url.searchParams);
   const period = resolvePeriod({ key: query.period, from: query.from, to: query.to, today: businessDate(ctx.now()) });
-  if (period.invalid) return text(400, "warehouseAnalytics.export.error.period");
+  if (period.invalid) return text(ctx.locale, 400, "warehouseAnalytics.export.error.period");
   try {
     const csv = await exportWarehouseCsv(ctx, { dataset, separator, period, filters: filtersOf(query) });
     return new Response(csv.content, {
@@ -50,9 +60,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
       },
     });
   } catch (e) {
-    if (e instanceof ForbiddenError) return text(403, "Forbidden");
-    if (e instanceof DomainError) return text(409, e.code);
+    if (e instanceof ForbiddenError) return text(ctx.locale, 403, "warehouseAnalytics.export.error.forbidden");
+    if (e instanceof DomainError) return text(ctx.locale, 409, e.code, e.params);
     logger.error("warehouse.export_failed", { dataset, error: e });
-    return text(500, "error.generic");
+    return text(ctx.locale, 500, "warehouseAnalytics.export.error.generic");
   }
 }

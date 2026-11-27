@@ -32,6 +32,7 @@ import {
 } from "~/modules/packing/constants";
 import {
   adjustPackedLine,
+  confirmCancelledPackingReturned,
   confirmPacked,
   recordScan,
   savePackingParcel,
@@ -232,9 +233,20 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<P
         return {
           ok: true,
           message: needsWaybill ? "packing.unpack.doneNeedsWaybill" : "packing.unpack.done",
-          extra: r.materialsConsumed ? ["packing.unpack.materialsNote"] : [],
+          extra: [
+            ...(r.materialsConsumed ? ["packing.unpack.materialsNote"] : []),
+            // Етап 5: зміни позицій із Shopify застосує повторне читання замовлення (поставлено в чергу).
+            ...(r.shopifyResync === "queued" ? ["order.shopifyLines.resyncQueued"] : []),
+          ],
           tone: needsWaybill ? "warning" : "success",
         };
+      }
+      case "returned": {
+        // Етап 5: замовлення скасовано після пакування — склад розібрав посилку й повернув товар на полицю.
+        const r = await confirmCancelledPackingReturned(ctx, orderId);
+        return r.kind === "returned"
+          ? { ok: true, message: "packing.cancelledAfter.returned", tone: "success" }
+          : { ok: true, message: "packing.cancelledAfter.nothing", tone: "info" };
       }
       case "priority": {
         const priority = parsePriority(formString(form, "priority"));
@@ -313,9 +325,15 @@ export default function PackingOrderPage() {
     >
       <Stack gap={4}>
         <ActionBanner data={actionData} />
-        {closed ? (
+        {data.cancelledAfterPacking ? (
+          <CancelledAfterPackingBanner data={data} />
+        ) : closed ? (
           <Banner tone="info" action={<Button to={href(`orders/${order.id}`)}>{t("packing.screen.toOrder")}</Button>}>
             {t(order.status === "cancelled" ? "packing.screen.cancelled" : "packing.screen.shipped")}
+          </Banner>
+        ) : data.deletedAtCarrier ? (
+          <Banner tone="critical" title={t("tracking.deleted.title")} action={<Button to={href(`orders/${order.id}`)}>{t("packing.screen.toOrder")}</Button>}>
+            {t("packing.screen.deletedAtCarrier")}
           </Banner>
         ) : data.packedWithoutWaybill ? (
           <Banner tone="warning" title={t("packing.screen.packedNoWaybill.title")} action={<Button to={href(`orders/${order.id}`)}>{t("packing.screen.toOrder")}</Button>}>
@@ -324,6 +342,17 @@ export default function PackingOrderPage() {
         ) : !shipment?.packable && !packed ? (
           <Banner tone="warning" title={t("packing.screen.noWaybill.title")} action={<Button to={href(`orders/${order.id}`)}>{t("packing.screen.toOrder")}</Button>}>
             {t("packing.screen.noWaybill.body")}
+          </Banner>
+        ) : null}
+        {!closed && data.fulfilledInShopify ? (
+          <Banner tone="critical" title={t("packing.screen.fulfilledInShopify.title")} action={<Button to={href(`orders/${order.id}`)}>{t("packing.screen.toOrder")}</Button>}>
+            {t("packing.screen.fulfilledInShopify.body")}
+          </Banner>
+        ) : null}
+        {!closed && data.shopifyLinesPending ? (
+          <Banner tone="critical" title={t("packing.screen.shopifyLinesPending.title")} action={<Button to={href(`orders/${order.id}`)}>{t("packing.screen.toOrder")}</Button>}>
+            <p>{t("packing.screen.shopifyLinesPending.body")}</p>
+            {data.canOverride ? <p>{t("packing.screen.shopifyLinesPending.owner")}</p> : null}
           </Banner>
         ) : null}
         {data.mismatch ? <MismatchBanner data={data} /> : null}
@@ -997,6 +1026,34 @@ function ParcelForm({ data }: { data: Data }) {
   );
 }
 
+/** Скасовано після початку пакування / «Запаковано»: розібрати посилку, повернути товар, потім «Повернуто на склад». */
+function CancelledAfterPackingBanner({ data }: { data: Data }) {
+  const t = useT();
+  const busy = useBusy();
+  const info = data.cancelledAfterPacking!;
+  return (
+    <Banner tone="warning" title={t("packing.cancelledAfter.title")}>
+      <Stack gap={3}>
+        <Text>{t(info.previousStatus === "packed" ? "packing.cancelledAfter.bodyPacked" : "packing.cancelledAfter.bodyInProgress")}</Text>
+        {info.materialsConsumed ? <Text weight="semibold">{t("packing.cancelledAfter.materials")}</Text> : null}
+        <Form method="post">
+          <input type="hidden" name="intent" value="returned" />
+          <ConfirmSubmitButton
+            variant="primary"
+            loading={busy("returned")}
+            title={t("packing.cancelledAfter.confirmTitle")}
+            confirmLabel={t("packing.cancelledAfter.confirm")}
+            cancelLabel={t("common.cancel")}
+            message={<Text>{t("packing.cancelledAfter.confirmBody")}</Text>}
+          >
+            {t("packing.cancelledAfter.button")}
+          </ConfirmSubmitButton>
+        </Form>
+      </Stack>
+    </Banner>
+  );
+}
+
 function MismatchBanner({ data }: { data: Data }) {
   const t = useT();
   const locale = useLocale();
@@ -1077,7 +1134,7 @@ function ConfirmCard({ data, open, packed }: { data: Data; open: boolean; packed
         <Form method="post">
           <input type="hidden" name="intent" value="confirm" />
           <input type="hidden" name="version" value={packing.version} />
-          {progress.complete ? (
+          {progress.complete && !data.shopifyLinesPending && !data.fulfilledInShopify ? (
             <ConfirmSubmitButton
               variant="primary"
               fullWidth
@@ -1111,12 +1168,18 @@ function ConfirmCard({ data, open, packed }: { data: Data; open: boolean; packed
                 {t("packing.confirm.button")}
               </Button>
               <Text variant="body-sm" tone="subdued">
-                {t("packing.confirm.incomplete")}
+                {t(
+                  data.fulfilledInShopify
+                    ? "packing.confirm.blockedFulfilled"
+                    : data.shopifyLinesPending
+                      ? "packing.confirm.blockedShopifyLines"
+                      : "packing.confirm.incomplete",
+                )}
               </Text>
             </Stack>
           )}
         </Form>
-        {!progress.complete && data.canOverride ? (
+        {(!progress.complete || data.shopifyLinesPending) && !data.fulfilledInShopify && data.canOverride ? (
           <Disclosure summary={t("packing.override.summary")}>
             <Form method="post">
               <input type="hidden" name="intent" value="confirm" />
@@ -1138,7 +1201,12 @@ function ConfirmCard({ data, open, packed }: { data: Data; open: boolean; packed
                   title={t("packing.override.title")}
                   confirmLabel={t("packing.override.confirm")}
                   cancelLabel={t("common.cancel")}
-                  message={<Text>{t("packing.override.body", { packed: progress.packedUnits, required: progress.requiredUnits })}</Text>}
+                  message={
+                    <Stack gap={2}>
+                      <Text>{t("packing.override.body", { packed: progress.packedUnits, required: progress.requiredUnits })}</Text>
+                      {data.shopifyLinesPending ? <Text weight="semibold">{t("packing.override.shopifyLines")}</Text> : null}
+                    </Stack>
+                  }
                 >
                   {t("packing.override.button")}
                 </ConfirmSubmitButton>

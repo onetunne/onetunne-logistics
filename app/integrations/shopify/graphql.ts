@@ -24,7 +24,7 @@ const orderFields = (lineItemsFirst: number) => `
   lineItems(first: ${lineItemsFirst}) {
     pageInfo { hasNextPage }
     nodes {
-      id title variantTitle sku quantity currentQuantity
+      id createdAt title variantTitle sku quantity currentQuantity
       originalUnitPriceSet { ${MONEY} }
       image { url }
       variant { id product { id } }
@@ -71,6 +71,61 @@ export const PRODUCTS_PAGE_QUERY = `#graphql
     products(first: $first, after: $after) {
       pageInfo { hasNextPage endCursor }
       nodes { ${productFields(30)} }
+    }
+  }`;
+
+// --- Етап 5: колекції (read_products; поля звірено з shopify.dev 2026-10: Product.collections, QueryRoot.collections,
+// QueryRoot.collection, Collection.products — CollectionConnection/ProductConnection з first/after/pageInfo). ---
+// Обидва види колекцій (ручні й автоматичні) повертає той самий запит. Вартість запитів невелика (немає вкладених
+// варіантів): сторінка членства products(25) × collections(20) ≈ 577 балів < 1000.
+
+const COLLECTION_FIELDS = "id title handle updatedAt";
+
+/** Колекції одного товару (повний перелік — посторінково). */
+export const PRODUCT_COLLECTIONS_QUERY = `#graphql
+  query OtProductCollections($id: ID!, $first: Int!, $after: String) {
+    product(id: $id) {
+      id
+      collections(first: $first, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { ${COLLECTION_FIELDS} }
+      }
+    }
+  }`;
+
+/** Список колекцій магазину (повна синхронізація: назви й виявлення видалених). */
+export const COLLECTIONS_PAGE_QUERY = `#graphql
+  query OtCollections($first: Int!, $after: String) {
+    collections(first: $first, after: $after, sortKey: ID) {
+      pageInfo { hasNextPage endCursor }
+      nodes { ${COLLECTION_FIELDS} }
+    }
+  }`;
+
+/** Одна колекція з товарами (webhook collections/create|update: ручне додавання/вилучення товарів, зміна умов). */
+export const COLLECTION_PRODUCTS_QUERY = `#graphql
+  query OtCollection($id: ID!, $first: Int!, $after: String) {
+    collection(id: $id) {
+      ${COLLECTION_FIELDS}
+      products(first: $first, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id }
+      }
+    }
+  }`;
+
+/** Повна синхронізація членства: товари з їхніми колекціями (товар із більшою кількістю — окремим запитом). */
+export const PRODUCT_MEMBERSHIPS_PAGE_QUERY = `#graphql
+  query OtProductMemberships($first: Int!, $after: String, $collectionsFirst: Int!) {
+    products(first: $first, after: $after, sortKey: ID) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        id
+        collections(first: $collectionsFirst) {
+          pageInfo { hasNextPage endCursor }
+          nodes { ${COLLECTION_FIELDS} }
+        }
+      }
     }
   }`;
 
@@ -146,6 +201,11 @@ export interface GqlOrder {
     pageInfo?: { hasNextPage: boolean };
     nodes: Array<{
       id: string;
+      /**
+       * Етап 5: коли позицію створено (LineItem.createdAt, DateTime!, 2026-10) — позиція, додана редагуванням замовлення
+       * після знімка складу, не отримує корекції знімка. Відсутнє в старих тестових даних.
+       */
+      createdAt?: string;
       title: string;
       variantTitle: string | null;
       sku: string | null;
@@ -155,6 +215,7 @@ export interface GqlOrder {
       currentQuantity?: number;
       originalUnitPriceSet: GqlMoney;
       image: { url: string } | null;
+      /** null — варіант (або товар) видалено в Shopify після замовлення (REST: «can be null if … deleted»). */
       variant: { id: string; product: { id: string } | null } | null;
     }>;
   };
@@ -195,4 +256,16 @@ export interface GqlProduct {
 export interface PageInfo {
   hasNextPage: boolean;
   endCursor: string | null;
+}
+
+export interface GqlCollection {
+  id: string;
+  title: string;
+  handle: string;
+  updatedAt: string;
+}
+
+export interface GqlCollectionConnection {
+  pageInfo: PageInfo;
+  nodes: GqlCollection[];
 }

@@ -44,6 +44,7 @@ import {
 import type { Actor } from "~/domain/permissions";
 import { DomainError, NotFoundError } from "~/lib/errors";
 import { toMinor } from "~/lib/money";
+import { maskFreeTextNote } from "~/modules/privacy/notes";
 import { getSetting } from "~/modules/settings/settings.server";
 import { alertKindsFor, availableOf, stockLevelStatus, type StockLevelStatus } from "./alerts";
 import {
@@ -126,6 +127,20 @@ export interface ApplyMovementsResult {
 export interface ApplyMovementsOptions {
   /** false — не оцінювати попередження (викличте evaluateStockAlerts самі). За замовчуванням true. */
   evaluateAlerts?: boolean;
+  /**
+   * Режим передачі в Shopify для стану нових рухів (defaultShopifySyncState); за замовчуванням — налаштування
+   * warehouse.shopifyPush. Демо передає "off" (movementOptionsFor): магазину немає, тож внутрішня зміна позначається
+   * «Не надсилалося», а не «Очікує надсилання», і завдання передачі не ставиться.
+   */
+  shopifyPush?: "off" | "deltas";
+}
+
+/**
+ * Опції applyMovements для контексту запиту: у демо Shopify не підключено й нічого не надсилається → передача
+ * вимкнена незалежно від налаштування (інтерфейс не обіцяє «буде надіслано в Shopify»).
+ */
+export function movementOptionsFor(ctx: { mode: "demo" | "production" }, opts: ApplyMovementsOptions = {}): ApplyMovementsOptions {
+  return ctx.mode === "production" ? opts : { ...opts, shopifyPush: "off" };
 }
 
 export const MAX_MOVEMENTS_PER_CALL = 2000;
@@ -138,6 +153,8 @@ export const OPENED_ONLY_MOVEMENT_TYPES: ReadonlySet<MovementType> = new Set<Mov
   "shopify_external",
 ]);
 const REASON_RE = /^[a-z0-9_.-]{1,64}$/;
+/** Найдовша примітка руху (після маскування). */
+const MOVEMENT_NOTE_MAX_LENGTH = 500;
 const CURRENCY_RE = /^[A-Z]{3}$/;
 
 const pairKey = (warehouseId: string, stockItemId: string) => `${warehouseId}|${stockItemId}`;
@@ -171,7 +188,9 @@ function normalize(input: MovementInput): NormalizedInput {
       throw new DomainError("inventory.invalidMovement", 400, { type: input.type, bucket: "costCurrency" });
     }
   }
-  return { ...input, deltas, note: input.note ? input.note.slice(0, 500) : null };
+  // Примітка — вільний текст працівника, видимий усім з warehouse.view: маскування PII тут, щоб жоден викликач
+  // (склад, матеріали, виробництво, синхронізація) не міг записати телефон/email без маскування.
+  return { ...input, deltas, note: maskFreeTextNote(input.note, MOVEMENT_NOTE_MAX_LENGTH) };
 }
 
 function sortByLockOrder<T extends { stockItemId: string; warehouseId: string }>(items: readonly T[]): T[] {
@@ -217,6 +236,20 @@ export async function lockBalances(
   }
   for (const p of sorted) if (!out.has(pairKey(p.warehouseId, p.stockItemId))) throw new NotFoundError("stockItem");
   return out;
+}
+
+/**
+ * Блокує НАЯВНІ баланси позицій (на всіх складах; нових рядків не створює) у порядку блокувань ledger — перед оцінкою
+ * попереджень поза applyMovements (зміна порогу тощо), щоб не оцінювати стан, який паралельно змінює рух.
+ */
+export async function lockExistingBalances(tx: Tx, stockItemIds: readonly string[]): Promise<void> {
+  const ids = [...new Set(stockItemIds)];
+  if (ids.length === 0) return;
+  const pairs = await tx
+    .select({ warehouseId: inventoryBalances.warehouseId, stockItemId: inventoryBalances.stockItemId })
+    .from(inventoryBalances)
+    .where(inArray(inventoryBalances.stockItemId, ids));
+  if (pairs.length > 0) await lockBalances(tx, pairs);
 }
 
 function toBalanceState(b: typeof inventoryBalances.$inferSelect, kind: StockItemKind): BalanceState {
@@ -273,7 +306,7 @@ export async function applyMovements(
     for (const m of normalized) {
       const pk = pairKey(m.warehouseId, m.stockItemId);
       const { kind, openedAt } = locked.get(pk)!;
-      let syncState = m.shopifySyncState ?? defaultShopifySyncState(m.type, kind, m.deltas.onHand, settings.shopifyPush);
+      let syncState = m.shopifySyncState ?? defaultShopifySyncState(m.type, kind, m.deltas.onHand, opts.shopifyPush ?? settings.shopifyPush);
       // Невідкритий товар не синхронізується з Shopify: його внутрішні рухи додаються до знімка при відкритті.
       if (kind === "product" && openedAt === null && syncState === "pending") syncState = "skipped";
       const [row] = await sp
@@ -427,6 +460,9 @@ export async function setLowStockThreshold(tx: Tx, stockItemId: string, threshol
   if (threshold !== null && (!Number.isSafeInteger(threshold) || threshold < 0 || threshold > 100000)) {
     throw new DomainError("error.validation", 400, { field: "lowStockThreshold" });
   }
+  // Спершу баланси (той самий порядок блокувань, що й applyMovements): оцінка бачить зафіксований стан і чужі
+  // попередження, а не стару версію поруч із паралельним рухом (інакше — суперечливі «мало» + «немає»).
+  await lockExistingBalances(tx, [stockItemId]);
   const updated = await tx.update(stockItems).set({ lowStockThreshold: threshold }).where(eq(stockItems.id, stockItemId)).returning({ id: stockItems.id });
   if (updated.length === 0) throw new NotFoundError("stockItem");
   await evaluateStockAlerts(tx, [stockItemId]);
@@ -467,11 +503,14 @@ export async function evaluateStockAlerts(
     .from(inventoryBalances)
     .innerJoin(stockItems, eq(stockItems.id, inventoryBalances.stockItemId))
     .leftJoin(packagingMaterials, eq(packagingMaterials.id, stockItems.materialId))
-    .where(inArray(inventoryBalances.stockItemId, ids));
+    .where(inArray(inventoryBalances.stockItemId, ids))
+    // Детермінований порядок записів попереджень (як порядок блокувань) — менше шансів на взаємне блокування.
+    .orderBy(asc(inventoryBalances.stockItemId), asc(inventoryBalances.warehouseId));
   const open = await tx
     .select()
     .from(stockAlerts)
-    .where(and(inArray(stockAlerts.stockItemId, ids), eq(stockAlerts.status, "open")));
+    .where(and(inArray(stockAlerts.stockItemId, ids), eq(stockAlerts.status, "open")))
+    .orderBy(asc(stockAlerts.stockItemId), asc(stockAlerts.warehouseId), asc(stockAlerts.kind));
   const openByKey = new Map(open.map((a) => [`${a.warehouseId}|${a.stockItemId}|${a.kind}`, a]));
   const now = new Date();
   const seen = new Set<string>();
@@ -814,6 +853,8 @@ export async function getBalance(db: DbOrTx, stockItemId: string, warehouseId?: 
 
 export interface MovementFilters {
   warehouseId?: string;
+  /** Конкретні рухи (посилання на документ, напр. referenceDocumentUri у Shopify: ?movement=<id>). */
+  movementIds?: string[];
   stockItemIds?: string[];
   variantIds?: string[];
   materialIds?: string[];
@@ -870,6 +911,7 @@ export async function movementHistory(
   const { limit, offset } = pageOf(page);
   const where = and(
     filters.warehouseId ? eq(inventoryMovements.warehouseId, filters.warehouseId) : undefined,
+    filters.movementIds?.length ? inArray(inventoryMovements.id, filters.movementIds) : undefined,
     filters.stockItemIds?.length ? inArray(inventoryMovements.stockItemId, filters.stockItemIds) : undefined,
     filters.variantIds?.length ? inArray(stockItems.variantId, filters.variantIds) : undefined,
     filters.materialIds?.length ? inArray(stockItems.materialId, filters.materialIds) : undefined,

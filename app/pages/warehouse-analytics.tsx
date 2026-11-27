@@ -3,7 +3,7 @@ import { Form, useLoaderData, useLocation, useNavigation, type LoaderFunctionArg
 import { useCan, useHref } from "~/components/shell";
 import { can } from "~/domain/permissions";
 import { useLocale, useT, type Locale, type TFunction } from "~/i18n";
-import { formatDate, formatMoney, formatNumber } from "~/lib/format";
+import { formatDecimal, formatIsoDate, formatMoney, formatNumber } from "~/lib/format";
 import {
   MAX_CUSTOM_PERIOD_DAYS,
   PERIOD_KEYS,
@@ -138,13 +138,14 @@ export async function loader({ request }: LoaderFunctionArgs) {
 // Відображення
 // ---------------------------------------------------------------------------
 
-/** ISO-дата (YYYY-MM-DD) → дата для показу (полудень UTC — та сама дата в Києві). */
+/** ISO-дата (YYYY-MM-DD) → дата для показу (календарна дата, без часового поясу). */
 function isoDate(value: string | null, locale: Locale): string {
-  return value ? formatDate(`${value}T12:00:00Z`, locale) : "—";
+  return value ? formatIsoDate(value, locale) : "—";
 }
 
+/** Спільний детермінований форматер (lib/format) — однаково на сервері й у браузері. */
 function decimal(value: number, locale: Locale, digits = 2): string {
-  return new Intl.NumberFormat(locale === "uk" ? "uk-UA" : "en-GB", { maximumFractionDigits: digits }).format(value);
+  return formatDecimal(value, locale, { maximumFractionDigits: digits });
 }
 
 const TREND_TONE: Record<Trend["direction"], BadgeTone> = { up: "success", down: "warning", flat: "neutral", new: "info", none: "outline" };
@@ -688,7 +689,8 @@ export default function WarehouseAnalyticsPage() {
           {data.prefill && data.prefill.variants > 0 ? (
             <CardNote>
               <Stack gap={1}>
-                {/* Форма партії поки вибирає лише товари (кількості з qty.* не заповнює) — кажемо це прямо. */}
+                {/* Форма партії відкривається з вибраними товарами й рекомендованими кількостями (qty.<variantId>);
+                    партія створюється лише після збереження людиною. */}
                 <Text variant="body-sm" tone="subdued">
                   {t("warehouseAnalytics.createBatchNote")}
                 </Text>

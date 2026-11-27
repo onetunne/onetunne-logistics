@@ -54,6 +54,7 @@ import {
   type BadgeTone,
   type DataTableColumn,
 } from "~/ui";
+import { DEFAULT_COST_CURRENCY } from "~/modules/warehouse/constants";
 
 /**
  * «Склад» → «Пакувальні матеріали» (етап 5, WP «Упаковка»): довідник матеріалів (коробки з внутрішніми габаритами,
@@ -585,7 +586,7 @@ export default function MaterialsPage() {
                 {operation === "receive" && data.canSeeCosts ? (
                   <Grid columns={{ xs: 2, md: 4 }} gap={3}>
                     <TextField id="materials-stock-cost" name="unitCost" label={t("packaging.stock.unitCost")} inputMode="decimal" placeholder="0.00" />
-                    <TextField id="materials-stock-currency" name="costCurrency" label={t("packaging.field.costCurrency")} defaultValue="UAH" maxLength={3} />
+                    <TextField id="materials-stock-currency" name="costCurrency" label={t("packaging.field.costCurrency")} defaultValue={DEFAULT_COST_CURRENCY} maxLength={3} />
                   </Grid>
                 ) : null}
                 <div aria-live="polite" aria-atomic="true">
@@ -909,7 +910,7 @@ function MaterialForm({
                 id="material-currency"
                 name="costCurrency"
                 label={t("packaging.field.costCurrency")}
-                defaultValue={material?.costCurrency ?? "UAH"}
+                defaultValue={material?.costCurrency ?? DEFAULT_COST_CURRENCY}
                 maxLength={3}
                 error={fieldError("costCurrency")}
               />

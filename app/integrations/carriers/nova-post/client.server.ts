@@ -23,6 +23,49 @@ export const NOVA_POST_ENDPOINTS = {
 const CARRIER = "nova_post";
 const JWT_TTL_MS = 50 * 60 * 1000; // документація: ~1 година; оновлюємо із запасом
 const TIMEOUT_MS = 15_000;
+/**
+ * Найбільший розмір документа перевізника (PDF етикетки/інвойсу), байтів. Етикетка — десятки КБ; більше — помилка або
+ * пошкоджена відповідь: тіло не дочитується (захист пам'яті сервера під час масового друку етикеток).
+ */
+export const MAX_DOCUMENT_BYTES = 5 * 1024 * 1024;
+/** Код деталі помилки для завеликого документа (масовий друк показує причину «завелика етикетка»). */
+export const DOCUMENT_TOO_LARGE_CODE = "DOCUMENT_TOO_LARGE";
+
+function documentTooLarge(): CarrierError {
+  return new CarrierError("unavailable", CARRIER, "Nova Post document exceeds the size limit", [
+    { carrierCode: DOCUMENT_TOO_LARGE_CODE, message: "document too large" },
+  ]);
+}
+
+/** Читає тіло, не більше maxBytes (Content-Length і фактичний підрахунок під час читання потоку). */
+async function readCapped(res: Response, maxBytes: number): Promise<ArrayBuffer> {
+  const declared = Number(res.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await res.body?.cancel().catch(() => undefined);
+    throw documentTooLarge();
+  }
+  if (!res.body) return res.arrayBuffer();
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw documentTooLarge();
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.byteLength;
+  }
+  return out.buffer;
+}
 
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
@@ -187,6 +230,7 @@ export class NovaPostClient {
     try {
       return await read(res);
     } catch (e) {
+      if (e instanceof CarrierError) throw e; // напр. документ понад MAX_DOCUMENT_BYTES
       // 4xx: статус отримано — тіло помилки необов'язкове (порожнє тіло адаптер класифікує сам; для POST /shipments
       // 400/409 без доказу помилки клієнта — unknown_outcome).
       if (res.status >= 400 && res.status < 500) return empty;
@@ -263,11 +307,15 @@ export class NovaPostClient {
   }
 
   /** GET двійкового документа (напр. PDF). Помилки перевізника приходять як JSON. */
-  async requestBinary(path: string, opts: Omit<NovaPostRequestOptions, "networkErrorKind"> = {}): Promise<NovaPostBinaryResponse> {
-    const res = await this.send("GET", path, undefined, opts, "application/pdf, application/json");
+  async requestBinary(
+    path: string,
+    opts: Omit<NovaPostRequestOptions, "networkErrorKind"> & { maxBytes?: number } = {},
+  ): Promise<NovaPostBinaryResponse> {
+    const { maxBytes = MAX_DOCUMENT_BYTES, ...requestOpts } = opts;
+    const res = await this.send("GET", path, undefined, requestOpts, "application/pdf, application/json");
     const contentType = res.headers.get("content-type");
     if (res.ok) {
-      const buf = await this.readBody(res, "unavailable", (r) => r.arrayBuffer(), new ArrayBuffer(0));
+      const buf = await this.readBody(res, "unavailable", (r) => readCapped(r, maxBytes), new ArrayBuffer(0));
       return { status: res.status, contentType, bytes: new Uint8Array(buf), errorText: null, errorBody: null };
     }
     const text = await this.readBody(res, "unavailable", (r) => r.text(), "");

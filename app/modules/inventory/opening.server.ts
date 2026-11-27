@@ -5,13 +5,23 @@
  * замовлення, списання при передачі перевізнику, передача внутрішніх змін у Shopify. Відкриваються варіанти, залишок
  * яких Shopify відстежує (inventory_available ≠ null); решта — «невідстежувані» (без резервів і хибних попереджень).
  *
- * Формула для варіанта (S — inventory_available знімка, T — час знімка = product_variants.inventory_synced_at або
- * момент відкриття, H — on_hand від внутрішніх рухів ДО відкриття):
- *     on_hand = H + max(0, S + Σ кількостей відкритих оплачених замовлень, створених до T)
+ * Формула для варіанта (S — «доступно» знімка, T — час знімка, H — on_hand від внутрішніх рухів ДО відкриття):
+ *     on_hand = H + max(0, S + Σ кількостей відкритих оплачених замовлень, створених (і позицій, доданих) до T,
+ *                              крім уже виконаних у Shopify поза застосунком)
+ * Знімок (OpeningSnapshot):
+ * - `location` (робочий режим, modules/shopify-sync/inventory-opening.server.ts): S = InventoryLevel.quantities
+ *   (available) у ЛОКАЦІЇ СКЛАДУ (warehouses.shopify_location_id — та сама, з якою працюють звірка й передача),
+ *   T = момент ПЕРЕД запитом цієї сторінки рівнів (похибка — у бік заниження). Варіанти, яких немає в локації
+ *   (not_stocked/untracked/missing), не відкриваються (skippedNotStocked).
+ * - `stored` (демо, тести): S = product_variants.inventory_available (ProductVariant.inventoryQuantity — СУМА по всіх
+ *   локаціях), T = product_variants.inventory_synced_at (момент перед читанням товару) або момент відкриття.
+ *   Для магазину з кількома локаціями не підходить — робочий інтерфейс використовує лише `location`.
  * Чому: «available» Shopify уже НЕ містить одиниць, закріплених за замовленнями, створеними до знімка (committed);
  * фізично вони ще на складі (on_hand) і зарезервовані → доступно застосунку = S. Замовлення, створені після T,
- * знімок ще містить — їх лише резервуємо. Внутрішні рухи до відкриття Shopify не надсилалися (ledger: «skipped»),
- * тож вони ДОДАЮТЬСЯ (не затираються). Якщо H ≠ 0, створюється розбіжність inventory_conflicts
+ * знімок ще містить — їх лише резервуємо. Замовлення до T, уже виконане (частково) в Shopify поза застосунком, не
+ * рахується й не резервується: виконаних одиниць немає ні в S, ні на складі (для часткового виконання розподіл за
+ * позиціями невідомий — доступно лишається точним, on_hand занижено на невиконані одиниці; див. reservations.server.ts).
+ * Внутрішні рухи до відкриття Shopify не надсилалися (ledger: «skipped»), тож вони ДОДАЮТЬСЯ (не затираються). Якщо H ≠ 0, створюється розбіжність inventory_conflicts
  * (opened_with_internal_history): власник перевіряє, чи не внесено ці одиниці в Shopify вручну.
  * Від'ємна сума (Shopify «перепродав» або закріпив одиниці за неоплаченими замовленнями, яких немає в застосунку)
  * обрізається до 0 (причина shopify_snapshot_clamped) — розбіжність покаже звірка з Shopify.
@@ -28,11 +38,13 @@
  * відстежуватися пізніше) відкриваються. Лише власник (warehouse.adjust).
  *
  * Обмеження (документовано): Shopify також закріплює одиниці за НЕОПЛАЧЕНИМИ замовленнями, яких застосунок не
- * імпортує; on_hand застосунку може бути меншим за on_hand Shopify на цю кількість. Час знімка — час отримання
- * значення застосунком; замовлення з processedAt у минулому (створені заднім числом) вважаються створеними до знімка.
+ * імпортує; on_hand застосунку може бути меншим за on_hand Shopify на цю кількість. Позиції без shopify_added_at
+ * (до етапу 5) порівнюються лише за orders.placed_at (processedAt; створені заднім числом — «до знімка»).
+ * Перед відкриттям у робочому режимі позиції відкритих замовлень без current_quantity (збережені до етапу 5)
+ * перечитуються з Shopify (повернені/видалені одиниці не резервуються).
  */
 import { and, count, eq, inArray, isNotNull, isNull, notInArray, sql } from "drizzle-orm";
-import type { DbOrTx, Tx } from "~/db/client.server";
+import type { Db, DbOrTx, Tx } from "~/db/client.server";
 import {
   inventoryBalances,
   inventoryConflicts,
@@ -43,8 +55,8 @@ import {
   stockReservations,
   warehouses,
 } from "~/db/schema";
-import { SHIPPED_STATUSES, type OrderStatus } from "~/domain/order-status";
-import { requirePermission } from "~/domain/permissions";
+import { SHIPPED_STATUSES, isFulfilledInShopify, type OrderStatus } from "~/domain/order-status";
+import { requirePermission, type Actor } from "~/domain/permissions";
 import { logger } from "~/lib/logger.server";
 import { writeAudit } from "~/modules/audit/audit.server";
 import { getSetting } from "~/modules/settings/settings.server";
@@ -59,6 +71,7 @@ import {
 } from "./ledger.server";
 import { effectiveLineQuantity } from "./quantities";
 import {
+  lineInSnapshot,
   planReservationChanges,
   syncOrderReservations,
   toPlanReservation,
@@ -87,6 +100,39 @@ export interface InitializeInventoryResult {
   openedWithHistory: number;
   /** Відкриті оплачені замовлення, зарезервовані в тій самій транзакції. */
   ordersSynced: number;
+  /** Знімок `location`: відстежувані варіанти, яких немає в локації складу Shopify (не відкриті). */
+  skippedNotStocked: number;
+  /** Позиції замовлень до знімка, уже виконаних у Shopify поза застосунком: не враховані й не зарезервовані. */
+  excludedFulfilledLines: number;
+}
+
+/** «Доступно» одного варіанта в знімку локації і час знімка (момент перед запитом). */
+export interface OpeningLevel {
+  available: number;
+  snapshotAt: Date;
+}
+
+export type OpeningSnapshot =
+  /** Демо/тести: product_variants.inventory_available (сума по локаціях) і inventory_synced_at. */
+  | { kind: "stored" }
+  /** Робочий режим: рівні локації складу за variantId; лише ці варіанти можуть відкритися. */
+  | { kind: "location"; locationId: string; levels: ReadonlyMap<string, OpeningLevel>; notStocked: number };
+
+export interface InitializeInventoryOptions {
+  source?: "shopify_snapshot";
+  snapshot?: OpeningSnapshot;
+  /**
+   * Лише якщо склад уже ініціалізовано власником (автоматичне відкриття варіантів, що з'явилися пізніше, —
+   * modules/shopify-sync/inventory-opening.server.ts). Не ініціалізовано → null, нічого не змінено.
+   */
+  onlyIfInitialized?: boolean;
+}
+
+/** Хто й коли відкриває (власник через initializeInventory або система — автоматичне відкриття нових варіантів). */
+export interface OpeningEnv {
+  db: Db;
+  actor: Actor;
+  now: () => Date;
 }
 
 const CHUNK = 500;
@@ -107,14 +153,20 @@ function isRetryableLockError(e: unknown): boolean {
   return code === "40P01" || code === "40001";
 }
 
-export async function initializeInventory(
-  ctx: ServiceContext,
-  opts: { source: "shopify_snapshot" } = { source: "shopify_snapshot" },
-): Promise<InitializeInventoryResult> {
+export async function initializeInventory(ctx: ServiceContext, opts: InitializeInventoryOptions = {}): Promise<InitializeInventoryResult> {
   requirePermission(ctx.actor, "warehouse.adjust");
+  const result = await openInventory({ db: ctx.db, actor: ctx.actor, now: () => ctx.now() }, { ...opts, onlyIfInitialized: false });
+  return result!;
+}
+
+/**
+ * Відкриття без перевірки дозволу (виклик — initializeInventory після requirePermission або системне автоматичне
+ * відкриття нових варіантів з onlyIfInitialized). null — onlyIfInitialized, а склад ще не ініціалізовано.
+ */
+export async function openInventory(env: OpeningEnv, opts: InitializeInventoryOptions = {}): Promise<InitializeInventoryResult | null> {
   for (let attempt = 1; ; attempt++) {
     try {
-      return await ctx.db.transaction((tx) => initializeInTx(tx, ctx, opts.source));
+      return await env.db.transaction((tx) => initializeInTx(tx, env, opts));
     } catch (e) {
       if (attempt >= MAX_ATTEMPTS || !isRetryableLockError(e)) throw e;
       logger.warn("inventory.initialize_retry", { attempt });
@@ -129,17 +181,30 @@ interface OpeningItem {
   snapshotAt: Date;
 }
 
-async function initializeInTx(tx: Tx, ctx: ServiceContext, source: "shopify_snapshot"): Promise<InitializeInventoryResult> {
-  const now = ctx.now();
+async function initializeInTx(tx: Tx, env: OpeningEnv, opts: InitializeInventoryOptions): Promise<InitializeInventoryResult | null> {
+  const now = env.now();
+  const source = opts.source ?? "shopify_snapshot";
+  const snapshot: OpeningSnapshot = opts.snapshot ?? { kind: "stored" };
   const warehouse = await lockWarehouseForInitialization(tx, (await getDefaultWarehouse(tx)).id);
   const alreadyInitialized = Boolean(warehouse.inventoryInitializedAt);
+  if (opts.onlyIfInitialized && !alreadyInitialized) return null;
 
   const variants = await tx
     .select({ id: productVariants.id, available: productVariants.inventoryAvailable, syncedAt: productVariants.inventorySyncedAt })
     .from(productVariants)
     .orderBy(productVariants.id);
-  const tracked = variants.filter((v): v is { id: string; available: number; syncedAt: Date | null } => v.available !== null);
-  const skippedUntracked = variants.length - tracked.length;
+  const skippedUntracked = variants.filter((v) => v.available === null).length;
+  // S і T кожного відстежуваного варіанта зі знімка (location — лише варіанти, прочитані в локації складу).
+  const tracked: Array<{ id: string; available: number; snapshotAt: Date }> = [];
+  for (const v of variants) {
+    if (v.available === null) continue;
+    if (snapshot.kind === "stored") tracked.push({ id: v.id, available: v.available, snapshotAt: v.syncedAt ?? now });
+    else {
+      const level = snapshot.levels.get(v.id);
+      if (level) tracked.push({ id: v.id, available: level.available, snapshotAt: level.snapshotAt });
+    }
+  }
+  const skippedNotStocked = snapshot.kind === "location" ? snapshot.notStocked : 0;
 
   const stockByVariant = new Map<string, string>();
   for (const part of chunks(tracked.map((v) => v.id))) {
@@ -154,7 +219,7 @@ async function initializeInTx(tx: Tx, ctx: ServiceContext, source: "shopify_snap
     for (const r of rows) openedItems.add(r.id);
   }
   const toOpen: OpeningItem[] = tracked
-    .map((v) => ({ variantId: v.id, stockItemId: stockByVariant.get(v.id)!, available: v.available, snapshotAt: v.syncedAt ?? now }))
+    .map((v) => ({ variantId: v.id, stockItemId: stockByVariant.get(v.id)!, available: v.available, snapshotAt: v.snapshotAt }))
     .filter((v) => !openedItems.has(v.stockItemId))
     .sort((a, b) => a.stockItemId.localeCompare(b.stockItemId));
   const alreadyOpened = tracked.length - toOpen.length;
@@ -162,6 +227,7 @@ async function initializeInTx(tx: Tx, ctx: ServiceContext, source: "shopify_snap
   let clampedNegative = 0;
   let openedWithHistory = 0;
   let ordersSynced = 0;
+  let excludedFulfilledLines = 0;
   if (toOpen.length > 0) {
     // 1. Баланси всіх позицій, що відкриваються, — у глобальному порядку stock_item_id (без взаємоблокувань).
     const balances = new Map<string, number>();
@@ -176,7 +242,7 @@ async function initializeInTx(tx: Tx, ctx: ServiceContext, source: "shopify_snap
     // 2. Позиції відкритих оплачених замовлень цих варіантів (зафіксовані дані; незавершені зміни замовлень
     //    синхронізуються різницею після цієї транзакції).
     const byVariant = new Map(toOpen.map((v) => [v.variantId, v]));
-    const openLines: Array<{ id: string; orderId: string; variantId: string; quantity: number; placedAt: Date }> = [];
+    const openLines: Array<{ id: string; orderId: string; variantId: string; quantity: number; inSnapshot: boolean }> = [];
     for (const part of chunks(toOpen.map((v) => v.variantId))) {
       const rows = await tx
         .select({
@@ -185,17 +251,27 @@ async function initializeInTx(tx: Tx, ctx: ServiceContext, source: "shopify_snap
           variantId: orderLineItems.variantId,
           quantity: orderLineItems.quantity,
           currentQuantity: orderLineItems.currentQuantity,
+          shopifyAddedAt: orderLineItems.shopifyAddedAt,
           placedAt: orders.placedAt,
+          fulfillmentStatus: orders.fulfillmentStatus,
         })
         .from(orderLineItems)
         .innerJoin(orders, eq(orders.id, orderLineItems.orderId))
         .where(and(inArray(orderLineItems.variantId, part), notInArray(orders.status, [...NON_RESERVING_STATUSES])));
-      for (const r of rows) openLines.push({ id: r.id, orderId: r.orderId, variantId: r.variantId!, quantity: effectiveLineQuantity(r), placedAt: r.placedAt });
+      for (const r of rows) {
+        const inSnapshot = lineInSnapshot(r.placedAt, r.shopifyAddedAt, byVariant.get(r.variantId!)!.snapshotAt);
+        // До знімка й уже виконане в Shopify поза застосунком: одиниць немає ні в S, ні на складі — не рахуємо й не
+        // резервуємо (те саме правило першої появи — у syncOrderReservations).
+        if (inSnapshot && isFulfilledInShopify(r.fulfillmentStatus)) {
+          excludedFulfilledLines++;
+          continue;
+        }
+        openLines.push({ id: r.id, orderId: r.orderId, variantId: r.variantId!, quantity: effectiveLineQuantity(r), inSnapshot });
+      }
     }
     const included = new Map<string, number>();
     for (const l of openLines) {
-      const item = byVariant.get(l.variantId)!;
-      if (l.placedAt < item.snapshotAt) included.set(l.variantId, (included.get(l.variantId) ?? 0) + l.quantity);
+      if (l.inSnapshot) included.set(l.variantId, (included.get(l.variantId) ?? 0) + l.quantity);
     }
 
     // 3. Рухи opening (додаються до внутрішньої історії H).
@@ -227,7 +303,7 @@ async function initializeInTx(tx: Tx, ctx: ServiceContext, source: "shopify_snap
         });
       }
     }
-    for (const part of chunks(openingMovements, MOVEMENT_CHUNK)) await applyMovements(tx, ctx.actor, part, { evaluateAlerts: false });
+    for (const part of chunks(openingMovements, MOVEMENT_CHUNK)) await applyMovements(tx, env.actor, part, { evaluateAlerts: false });
 
     // 4. Позначка «відкрито» (до резервів: applyMovements дозволяє reserve лише для відкритих товарів).
     for (const part of chunks(toOpen)) {
@@ -273,7 +349,7 @@ async function initializeInTx(tx: Tx, ctx: ServiceContext, source: "shopify_snap
       movements.push(...plan.movements.map((m) => ({ ...m, orderId })));
       if (plan.rows.length > 0) rowsByOrder.set(orderId, plan.rows);
     }
-    for (const part of chunks(movements, MOVEMENT_CHUNK)) await applyMovements(tx, ctx.actor, part, { evaluateAlerts: false });
+    for (const part of chunks(movements, MOVEMENT_CHUNK)) await applyMovements(tx, env.actor, part, { evaluateAlerts: false });
     for (const [orderId, rows] of rowsByOrder) await writePlannedRows(tx, orderId, rows, now);
     ordersSynced = rowsByOrder.size;
 
@@ -295,15 +371,23 @@ async function initializeInTx(tx: Tx, ctx: ServiceContext, source: "shopify_snap
     clampedNegative,
     openedWithHistory,
     ordersSynced,
+    skippedNotStocked,
+    excludedFulfilledLines,
   };
-  await writeAudit(tx, ctx.actor, "inventory.initialized", { type: "warehouse", id: warehouse.id }, {
+  // Автоматичне відкриття без нових позицій — без запису в журнал (кожна синхронізація товару).
+  if (opts.onlyIfInitialized && toOpen.length === 0) return result;
+  await writeAudit(tx, env.actor, "inventory.initialized", { type: "warehouse", id: warehouse.id }, {
     source,
+    snapshot: snapshot.kind,
+    automatic: Boolean(opts.onlyIfInitialized),
     opened: result.opened,
     alreadyOpened,
     skippedUntracked,
+    skippedNotStocked,
     clampedNegative,
     openedWithHistory,
     ordersSynced,
+    excludedFulfilledLines,
     alreadyInitialized,
   });
   return result;

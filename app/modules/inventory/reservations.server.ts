@@ -15,11 +15,17 @@
  * ініціалізація (FOR NO KEY UPDATE) і резерви не перетинаються.
  *
  * Перша поява позиції (немає рядка резерву) порівнюється з часом знімка Shopify, з якого відкрито товар
- * (inventory_balances.opening_snapshot_at), за orders.placed_at:
- * - замовлення створене ДО знімка: Shopify уже вилучив його одиниці з «доступно» знімка. Відкрите → резерв +
- *   корекція on_hand +q (opening_line); передане → не списується (його вже немає в знімку — історичне);
- * - створене ПІСЛЯ знімка: звичайний продаж. Відкрите → резерв; передане (уперше побачене вже відправленим) →
- *   списання on_hand −q без резерву.
+ * (inventory_balances.opening_snapshot_at), — lineInSnapshot: замовлення (orders.placed_at) І сама позиція
+ * (order_line_items.shopify_added_at — LineItem.createdAt або час оновлення, що її приніс) з'явилися ДО знімка:
+ * - у знімку: Shopify уже вилучив її одиниці з «доступно» знімка. Відкрите → резерв + корекція on_hand +q
+ *   (opening_line); передане → не списується (його вже немає в знімку — історичне);
+ * - після знімка (нове замовлення АБО позиція, додана редагуванням уже після знімка — інакше on_hand завищувався б):
+ *   звичайний продаж. Відкрите → резерв; передане (уперше побачене вже відправленим) → списання on_hand −q без резерву.
+ * - у знімку, але замовлення вже виконане (частково) в Shopify поза застосунком (orders.fulfillment_status): одиниць
+ *   немає ні у знімку, ні фізично (або розподіл часткового виконання невідомий) → позиція НЕ резервується й не
+ *   коригується; «Відправлено поза застосунком» її теж не списує (історичне). Так само робить initializeInventory.
+ *   Обмеження (документовано): для частково виконаного до знімка замовлення невиконані одиниці теж не рахуються в
+ *   on_hand (доступно — точне, on_hand занижено на них до відправлення).
  * Невідкритий товар (Shopify не відстежує залишок або ще не ініціалізовано) не резервується й не списується —
  * без хибних попереджень «продано більше, ніж є». До initializeInventory резерви не ведуться (not_initialized).
  * Нестача товару ніколи не блокує замовлення: резерв понад наявність → попередження oversold.
@@ -27,7 +33,7 @@
 import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import type { DbOrTx, Tx } from "~/db/client.server";
 import { inventoryBalances, orderLineItems, orders, stockItems, stockReservations, type ReservationStatus } from "~/db/schema";
-import { isShipped, type OrderStatus } from "~/domain/order-status";
+import { isFulfilledInShopify, isShipped, type OrderStatus } from "~/domain/order-status";
 import { NotFoundError } from "~/lib/errors";
 import { inventoryKeys } from "./keys";
 import { applyMovements, type MovementActor, type MovementInput } from "./ledger.server";
@@ -282,9 +288,17 @@ export async function writePlannedRows(tx: Tx, orderId: string, rows: readonly P
  * блокувань: замовлення → склад → баланси). Ідемпотентна: повторний виклик без змін замовлення нічого не робить.
  * Не кидає помилок через нестачу товару (oversold → попередження).
  */
+/**
+ * Чи входить позиція в знімок Shopify, з якого відкрито товар: і замовлення, і сама позиція з'явилися до знімка.
+ * shopifyAddedAt = null (демо, позиції до етапу 5) — лише за часом замовлення.
+ */
+export function lineInSnapshot(placedAt: Date, shopifyAddedAt: Date | null, snapshotAt: Date): boolean {
+  return placedAt < snapshotAt && (shopifyAddedAt === null || shopifyAddedAt < snapshotAt);
+}
+
 export async function syncOrderReservations(tx: Tx, orderId: string, actor: MovementActor): Promise<ReservationSyncResult> {
   const [order] = await tx
-    .select({ id: orders.id, status: orders.status, placedAt: orders.placedAt })
+    .select({ id: orders.id, status: orders.status, placedAt: orders.placedAt, fulfillmentStatus: orders.fulfillmentStatus })
     .from(orders)
     .where(eq(orders.id, orderId))
     .for("no key update");
@@ -299,9 +313,19 @@ export async function syncOrderReservations(tx: Tx, orderId: string, actor: Move
   if (mode === "none" && reservations.length === 0) return { orderId, state: "synced", mode, applied: 0, skipped: 0 };
 
   const lines = await tx
-    .select({ id: orderLineItems.id, variantId: orderLineItems.variantId, quantity: orderLineItems.quantity, currentQuantity: orderLineItems.currentQuantity })
+    .select({
+      id: orderLineItems.id,
+      variantId: orderLineItems.variantId,
+      quantity: orderLineItems.quantity,
+      currentQuantity: orderLineItems.currentQuantity,
+      shopifyAddedAt: orderLineItems.shopifyAddedAt,
+    })
     .from(orderLineItems)
     .where(eq(orderLineItems.orderId, orderId));
+  const reservedLines = new Set(reservations.map((r) => r.orderLineItemId));
+  // Виконане в Shopify поза застосунком (застосунок ще не відправив): позиції зі знімка, які ще не резервувалися, —
+  // історичні (див. вгорі файлу).
+  const fulfilledOutside = mode !== "none" && !isShipped(order.status) && isFulfilledInShopify(order.fulfillmentStatus);
   const opened = await loadOpenedVariants(
     tx,
     warehouse.id,
@@ -312,11 +336,14 @@ export async function syncOrderReservations(tx: Tx, orderId: string, actor: Move
     warehouseId: warehouse.id,
     lines: lines.map((l) => {
       const o = l.variantId ? opened.get(l.variantId) : undefined;
+      const inSnapshot = o ? lineInSnapshot(order.placedAt, l.shopifyAddedAt, o.snapshotAt) : false;
+      // Без рядка резерву й «у знімку» на виконаному в Shopify замовленні — не резервується (stockItemId: null).
+      const historical = fulfilledOutside && inSnapshot && !reservedLines.has(l.id);
       return {
         lineItemId: l.id,
-        stockItemId: o?.stockItemId ?? null,
+        stockItemId: historical ? null : (o?.stockItemId ?? null),
         quantity: effectiveLineQuantity(l),
-        inSnapshot: o ? order.placedAt < o.snapshotAt : false,
+        inSnapshot,
       };
     }),
     reservations: reservations.map(toPlanReservation),

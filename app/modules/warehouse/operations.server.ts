@@ -44,6 +44,8 @@ import {
   applyMovements,
   evaluateStockAlerts,
   lockBalances,
+  lockExistingBalances,
+  movementOptionsFor,
   setLowStockThreshold as ledgerSetLowStockThreshold,
   type AppliedMovement,
   type BalanceState,
@@ -53,7 +55,7 @@ import {
 import type { MovementType } from "~/modules/inventory/movement-types";
 import { getDefaultWarehouse } from "~/modules/inventory/warehouse.server";
 import { enqueueInventoryPushIfPending } from "~/modules/inventory-sync/schedule.server";
-import { redactText } from "~/modules/privacy/redact";
+import { maskFreeTextNote } from "~/modules/privacy/notes";
 import type { ServiceContext } from "~/server/types";
 import {
   DEFECT_REASONS,
@@ -275,11 +277,9 @@ function assertReason<T extends string>(value: string, allowed: readonly T[]): T
   return value as T;
 }
 
-/** Примітка: обрізана, без телефонів/email/карток/IBAN; порожня → null. */
+/** Примітка: обрізана, без телефонів/email/карток/IBAN; порожня → null (спільне правило privacy/notes). */
 export function cleanNote(note: string | null | undefined): string | null {
-  const trimmed = (note ?? "").replace(/\s+/g, " ").trim().slice(0, MAX_NOTE_LENGTH);
-  if (!trimmed) return null;
-  return redactText(trimmed, { kinds: ["email", "iban", "card", "phone"] }).slice(0, MAX_NOTE_LENGTH);
+  return maskFreeTextNote(note, MAX_NOTE_LENGTH);
 }
 
 /** Собівартість одиниці: десятковий рядок ≥ 0 (кома або крапка), до 12 цифр; валюта ISO 4217. */
@@ -388,7 +388,7 @@ async function applyDeltaOperation(ctx: ServiceContext, spec: DeltaSpec): Promis
       costCurrency: spec.unitCost ? (spec.costCurrency ?? null) : null,
       ...(skipPush ? { shopifySyncState: "skipped" as const } : {}),
     };
-    const res = await applyMovements(tx, ctx.actor, [input]);
+    const res = await applyMovements(tx, ctx.actor, [input], movementOptionsFor(ctx));
     const balance = res.balances.find((b) => b.stockItemId === stockItemId)!;
     const applied = res.applied[0];
     if (!applied) {
@@ -626,7 +626,7 @@ async function applyCounts(
     reason: STOCKTAKE_REASON,
     note,
   }));
-  const res = await applyMovements(tx, ctx.actor, inputs);
+  const res = await applyMovements(tx, ctx.actor, inputs, movementOptionsFor(ctx));
   // Під блокуванням інша транзакція не могла вставити рух із цим ключем — кожен рух записано.
   if (res.applied.length !== inputs.length) throw operationReused();
   const movementByKey = new Map(res.applied.map((a) => [a.idempotencyKey, a.id]));
@@ -802,6 +802,9 @@ export async function setLowStockThresholds(
   if (ids.length === 0) throw new DomainError("warehouse.error.noItems", 400);
   if (ids.length > MAX_BULK_ITEMS) throw new DomainError("warehouse.error.tooManyItems", 400, { max: MAX_BULK_ITEMS });
   return ctx.db.transaction(async (tx) => {
+    // Баланси — першими (порядок блокувань applyMovements): оцінка нижче бачить зафіксований стан і попередження
+    // паралельного руху, а не стару версію (інакше лишаються суперечливі «мало» + «немає» до наступного руху).
+    await lockExistingBalances(tx, ids);
     const updated = await tx
       .update(stockItems)
       .set({ lowStockThreshold: threshold })

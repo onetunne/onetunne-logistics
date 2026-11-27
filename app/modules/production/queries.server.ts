@@ -307,6 +307,32 @@ export async function countActiveBatches(db: DbOrTx): Promise<number> {
   return Number(row?.c ?? 0);
 }
 
+export interface ProductionDueSummary {
+  /** Активні партії (заплановано / у виробництві / частково отримано). */
+  active: number;
+  /** Не отримані повністю, планова готовність уже минула. */
+  overdue: number;
+  /** Не отримані повністю, планова готовність — сьогодні або в найближчі `soonDays` днів. */
+  dueSoon: number;
+}
+
+/** Підсумок для головної: скільки партій активні, прострочені й мають бути готові найближчим часом (дати за Києвом). */
+export async function countProductionDue(db: DbOrTx, today: string, soonDays = 7): Promise<ProductionDueSummary> {
+  const until = new Date(`${today}T12:00:00Z`);
+  until.setUTCDate(until.getUTCDate() + Math.max(0, Math.trunc(soonDays)));
+  const soonTo = until.toISOString().slice(0, 10);
+  const notReceived = inArray(productionBatches.status, [...NOT_RECEIVED_STATUSES]);
+  const [row] = await db
+    .select({
+      active: count(),
+      overdue: sql<number>`count(*) filter (where ${overdueCondition(today)})`,
+      dueSoon: sql<number>`count(*) filter (where ${productionBatches.plannedReadyDate} >= ${today} and ${productionBatches.plannedReadyDate} <= ${soonTo})`,
+    })
+    .from(productionBatches)
+    .where(notReceived);
+  return { active: Number(row?.active ?? 0), overdue: Number(row?.overdue ?? 0), dueSoon: Number(row?.dueSoon ?? 0) };
+}
+
 export interface BatchFilterOptions {
   products: Array<{ id: string; title: string }>;
   models: string[];

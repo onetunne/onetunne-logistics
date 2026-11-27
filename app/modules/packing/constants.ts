@@ -61,9 +61,33 @@ export const MAX_BULK_ORDERS = 100;
 export const MAX_PRINT_ORDERS = 50;
 /** Об'єднаний PDF етикеток — замовлень за раз (кожна етикетка — окремий запит до перевізника). */
 export const MAX_LABEL_ORDERS = 25;
+/** Межі однієї етикетки в об'єднаному PDF (захист пам'яті сервера від завеликої/пошкодженої відповіді). */
+export const MAX_LABEL_PAGES = 10;
+/** Найбільший розмір однієї етикетки, байтів (як MAX_DOCUMENT_BYTES клієнта Nova Post). */
+export const MAX_LABEL_BYTES = 5 * 1024 * 1024;
+/** PNG: найбільша площа зображення, пікселів (декодується повністю в RGBA). */
+export const MAX_LABEL_PNG_PIXELS = 25_000_000;
+/** Загальний час отримання етикеток одного пакета (менше за типові тайм-аути проксі/браузера 60–100 с). */
+export const LABEL_BATCH_DEADLINE_MS = 45_000;
+/** Список передачі перевізнику — посилок за раз. */
+export const MAX_HANDOVER_ORDERS = 200;
 
-/** Типи подій пакування в історії замовлення (shipment_events активної накладної). */
-export const PACKING_EVENT_TYPES = ["packing_started", "packed", "packed_override", "unpacked"] as const;
+/**
+ * Типи подій пакування в історії замовлення (shipment_events активної накладної; без неї — останньої).
+ * packing_cancelled — замовлення скасовано (пакування закрито); packing_returned — склад повернув товар скасованого
+ * замовлення на полицю; packing_skipped_handover — передано перевізнику без «Запаковано»; packed_at_handover —
+ * власник підтвердив пакування під час ручної передачі (lifecycle.server.ts).
+ */
+export const PACKING_EVENT_TYPES = [
+  "packing_started",
+  "packed",
+  "packed_override",
+  "unpacked",
+  "packing_cancelled",
+  "packing_returned",
+  "packing_skipped_handover",
+  "packed_at_handover",
+] as const;
 export type PackingEventType = (typeof PACKING_EVENT_TYPES)[number];
 
 /** Документи пакетного друку. */
@@ -79,6 +103,10 @@ export const LABEL_SKIP_REASONS = [
   "encrypted",
   "invalid_pdf",
   "unsupported_format",
+  /** Етикетка завелика (сторінок/пікселів/байтів понад межу) — друк окремо з картки замовлення. */
+  "too_large",
+  /** Загальний час запиту вичерпано (LABEL_BATCH_DEADLINE_MS) — решту етикеток надрукувати наступним пакетом. */
+  "timeout",
 ] as const;
 export type LabelSkipReason = (typeof LABEL_SKIP_REASONS)[number];
 

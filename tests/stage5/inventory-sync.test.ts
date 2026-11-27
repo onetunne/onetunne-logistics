@@ -206,12 +206,13 @@ describe("pure rules", () => {
     // Зміна в Shopify вручну.
     const external = compareLevels({ available: 13, onHand: 13, committed: 0 }, { onHand: 10, reserved: 0 }, none);
     expect(verdictOf(external)).toBe("conflict");
-    expect(canAutoApply(external, 0)).toBe(true);
-    expect(canAutoApply(external, 1)).toBe(false);
-    expect(canAutoApply({ ...external, uncertain: true }, 0)).toBe(false);
+    const none0 = { failedPushes: 0, unsentDelta: 0 };
+    expect(canAutoApply(external, none0)).toBe(true);
+    expect(canAutoApply(external, { ...none0, failedPushes: 1 })).toBe(false);
+    expect(canAutoApply({ ...external, uncertain: true }, none0)).toBe(false);
     const mixed = compareLevels({ available: 11, onHand: 13, committed: 2 }, { onHand: 10, reserved: 0 }, none);
     expect(verdictOf(mixed)).toBe("conflict");
-    expect(canAutoApply(mixed, 0)).toBe(false);
+    expect(canAutoApply(mixed, none0)).toBe(false);
     expect(locationFingerprint(LOC)).toMatch(/^[a-p]{24}$/);
   });
 });
@@ -480,8 +481,8 @@ describe("conflict resolution (owner actions)", () => {
     fake.setLevel(items[8]!.gid, { available: 10, onHand: 10 });
     expect(await reconcileItem(8)).toEqual(["opened"]);
     const c = (await openConflict(8))!;
-    await expect(acceptShopifyValue({ ...ctx, actor: STAFF }, c.id)).rejects.toBeInstanceOf(ForbiddenError);
-    await expect(acceptShopifyValue({ ...ctx, mode: "demo" }, c.id)).rejects.toMatchObject({ code: "inventorySync.demoUnavailable" });
+    await expect(acceptShopifyValue({ ...ctx, actor: STAFF }, c.id, { admin: adminFor })).rejects.toBeInstanceOf(ForbiddenError);
+    await expect(acceptShopifyValue({ ...ctx, mode: "demo" }, c.id, { admin: adminFor })).rejects.toMatchObject({ code: "inventorySync.demoUnavailable" });
 
     // Баланс змінився після звірки (брак без зміни on_hand) → застаріле спостереження, нова звірка.
     await movement(8, "adjustment", { defectiveDelta: 1 });
@@ -489,9 +490,9 @@ describe("conflict resolution (owner actions)", () => {
     expect(stale).toEqual({ status: "stale", reconciled: "updated" });
     expect(parseObservation((await conflictById(c.id)).details)?.observationSeq).toBe(2);
 
-    expect(await acceptShopifyValue(ctx, c.id)).toMatchObject({ status: "accepted", delta: -2 });
+    expect(await acceptShopifyValue(ctx, c.id, { admin: adminFor })).toMatchObject({ status: "accepted", delta: -2 });
     expect((await balance(h.db, items[8]!.stockItemId)).onHand).toBe(10);
-    expect(await acceptShopifyValue(ctx, c.id)).toEqual({ status: "already" });
+    expect(await acceptShopifyValue(ctx, c.id, { admin: adminFor })).toEqual({ status: "already" });
     const moves = await h.db
       .select()
       .from(inventoryMovements)
@@ -585,11 +586,11 @@ describe("conflict resolution (owner actions)", () => {
     const list = await listConflicts(h.db, { status: "open" });
     expect(list.rows.map((r) => r.id)).toEqual(expect.arrayContaining([c10.id, c11.id]));
     expect(list.rows.find((r) => r.id === c10.id)).toMatchObject({ diff: 2, appAvailable: 12, shopifyAvailable: 14, resolvable: true });
-    const r = await acceptShopifyValues(ctx, [c10.id, c11.id, c10.id, "not-a-uuid"]);
-    expect(r).toEqual({ accepted: 2, already: 0, stale: 0, failed: 0, units: -1 });
+    const r = await acceptShopifyValues(ctx, [c10.id, c11.id, c10.id, "not-a-uuid"], { admin: adminFor });
+    expect(r).toEqual({ accepted: 2, already: 0, stale: 0, pending: 0, failed: 0, units: -1 });
     expect((await balance(h.db, items[10]!.stockItemId)).onHand).toBe(14);
     expect((await balance(h.db, items[11]!.stockItemId)).onHand).toBe(9);
-    expect(await acceptShopifyValues(ctx, [c10.id])).toMatchObject({ accepted: 0, already: 1 });
+    expect(await acceptShopifyValues(ctx, [c10.id], { admin: adminFor })).toMatchObject({ accepted: 0, already: 1 });
   });
 });
 

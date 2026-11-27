@@ -70,6 +70,9 @@ async function orderStatus(id: string) {
 async function packingsOf(id: string) {
   return env.handle.db.select().from(orderPacking).where(eq(orderPacking.orderId, id));
 }
+/** #1001 починають паралельно працівник і власник — переможець недетермінований на справжньому PostgreSQL. */
+const CONCURRENT_STARTER = expect.stringMatching(new RegExp(`^(${STAFF.displayName}|${OWNER.displayName})$`));
+
 async function activePacking(id: string) {
   const rows = await packingsOf(id);
   const active = rows.filter((r) => r.status !== "cancelled");
@@ -384,7 +387,8 @@ describe("priority and queue", () => {
     expect(numbers).not.toContain("#1009"); // передано перевізнику
     expect(numbers).not.toContain("#1003"); // без накладної — окрема вкладка
     const row1001 = q.rows.find((r) => r.id === ids["#1001"])!;
-    expect(row1001).toMatchObject({ status: "packed", packing: { startedByName: STAFF.displayName, packedByName: STAFF.displayName }, waybill: { testMode: true, labelAvailable: false } });
+    // Хто почав #1001 — переможець паралельного «Почати» вище (на PostgreSQL під навантаженням це може бути власник).
+    expect(row1001).toMatchObject({ status: "packed", packing: { startedByName: CONCURRENT_STARTER, packedByName: STAFF.displayName }, waybill: { testMode: true, labelAvailable: true } });
     expect(q.counts.queue).toBe(q.total);
     expect(q.counts.needs_waybill).toBeGreaterThanOrEqual(1);
   });
@@ -412,7 +416,7 @@ describe("priority and queue", () => {
 describe("history of the packing (order page)", () => {
   it("summary shows the worker and progress; packing events are shipment events of the order", async () => {
     const s = await loadPackingSummary(env.handle.db, ids["#1001"]!);
-    expect(s).toMatchObject({ status: "packed", inQueue: true, packing: { status: "packed", startedByName: STAFF.displayName, boxCode: "box_s" }, materialsConsumed: true });
+    expect(s).toMatchObject({ status: "packed", inQueue: true, packing: { status: "packed", startedByName: CONCURRENT_STARTER, boxCode: "box_s" }, materialsConsumed: true });
     const none = await loadPackingSummary(env.handle.db, ids["#1011"]!);
     expect(none).toMatchObject({ packing: null, inQueue: true, priority: 2 });
     await expect(loadPackingSummary(env.handle.db, "bad")).rejects.toBeInstanceOf(DomainError);
@@ -446,14 +450,23 @@ describe("lock ordering with the carrier handover", () => {
     await scanAll(id);
     const p = await activePacking(id);
     const shipment = await findActiveShipment(env.handle.db, id);
-    const settled = await Promise.allSettled([confirmPacked(env.ctx(STAFF), id, p.version), markHandedOver(env.ctx(OWNER), shipment!.id)]);
+    // Етап 5 (контроль комплектації): передача незапакованого — лише рішенням власника з причиною; з нею передача
+    // фіксується завжди (з «Очікує комплектації» — пакування підтверджується під час передачі — або з «Запаковано»).
+    const settled = await Promise.allSettled([
+      confirmPacked(env.ctx(STAFF), id, p.version),
+      markHandedOver(env.ctx(OWNER), shipment!.id, { packingOverride: { reason: "race test: courier is waiting" } }),
+    ]);
     for (const s of settled) {
       if (s.status === "rejected") {
         expect(String((s.reason as Error)?.message ?? s.reason)).not.toMatch(/deadlock/i);
         expect(s.reason).toBeInstanceOf(DomainError);
       }
     }
-    expect(settled[1]!.status).toBe("fulfilled"); // передача фіксується завжди (з «Очікує комплектації» або «Запаковано»)
+    expect(settled[1]!.status).toBe("fulfilled");
     expect(await orderStatus(id)).toBe("handed_to_carrier");
+    // Матеріали списано рівно один раз, хоч би хто виграв.
+    const consumed = await consumeMovements(p.id);
+    expect(new Set(consumed.map((m) => m.idempotencyKey)).size).toBe(consumed.length);
+    expect(consumed.length).toBeGreaterThan(0);
   });
 });

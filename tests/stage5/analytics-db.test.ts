@@ -485,14 +485,15 @@ describe("CSV export", () => {
       kind: "product",
       on_hand: "20",
       available: "20",
-      unit_cost: "14.00",
+      // Профіль «;» (Excel uk/EU) — десяткова кома (ui-3).
+      unit_cost: "14,00",
       cost_currency: "UAH",
-      stock_value: "280.00",
+      stock_value: "280,00",
       cost_source: "production_receipt",
       tracking: "opened",
     });
     const box = rows.find((r) => r.kind === "material" && r.sku === "box_s");
-    expect(box).toMatchObject({ unit_cost: "12.00", cost_source: "material" });
+    expect(box).toMatchObject({ unit_cost: "12,00", cost_source: "material" });
     expect(owner.rows).toBe(rows.length);
 
     const staff = await exportStockCsv(env.ctx(STAFF), { separator: "comma" });
@@ -501,6 +502,7 @@ describe("CSV export", () => {
     expect(Object.keys(staffRows[0]!)).not.toContain("unit_cost");
     expect(Object.keys(staffRows[0]!)).not.toContain("stock_value");
     expect(staff.content).not.toContain("14.00");
+    expect(staff.content).not.toContain("14,00");
     for (const s of PII) {
       expect(owner.content, s).not.toContain(s);
       expect(staff.content, s).not.toContain(s);
@@ -517,7 +519,7 @@ describe("CSV export", () => {
     expect(Object.keys(rows[0]!)).toEqual(expect.arrayContaining(["created_at", "date", "type", "on_hand_delta", "actor_id", "unit_cost"]));
     expect(Object.keys(rows[0]!)).not.toContain("note");
     expect(Object.keys(rows[0]!)).not.toContain("actor_name");
-    expect(rows.find((r) => r.type === "receipt_production" && r.unit_cost === "14.00")).toBeTruthy();
+    expect(rows.find((r) => r.type === "receipt_production" && r.unit_cost === "14,00")).toBeTruthy();
     expect(owner.content).not.toContain("+49"); // примітка з телефоном не експортується
     const staff = await exportMovementsCsv(env.ctx(STAFF), { period, filters: onlyTest() });
     expect(Object.keys(parseCsv(staff.content)[0]!)).not.toContain("unit_cost");
@@ -556,20 +558,23 @@ describe("CSV export", () => {
       previous_units: "6",
       units_30d: "10",
       units_90d: "16",
-      velocity_30d: "0.333",
-      velocity_90d: "0.178",
-      velocity_weighted: "0.281",
+      velocity_30d: "0,333",
+      velocity_90d: "0,178",
+      velocity_weighted: "0,281",
       available: "20",
-      days_of_cover: "60.0",
+      days_of_cover: "60,0",
       stockout_date: addDays(today, 60),
       recommended_qty: "10",
       risk: "none",
     });
     expect(rows[1]).toMatchObject({ sku: "AT-D", planned: "5", recommended_qty: "20", risk: "out", stockout_date: today });
-    expect(rows[3]).toMatchObject({ sku: "AT-C", units: "0", days_of_cover: "0.0", recommended_qty: "0" });
+    expect(rows[3]).toMatchObject({ sku: "AT-C", units: "0", days_of_cover: "0,0", recommended_qty: "0" });
     expect(Object.keys(rows[0]!)).not.toContain("unit_cost");
     const owner = await exportSalesCsv(env.ctx(OWNER), { period: resolvePeriod({ key: "30", today }), filters: onlyTest() });
-    expect(parseCsv(owner.content)[0]).toMatchObject({ sku: "AT-A", unit_cost: "14.00", cost_currency: "UAH" });
+    expect(parseCsv(owner.content)[0]).toMatchObject({ sku: "AT-A", unit_cost: "14,00", cost_currency: "UAH" });
+    // Профіль «,» (програми/Sheets) — десяткова крапка.
+    const machine = await exportSalesCsv(env.ctx(OWNER), { separator: "comma", period: resolvePeriod({ key: "30", today }), filters: onlyTest() });
+    expect(parseCsv(machine.content, ",")[0]).toMatchObject({ sku: "AT-A", velocity_30d: "0.333", days_of_cover: "60.0", unit_cost: "14.00" });
   });
 
   it("resource route: CSV headers, permission checks, invalid parameters and an audit record", async () => {
@@ -590,10 +595,20 @@ describe("CSV export", () => {
     expect(staff.status).toBe(200);
     expect(staff.headers.get("X-Export-With-Costs")).toBe("0");
     expect((await staff.text()).split("\r\n")[0]).not.toContain("unit_cost");
-    expect((await loadExport("?dataset=orders")).status).toBe(400);
-    expect((await loadExport("?dataset=movements&period=custom&from=2026-11-10&to=2026-11-01")).status).toBe(400);
+    // Помилки — людським текстом мовою запиту, ключ — у X-Export-Error (e2e-6).
+    const badDataset = await loadExport("?dataset=orders");
+    expect(badDataset.status).toBe(400);
+    expect(await badDataset.text()).toBe("Невідомий набір даних для експорту.");
+    expect(badDataset.headers.get("X-Export-Error")).toBe("warehouseAnalytics.export.error.dataset");
+    const badPeriod = await loadExport("?dataset=movements&period=custom&from=2026-11-10&to=2026-11-01");
+    expect(badPeriod.status).toBe(400);
+    expect(await badPeriod.text()).toBe("Некоректний період експорту.");
+    m.ctx = { ...env.ctx(STAFF), basePath: "/demo", locale: "en" };
+    expect(await (await loadExport("?dataset=foo")).text()).toBe("Unknown export dataset.");
     setContext(NO_VIEW);
-    expect((await loadExport("?dataset=stock")).status).toBe(403);
+    const forbidden = await loadExport("?dataset=stock");
+    expect(forbidden.status).toBe(403);
+    expect(await forbidden.text()).toBe("Недостатньо прав для експорту.");
 
     const audit = await env.handle.db
       .select()

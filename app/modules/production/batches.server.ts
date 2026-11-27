@@ -32,7 +32,7 @@ import { can, ForbiddenError, requirePermission, type Actor } from "~/domain/per
 import { ConflictError, DomainError, NotFoundError } from "~/lib/errors";
 import { writeAudit } from "~/modules/audit/audit.server";
 import { inventoryKeys } from "~/modules/inventory/keys";
-import { applyMovements, ensureStockItemsForVariants, type MovementInput } from "~/modules/inventory/ledger.server";
+import { applyMovements, ensureStockItemsForVariants, movementOptionsFor, type MovementInput } from "~/modules/inventory/ledger.server";
 import { getDefaultWarehouse } from "~/modules/inventory/warehouse.server";
 import { enqueueInventoryPushIfPending } from "~/modules/inventory-sync/schedule.server";
 import type { ServiceContext } from "~/server/types";
@@ -53,6 +53,7 @@ import {
   type LineQuantities,
 } from "./calc";
 import { FIELD_ERRORS, PRODUCTION_ERRORS, ProductionValidationError } from "./errors";
+import { maskFreeTextNote } from "~/modules/privacy/notes";
 
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CURRENCY_RE = /^[A-Z]{3}$/;
@@ -622,8 +623,10 @@ function normalizeReceiptLines(lines: ReceiptLineInput[]): ReceiptLineInput[] {
     const okQty = (n: number) => Number.isSafeInteger(n) && n >= 0 && n <= LIMITS.quantity;
     if (!okQty(l.good)) errors[`good.${id}`] = FIELD_ERRORS.invalidQuantity;
     if (!okQty(l.defective)) errors[`defective.${id}`] = FIELD_ERRORS.invalidQuantity;
-    const reason = trimOrNull(l.defectReason);
-    if (reason && reason.length > LIMITS.defectReason) errors[`reason.${id}`] = FIELD_ERRORS.tooLong;
+    const rawReason = trimOrNull(l.defectReason);
+    if (rawReason && rawReason.length > LIMITS.defectReason) errors[`reason.${id}`] = FIELD_ERRORS.tooLong;
+    // Причина браку — вільний текст, видимий усім з warehouse.view (примітка руху): без телефонів/email.
+    const reason = maskFreeTextNote(rawReason, LIMITS.defectReason);
     out.push({ batchLineId: id, good: l.good, defective: l.defective, defectReason: reason });
   }
   if (Object.keys(errors).length > 0) throw new ProductionValidationError(errors);
@@ -664,8 +667,10 @@ export async function receiveProduction(ctx: ServiceContext, batchId: string, in
   requirePermission(ctx.actor, "warehouse.receive");
   const key = (input.idempotencyKey ?? "").trim().toLowerCase();
   if (!UUID_RE.test(key)) throw new DomainError(PRODUCTION_ERRORS.receiptKey, 400);
-  const note = trimOrNull(input.note);
-  if (note && note.length > LIMITS.receiptNote) throw new ProductionValidationError({ note: FIELD_ERRORS.tooLong });
+  const rawNote = trimOrNull(input.note);
+  if (rawNote && rawNote.length > LIMITS.receiptNote) throw new ProductionValidationError({ note: FIELD_ERRORS.tooLong });
+  // Примітка надходження показується на сторінці партії всім з warehouse.view — без телефонів/email/карток/IBAN.
+  const note = maskFreeTextNote(rawNote, LIMITS.receiptNote);
   const explicit = input.lines === "remaining" ? null : normalizeReceiptLines(input.lines);
 
   return ctx.db.transaction(async (tx) => {
@@ -764,7 +769,7 @@ export async function receiveProduction(ctx: ServiceContext, batchId: string, in
         note: p.defective > 0 ? p.reason : null,
       };
     });
-    const res = await applyMovements(tx, ctx.actor, movements);
+    const res = await applyMovements(tx, ctx.actor, movements, movementOptionsFor(ctx));
     // Надходження змінює on_hand → передача в Shopify (у тій самій транзакції; без дублів — dedupe-ключ черги).
     await enqueueInventoryPushIfPending(tx, res.applied);
 

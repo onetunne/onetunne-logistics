@@ -366,8 +366,8 @@ export interface ProductionPrefill {
  * Посилання на створення партії з рекомендованими позиціями: `product` — товари для сітки форми (форма вже вміє),
  * `qty.<variantId>` — рекомендовані кількості (ті самі імена, що й поля форми партії). Нічого не створює — людина
  * перевіряє й зберігає партію сама.
- * УВАГА: форма партії (pages/production-batch.tsx) поки НЕ заповнює кількості з `qty.*` — лише вибирає товари;
- * для заповнення її loader має викликати parseProductionPrefill (нижче). Тому підписи кнопок не обіцяють кількостей.
+ * Форма партії (pages/production-batch.tsx) вибирає товари й заповнює кількості з `qty.*` через parseProductionPrefill
+ * (нижче): лише варіанти сітки форми, цілі 1…LIMITS.quantity; партія створюється лише після збереження людиною.
  */
 export function productionPrefill(items: readonly PrefillItem[]): ProductionPrefill {
   const params = new URLSearchParams();

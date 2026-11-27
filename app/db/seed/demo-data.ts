@@ -17,6 +17,12 @@ export interface DemoVariantSeed {
   countryOfOrigin: string | null;
   customsDescription: string | null;
   inventoryAvailable: number;
+  /**
+   * Етап 5: габарити одиниці в упаковці виробника, мм (довжина, ширина, висота) — для автоматичного підбору коробки.
+   * Shopify габаритів не має (у робочому режимі їх вносять у розділі «Товари»). Частина демо-варіантів НАВМИСНО без
+   * габаритів: видно і точний підбір («за габаритами й вагою»), і неточний (частково / лише за вагою → типова упаковка).
+   */
+  dimsMm?: [number, number, number];
 }
 
 export interface DemoProductSeed {
@@ -35,7 +41,7 @@ export const DEMO_PRODUCTS: DemoProductSeed[] = [
     imageUrl: "/demo-images/phone-holder.svg",
     variants: [
       { key: "holder-black", title: "Чорний", sku: "OT-PH-BLK", barcode: "4820000000017", color: "Чорний", model: null, price: "29.00", weightGrams: 120, hsCode: "8714.10", countryOfOrigin: "UA", customsDescription: "Phone holder for electric scooter", inventoryAvailable: 42 },
-      { key: "holder-white", title: "Білий", sku: "OT-PH-WHT", barcode: "4820000000024", color: "Білий", model: null, price: "29.00", weightGrams: 120, hsCode: "8714.10", countryOfOrigin: "UA", customsDescription: "Phone holder for electric scooter", inventoryAvailable: 7 },
+      { key: "holder-white", title: "Білий", sku: "OT-PH-WHT", barcode: "4820000000024", color: "Білий", model: null, price: "29.00", weightGrams: 120, hsCode: "8714.10", countryOfOrigin: "UA", customsDescription: "Phone holder for electric scooter", inventoryAvailable: 7, dimsMm: [160, 90, 45] },
     ],
   },
   {
@@ -45,7 +51,7 @@ export const DEMO_PRODUCTS: DemoProductSeed[] = [
     imageUrl: "/demo-images/fender.svg",
     variants: [
       { key: "fender-x", title: "Model X", sku: "OT-FK-X", barcode: "4820000000031", color: null, model: "Model X", price: "34.50", weightGrams: 350, hsCode: "871410", countryOfOrigin: "UA", customsDescription: "Rear fender for electric scooter", inventoryAvailable: 18 },
-      { key: "fender-s", title: "Model S", sku: "OT-FK-S", barcode: "4820000000048", color: null, model: "Model S", price: "34.50", weightGrams: 340, hsCode: "871410", countryOfOrigin: "UA", customsDescription: "Rear fender for electric scooter", inventoryAvailable: 3 },
+      { key: "fender-s", title: "Model S", sku: "OT-FK-S", barcode: "4820000000048", color: null, model: "Model S", price: "34.50", weightGrams: 340, hsCode: "871410", countryOfOrigin: "UA", customsDescription: "Rear fender for electric scooter", inventoryAvailable: 3, dimsMm: [280, 140, 60] },
     ],
   },
   {
@@ -55,7 +61,7 @@ export const DEMO_PRODUCTS: DemoProductSeed[] = [
     imageUrl: "/demo-images/grips.svg",
     variants: [
       { key: "grips-black", title: "Чорні", sku: "OT-GR-BLK", barcode: "4820000000055", color: "Чорний", model: null, price: "14.90", weightGrams: 90, hsCode: "871410", countryOfOrigin: "UA", customsDescription: "Silicone handlebar grips", inventoryAvailable: 60 },
-      { key: "grips-gray", title: "Сірі", sku: "OT-GR-GRY", barcode: "4820000000062", color: "Сірий", model: null, price: "14.90", weightGrams: 90, hsCode: "871410", countryOfOrigin: "UA", customsDescription: "Silicone handlebar grips", inventoryAvailable: 25 },
+      { key: "grips-gray", title: "Сірі", sku: "OT-GR-GRY", barcode: "4820000000062", color: "Сірий", model: null, price: "14.90", weightGrams: 90, hsCode: "871410", countryOfOrigin: "UA", customsDescription: "Silicone handlebar grips", inventoryAvailable: 25, dimsMm: [130, 40, 40] },
     ],
   },
   {
@@ -86,6 +92,24 @@ export const DEMO_PRODUCTS: DemoProductSeed[] = [
       { key: "tire-std", title: "Стандарт", sku: "OT-TR-1025", barcode: "4820000000093", color: null, model: "10x2.5", price: "27.00", weightGrams: 900, hsCode: null, countryOfOrigin: "UA", customsDescription: null, inventoryAvailable: 9 },
     ],
   },
+];
+
+/**
+ * Етап 5: вигадані колекції (як колекції Shopify) і товари в них (ключі DEMO_PRODUCTS). Товар може бути в кількох
+ * колекціях; покришка — лише в «Шини та колеса». Шаблони комплектації «на колекцію» — demo-warehouse.server.ts.
+ */
+export interface DemoCollectionSeed {
+  key: string;
+  title: string;
+  handle: string;
+  products: string[];
+}
+
+export const DEMO_COLLECTIONS: DemoCollectionSeed[] = [
+  { key: "fenders", title: "Крила та захист", handle: "fenders-and-protection", products: ["fender"] },
+  { key: "handlebar", title: "Аксесуари на кермо", handle: "handlebar-accessories", products: ["holder", "grips", "bag"] },
+  { key: "wheels", title: "Шини та колеса", handle: "tires-and-wheels", products: ["tire"] },
+  { key: "safety", title: "Світло та безпека", handle: "lights-and-safety", products: ["light", "fender"] },
 ];
 
 export interface DemoOrderSeed {

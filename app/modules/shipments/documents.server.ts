@@ -34,6 +34,8 @@ export async function fetchCarrierDocument(
   orderId: string,
   shipmentId: string,
   kind: CarrierDocumentKind,
+  /** signal — додаткове скасування (напр. загальний час пакета етикеток), разом із тайм-аутом одного запиту. */
+  opts: { signal?: AbortSignal } = {},
 ): Promise<CarrierDocument> {
   requirePermission(ctx.actor, "orders.view");
   const [shipment] = await ctx.db
@@ -46,7 +48,7 @@ export async function fetchCarrierDocument(
   return adapter.getDocument!(
     { carrierShipmentId: shipment.carrierShipmentId, waybillNumber: shipment.waybillNumber! },
     kind,
-    { signal: AbortSignal.timeout(CARRIER_TIMEOUT_MS) },
+    { signal: opts.signal ? AbortSignal.any([AbortSignal.timeout(CARRIER_TIMEOUT_MS), opts.signal]) : AbortSignal.timeout(CARRIER_TIMEOUT_MS) },
   );
 }
 

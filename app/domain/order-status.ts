@@ -89,3 +89,24 @@ export function isShipped(status: OrderStatus): boolean {
 export function isEditable(status: OrderStatus): boolean {
   return EDITABLE_STATUSES.includes(status);
 }
+
+/**
+ * Shopify показує повне або часткове виконання замовлення (orders.fulfillment_status — displayFulfillmentStatus у нижньому
+ * регістрі). Для замовлення, НЕ відправленого застосунком, це виконання поза застосунком: така накладна була б повторним
+ * відправленням (modules/shipments/waybill.server.ts блокує створення), а склад списує лише за явним рішенням менеджера
+ * («Відправлено поза застосунком», modules/orders/shipped-outside.server.ts).
+ */
+export function isFulfilledInShopify(fulfillmentStatus: string | null | undefined): boolean {
+  return fulfillmentStatus === "fulfilled" || fulfillmentStatus === "partially_fulfilled";
+}
+
+/**
+ * Статуси, з яких менеджер може підтвердити «Відправлено поза застосунком» (замовлення виконано в Shopify, а накладної
+ * застосунку немає) — окремий явний перехід у handed_to_carrier, не частина ORDER_TRANSITIONS: автоматичні шляхи
+ * (відстеження, синхронізація) так перейти не можуть.
+ */
+export const SHIPPED_OUTSIDE_APP_FROM: readonly OrderStatus[] = EDITABLE_STATUSES;
+
+export function canMarkShippedOutsideApp(status: OrderStatus): boolean {
+  return SHIPPED_OUTSIDE_APP_FROM.includes(status);
+}

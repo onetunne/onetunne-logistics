@@ -133,7 +133,7 @@ beforeAll(async () => {
     carrier.behaviour.set(r.shipment.waybillNumber!, behaviour);
     ids[number] = id;
   }
-  ids["#0998"] = await env.orderId("#0998"); // накладна тестового перевізника демо (без документів)
+  ids["#0998"] = await env.orderId("#0998"); // накладна тестового перевізника демо (зразок етикетки TEST)
   ids["#1004"] = await env.orderId("#1004"); // без накладної
 });
 afterAll(async () => {
@@ -147,6 +147,8 @@ describe("merged carrier labels", () => {
     const r = await mergeCarrierLabels(ctxOf(STAFF), all);
     expect(r.missing).toBe(1);
     expect(r.included.map((i) => [i.orderNumber, i.pages]).sort()).toEqual([
+      // Етап 5: тестовий перевізник демо видає зразок етикетки (1 сторінка, позначка TEST).
+      ["#0998", 1],
       ["#1001", 1],
       ["#1002", 2],
       ["#1009", 1],
@@ -156,17 +158,16 @@ describe("merged carrier labels", () => {
       "#1012": "invalid_pdf",
       "#1007": "carrier_error",
       "#1003": "unsupported_format",
-      "#0998": "not_supported",
       "#1004": "not_in_queue",
     });
     const merged = await PDFDocument.load(r.pdf!);
-    expect(merged.getPageCount()).toBe(4);
+    expect(merged.getPageCount()).toBe(5);
   });
 
   it("nothing mergeable → no PDF; permissions are checked", async () => {
-    const r = await mergeCarrierLabels(ctxOf(STAFF), [ids["#0998"]!, ids["#1011"]!]);
+    const r = await mergeCarrierLabels(ctxOf(STAFF), [ids["#1012"]!, ids["#1011"]!]);
     expect(r.pdf).toBeNull();
-    expect(r.skipped.map((s) => s.reason).sort()).toEqual(["encrypted", "not_supported"]);
+    expect(r.skipped.map((s) => s.reason).sort()).toEqual(["encrypted", "invalid_pdf"]);
     const noPacking = makeActor({ id: "x", displayName: "X", role: "staff", overrides: { revoke: ["packing.perform"] } });
     await expect(mergeCarrierLabels(ctxOf(noPacking), [ids["#1001"]!])).rejects.toBeInstanceOf(ForbiddenError);
     const calls = carrier.calls;

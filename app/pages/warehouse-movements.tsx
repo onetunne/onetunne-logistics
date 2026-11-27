@@ -64,6 +64,11 @@ export interface MovementPageFilters {
   order: string;
   /** id замовлення (посилання з замовлення). */
   orderId: string | null;
+  /**
+   * id конкретного руху — посилання на документ (referenceDocumentUri, який застосунок передає в Shopify:
+   * inventory-sync/pure.ts movementReferenceUri). Показується лише цей рух; банер «Показати всі рухи» скидає фільтр.
+   */
+  movement: string | null;
   actor: string | null;
   kind: StockItemKind | null;
   page: number;
@@ -74,6 +79,7 @@ function parseFilters(params: URLSearchParams): MovementPageFilters {
   const type = params.get("type");
   const item = text("item").toLowerCase();
   const orderId = text("orderId").toLowerCase();
+  const movement = text("movement").toLowerCase();
   const kind = params.get("kind");
   const pageRaw = text("page");
   return {
@@ -84,6 +90,7 @@ function parseFilters(params: URLSearchParams): MovementPageFilters {
     q: text("q"),
     order: text("order", 64),
     orderId: UUID_RE.test(orderId) ? orderId : null,
+    movement: UUID_RE.test(movement) ? movement : null,
     actor: text("actor", 120) || null,
     kind: kind && (ITEM_KINDS as readonly string[]).includes(kind) ? (kind as StockItemKind) : null,
     page: /^\d{1,6}$/.test(pageRaw) ? Math.max(1, Number(pageRaw)) : 1,
@@ -99,6 +106,7 @@ function buildSearch(f: Partial<MovementPageFilters>): string {
   if (f.q) params.set("q", f.q);
   if (f.order) params.set("order", f.order);
   if (f.orderId) params.set("orderId", f.orderId);
+  if (f.movement) params.set("movement", f.movement);
   if (f.actor) params.set("actor", f.actor);
   if (f.kind) params.set("kind", f.kind);
   if (f.page && f.page > 1) params.set("page", String(f.page));
@@ -106,7 +114,7 @@ function buildSearch(f: Partial<MovementPageFilters>): string {
   return search ? `?${search}` : "";
 }
 
-/** Собівартість форматується на сервері: символ гривні в ICU Node і браузера різний (₴ / грн) — без розбіжності гідратації. */
+/** Собівартість — спільним детермінованим форматером (lib/format), як на інших сторінках складу. */
 function serialize(m: MovementView, locale: Locale) {
   return {
     id: m.id,
@@ -163,6 +171,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
   if (orderMissing) empty = true;
 
   const query: MovementFilters = {
+    movementIds: filters.movement ? [filters.movement] : undefined,
     stockItemIds,
     types: filters.type ? [filters.type] : undefined,
     orderId: orderRef?.id,
@@ -196,6 +205,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     itemLabel: itemLabel ? { ...itemLabel, variantTitle: displayVariantTitle(itemLabel.variantTitle) } : null,
     orderRef,
     orderMissing,
+    movementMissing: Boolean(filters.movement && result.total === 0),
     canSeeCosts: includeCosts,
     isFiltered: Boolean(
       filters.type ||
@@ -205,6 +215,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       filters.q ||
       filters.order ||
       filters.orderId ||
+      filters.movement ||
       filters.actor ||
       filters.kind,
     ),
@@ -407,6 +418,18 @@ export default function WarehouseMovementsPage() {
           </Banner>
         ) : null}
         {data.orderMissing ? <Banner tone="warning">{t("warehouse.history.orderNotFound")}</Banner> : null}
+        {filters.movement ? (
+          <Banner
+            tone={data.movementMissing ? "warning" : "info"}
+            action={
+              <Button to={listHref({ ...filters, movement: null, page: 1 })} size="sm">
+                {filters.from && filters.from === filters.to ? t("warehouse.history.clearMovementDay") : t("warehouse.history.clearMovement")}
+              </Button>
+            }
+          >
+            {data.movementMissing ? t("warehouse.history.movementNotFound") : t("warehouse.history.forMovement")}
+          </Banner>
+        ) : null}
         {dateInvalid ? <Banner tone="warning">{t("warehouse.history.dateRangeInvalid")}</Banner> : null}
 
         <Card>
@@ -417,6 +440,7 @@ export default function WarehouseMovementsPage() {
             <Form key={location.search} method="get" role="search">
               {filters.item ? <input type="hidden" name="item" value={filters.item} /> : null}
               {filters.orderId ? <input type="hidden" name="orderId" value={filters.orderId} /> : null}
+              {filters.movement ? <input type="hidden" name="movement" value={filters.movement} /> : null}
               <Stack gap={3}>
                 <Grid columns={{ xs: 1, md: 3 }} gap={3}>
                   <Select

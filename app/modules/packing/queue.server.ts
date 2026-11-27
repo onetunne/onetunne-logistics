@@ -16,6 +16,7 @@ import { availableDocumentKinds } from "~/modules/shipments/documents.server";
 import { ACTIVE_SHIPMENT_STATUSES } from "~/modules/shipments/waybill.server";
 import type { ServiceContext } from "~/server/types";
 import { ACTIVE_PACKING_STATUSES, NEEDS_WAYBILL_STATUSES, PACKING_QUEUE_STATUSES } from "./constants";
+import { isDeletedAtCarrier, isPackableShipment } from "./packing.server";
 import { QUEUE_PAGE_SIZE, type QueueFilters, type QueueTab } from "./queue-filters";
 import { checklistProgress, type Checklist } from "./scan";
 
@@ -96,9 +97,13 @@ export interface QueueRow {
     testMode: boolean;
     /** Етикетку перевізника можна отримати (PDF для об'єднаного друку). */
     labelAvailable: boolean;
-    /** Накладна придатна для пакування (створена, не передана). */
+    /** Накладна придатна для пакування (isPackableShipment: створена, не передана, не видалена у перевізника). */
     packable: boolean;
+    /** Перевізник повідомив, що накладну видалено (етикетка недійсна). */
+    deletedAtCarrier: boolean;
   } | null;
+  /** Етап 5: Shopify змінив позиції, а застосунок їх ще не застосував — пакувати за чеклістом не можна. */
+  shopifyLinesPending: boolean;
   packing: {
     status: "queued" | "in_progress" | "packed" | "cancelled";
     startedBy: string | null;
@@ -165,6 +170,8 @@ export async function listPackingQueue(ctx: Pick<ServiceContext, "db" | "carrier
         carrierReference: shipments.carrierReference,
         mode: shipments.mode,
         handedOverAt: shipments.handedOverAt,
+        trackingStatus: shipments.trackingStatus,
+        shopifyLinesPendingAt: orders.shopifyLinesPendingAt,
         packingId: orderPacking.id,
         packingStatus: orderPacking.status,
         checklist: orderPacking.checklist,
@@ -285,9 +292,12 @@ export async function listPackingQueue(ctx: Pick<ServiceContext, "db" | "carrier
               carrierName: adapter?.displayName ?? shipment.carrierCode,
               testMode: r.mode === "test",
               labelAvailable: availableDocumentKinds(ctx, shipment).includes("label"),
-              packable: shipment.status === "created" && Boolean(shipment.waybillNumber) && !r.handedOverAt,
+              packable: isPackableShipment({ ...shipment, handedOverAt: r.handedOverAt, trackingStatus: r.trackingStatus }),
+              deletedAtCarrier: isDeletedAtCarrier({ status: shipment.status, handedOverAt: r.handedOverAt, trackingStatus: r.trackingStatus }),
             }
           : null,
+        // Рядки черги — лише незавершені замовлення, тож позначка діє (shopifyLinesPending у pending-lines.server).
+        shopifyLinesPending: r.shopifyLinesPendingAt !== null,
         packing:
           r.packingId && r.packingStatus && progress
             ? {

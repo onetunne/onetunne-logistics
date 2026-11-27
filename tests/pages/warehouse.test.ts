@@ -1,4 +1,4 @@
-import { and, eq, gt } from "drizzle-orm";
+import { and, eq, gt, sql } from "drizzle-orm";
 import { createElement as h } from "react";
 import { renderToString } from "react-dom/server";
 import { Outlet, StaticRouterProvider, createStaticHandler, createStaticRouter } from "react-router";
@@ -64,8 +64,10 @@ afterAll(async () => {
   await env.close();
 });
 
+/** Режим контексту: передача в Shopify діє лише в робочому режимі (у демо Shopify не підключено). */
+let ctxMode: "demo" | "production" = "demo";
 function setContext(actor: Actor = OWNER) {
-  m.ctx = { ...env.ctx(actor), basePath: "/demo", locale: "uk" };
+  m.ctx = { ...env.ctx(actor), mode: ctxMode, basePath: "/demo", locale: "uk" };
 }
 beforeEach(() => setContext());
 
@@ -114,13 +116,21 @@ async function variantBySku(sku: string): Promise<string> {
 }
 const stockItemBySku = async (sku: string) => ensureStockItemForVariant(env.handle.db, await variantBySku(sku));
 
-/** Тимчасово інший режим передачі в Shopify (warehouse.shopifyPush). */
-async function withPushMode<T>(mode: "off" | "deltas", run: () => Promise<T>): Promise<T> {
+/**
+ * Тимчасово інший режим передачі в Shopify (warehouse.shopifyPush). За замовчуванням — у робочому режимі контексту
+ * (у демо передача не діє); { demo: true } — перевірка демо.
+ */
+async function withPushMode<T>(mode: "off" | "deltas", run: () => Promise<T>, opts: { demo?: boolean } = {}): Promise<T> {
   const current = await getSetting(env.handle.db, "warehouse");
   await updateSetting(env.handle.db, OWNER, "warehouse", { ...current, shopifyPush: mode });
+  const actor = m.ctx?.actor ?? OWNER;
+  ctxMode = opts.demo ? "demo" : "production";
+  setContext(actor);
   try {
     return await run();
   } finally {
+    ctxMode = "demo";
+    setContext(m.ctx?.actor ?? actor);
     await updateSetting(env.handle.db, OWNER, "warehouse", current);
     await env.handle.db.delete(jobs).where(eq(jobs.type, "inventory.push"));
   }
@@ -629,6 +639,73 @@ describe("item card: customer returns and Shopify", () => {
     setContext(OWNER);
     expect((await loadItem(id)).pushesToShopify).toBe(false); // передачу вимкнено (типово)
   });
+
+  it("demo with «send changes» on: no «will be sent to Shopify» claim, nothing queued (e2e-5)", async () => {
+    const id = await stockItemBySku("OT-PH-BLK");
+    await withPushMode(
+      "deltas",
+      async () => {
+        let data = await loadItem(id);
+        expect(data.pushesToShopify).toBe(false);
+        const res = await actItem(id, { intent: "receive", operationId: data.operationIds.receive, quantity: "1", reason: "purchase" });
+        expect(res).toMatchObject({ ok: true, message: "warehouse.op.received" });
+        expect((res as { extra?: string[] }).extra ?? []).not.toContain("warehouse.op.pushQueued");
+        expect(await queuedPushJobs()).toBe(0);
+        data = await loadItem(id);
+        expect(data.movements[0]).toMatchObject({ reason: "purchase", shopifySyncState: "skipped" });
+
+        // Повернення покупця в демо: жодного тексту про Shopify («Повернення не надсилається в Shopify…», N3) —
+        // ні для власника, ні для працівника; з прапорцем «надіслати» — теж нічого не ставиться в чергу.
+        for (const actor of [OWNER, STAFF]) {
+          setContext(actor);
+          data = await loadItem(id);
+          const ret = await actItem(id, { intent: "receive", operationId: data.operationIds.receive, quantity: "1", reason: "customer_return" });
+          expect(ret, actor.role).toMatchObject({ ok: true, message: "warehouse.op.received" });
+          expect((ret as { extra?: string[] }).extra ?? [], actor.role).toEqual([]);
+          data = await loadItem(id);
+          const forced = await actItem(id, {
+            intent: "receive",
+            operationId: data.operationIds.receive,
+            quantity: "1",
+            reason: "customer_return",
+            pushToShopify: "on",
+          });
+          expect((forced as { extra?: string[] }).extra ?? [], actor.role).toEqual([]);
+          expect(await queuedPushJobs()).toBe(0);
+        }
+        setContext(OWNER);
+      },
+      { demo: true },
+    );
+  });
+
+  it("receipt cost currency defaults to the cost currency (UAH), not the selling currency; then the item's last cost currency (e2e-2)", async () => {
+    const id = await stockItemBySku("OT-FK-S");
+    const [variant] = await env.handle.db
+      .select({ currency: productVariants.currency })
+      .from(productVariants)
+      .where(eq(productVariants.sku, "OT-FK-S"));
+    expect(variant!.currency).not.toBe("UAH"); // демо продає в EUR
+    const [last] = await env.handle.db
+      .select({ c: inventoryMovements.costCurrency })
+      .from(inventoryMovements)
+      .where(and(eq(inventoryMovements.stockItemId, id), sql`${inventoryMovements.unitCost} is not null`))
+      .limit(1);
+    if (!last) expect((await loadItem(id)).item.defaultCostCurrency).toBe("UAH");
+    await receiveStock(env.ctx(OWNER), {
+      operationId: newOperationId(),
+      stockItemId: id,
+      quantity: 1,
+      reason: "purchase",
+      unitCost: "3.50",
+      costCurrency: "PLN",
+    });
+    expect((await loadItem(id)).item.defaultCostCurrency).toBe("PLN");
+    // Працівник не бачить поля собівартості — і валюти останньої собівартості теж.
+    setContext(STAFF);
+    expect((await loadItem(id)).item.defaultCostCurrency).toBe("UAH");
+    setContext(OWNER);
+  });
 });
 
 describe("movement history", () => {
@@ -666,6 +743,42 @@ describe("movement history", () => {
     expect((await loadHistory("?from=2026-02-30")).filters.from).toBeNull();
     expect((await loadHistory("?page=999")).page).toBe(all.pages);
     expect((await loadHistory("?q=zzz-none")).total).toBe(0);
+  });
+
+  it("?movement=<id> (Shopify referenceDocumentUri) shows exactly that movement and keeps the link (ui-6)", async () => {
+    const item = await stockItemBySku("OT-LT-STD");
+    const ops = [newOperationId(), newOperationId()];
+    for (const operationId of ops) {
+      await receiveStock(env.ctx(OWNER), { operationId, stockItemId: item, quantity: 1, reason: "purchase" });
+    }
+    const ids: string[] = [];
+    for (const operationId of ops) {
+      const [mv] = await env.handle.db
+        .select({ id: inventoryMovements.id })
+        .from(inventoryMovements)
+        .where(eq(inventoryMovements.idempotencyKey, inventoryKeys.manual(operationId)));
+      ids.push(mv!.id);
+    }
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Kyiv" }).format(new Date());
+    // Посилання як у movementReferenceUri: item + type + день + movement.
+    const sameDay = await loadHistory(`?item=${item}&type=receipt_manual&from=${today}&to=${today}`);
+    expect(sameDay.rows.filter((r) => ids.includes(r.id))).toHaveLength(2);
+    const linked = await loadHistory(`?item=${item}&type=receipt_manual&from=${today}&to=${today}&movement=${ids[1]}`);
+    expect(linked.rows.map((r) => r.id)).toEqual([ids[1]]);
+    expect(linked.total).toBe(1);
+    expect(linked.filters.movement).toBe(ids[1]);
+    expect(linked.movementMissing).toBe(false);
+    expect(linked.isFiltered).toBe(true);
+    // Невідомий id → порожньо з попередженням; некоректний — ігнорується.
+    const unknown = await loadHistory(`?movement=00000000-0000-4000-8000-000000000000`);
+    expect(unknown).toMatchObject({ total: 0, movementMissing: true });
+    expect((await loadHistory("?movement=not-a-uuid")).filters.movement).toBeNull();
+    // Сторінка зберігає параметр у посиланнях і пропонує скинути його.
+    const historyRoute = { path: "warehouse/movements", loader: historyPage.loader, action: undefined, Component: historyPage.default };
+    const html = await render(`/demo/warehouse/movements?item=${item}&from=${today}&to=${today}&movement=${ids[1]}`, historyRoute);
+    expect(html).toContain(esc(uk("warehouse.history.forMovement")));
+    expect(html).toContain(esc(uk("warehouse.history.clearMovementDay")));
+    expect(html).toContain(`name="movement" value="${ids[1]}"`);
   });
 
   it("unit cost is returned only with finance.view", async () => {

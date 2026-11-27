@@ -3,7 +3,7 @@ import { and, count, eq, inArray } from "drizzle-orm";
 import { auditLog, inventoryMovements, jobs, packagingMaterials, productVariants, stockAlerts, stockItems } from "~/db/schema";
 import { makeActor, type Actor } from "~/domain/permissions";
 import { inventoryKeys } from "~/modules/inventory/keys";
-import { ensureStockItemForMaterial, ensureStockItemForVariant } from "~/modules/inventory/ledger.server";
+import { applyMovements, ensureStockItemForMaterial, ensureStockItemForVariant } from "~/modules/inventory/ledger.server";
 import { getDefaultWarehouse } from "~/modules/inventory/warehouse.server";
 import { getSetting, updateSetting } from "~/modules/settings/settings.server";
 import {
@@ -87,6 +87,9 @@ async function queuedPushJobs(): Promise<number> {
   return Number(row?.c ?? 0);
 }
 const clearPushJobs = () => db().delete(jobs).where(eq(jobs.type, "inventory.push"));
+
+/** Робочий режим: передача в Shopify діє лише там (у демо Shopify не підключено — movementOptionsFor). */
+const prodCtx = (actor: Parameters<TestEnv["ctx"]>[0]) => ({ ...env.ctx(actor), mode: "production" as const });
 
 /** Тимчасово інший режим передачі в Shopify (warehouse.shopifyPush). */
 async function withPushMode<T>(mode: "off" | "deltas", run: () => Promise<T>): Promise<T> {
@@ -222,11 +225,11 @@ describe("receiveStock", () => {
     const current = await getSetting(db(), "warehouse");
     await updateSetting(db(), OWNER, "warehouse", { ...current, shopifyPush: "deltas" });
     try {
-      const r = await receiveStock(env.ctx(STAFF), { operationId: newOperationId(), stockItemId: item, quantity: 1, reason: "found" });
+      const r = await receiveStock(prodCtx(STAFF), { operationId: newOperationId(), stockItemId: item, quantity: 1, reason: "found" });
       const [m] = await db().select().from(inventoryMovements).where(eq(inventoryMovements.id, r.movementId));
       expect(m!.shopifySyncState).toBe("pending");
       // Списання браку не змінює on_hand → у Shopify не надсилається.
-      const marked = await markDefective(env.ctx(STAFF), {
+      const marked = await markDefective(prodCtx(STAFF), {
         operationId: newOperationId(),
         stockItemId: item,
         quantity: 1,
@@ -235,7 +238,7 @@ describe("receiveStock", () => {
       expect((await db().select().from(inventoryMovements).where(eq(inventoryMovements.id, marked.movementId)))[0]!.shopifySyncState).toBe(
         "pending",
       );
-      const off = await writeOffDefective(env.ctx(OWNER), {
+      const off = await writeOffDefective(prodCtx(OWNER), {
         operationId: newOperationId(),
         stockItemId: item,
         quantity: 1,
@@ -549,14 +552,14 @@ describe("Shopify push queue (warehouse.shopifyPush = deltas)", () => {
     const item = await openedItem("OPS-PUSH-A", 10);
     await withPushMode("deltas", async () => {
       const ops: Array<[string, () => Promise<{ movementId: string; shopifyPushQueued: boolean }>]> = [
-        ["receive", () => receiveStock(env.ctx(STAFF), { operationId: newOperationId(), stockItemId: item, quantity: 30, reason: "purchase" })],
-        ["defect", () => markDefective(env.ctx(STAFF), { operationId: newOperationId(), stockItemId: item, quantity: 2, reason: "other" })],
-        ["repair", () => repairDefective(env.ctx(STAFF), { operationId: newOperationId(), stockItemId: item, quantity: 1 })],
-        ["count", () => adjustToCount(env.ctx(OWNER), { operationId: newOperationId(), stockItemId: item, countedOnHand: 20 })],
+        ["receive", () => receiveStock(prodCtx(STAFF), { operationId: newOperationId(), stockItemId: item, quantity: 30, reason: "purchase" })],
+        ["defect", () => markDefective(prodCtx(STAFF), { operationId: newOperationId(), stockItemId: item, quantity: 2, reason: "other" })],
+        ["repair", () => repairDefective(prodCtx(STAFF), { operationId: newOperationId(), stockItemId: item, quantity: 1 })],
+        ["count", () => adjustToCount(prodCtx(OWNER), { operationId: newOperationId(), stockItemId: item, countedOnHand: 20 })],
         [
           "sheet",
           async () => {
-            const r = await stocktake(env.ctx(OWNER), { operationId: newOperationId(), counts: [{ stockItemId: item, countedOnHand: 25 }] });
+            const r = await stocktake(prodCtx(OWNER), { operationId: newOperationId(), counts: [{ stockItemId: item, countedOnHand: 25 }] });
             return { movementId: r.applied[0]!.movementId, shopifyPushQueued: r.shopifyPushQueued };
           },
         ],
@@ -568,33 +571,33 @@ describe("Shopify push queue (warehouse.shopifyPush = deltas)", () => {
         expect(`${name}:${await queuedPushJobs()}`).toBe(`${name}:1`);
       }
       // Кілька операцій — одне очікуване завдання (dedupe).
-      await receiveStock(env.ctx(STAFF), { operationId: newOperationId(), stockItemId: item, quantity: 1, reason: "found" });
+      await receiveStock(prodCtx(STAFF), { operationId: newOperationId(), stockItemId: item, quantity: 1, reason: "found" });
       expect(await queuedPushJobs()).toBe(1);
 
       await clearPushJobs();
       // Списання браку не змінює on_hand → не надсилається, завдання немає.
-      const off = await writeOffDefective(env.ctx(OWNER), { operationId: newOperationId(), stockItemId: item, quantity: 1, reason: "disposed" });
+      const off = await writeOffDefective(prodCtx(OWNER), { operationId: newOperationId(), stockItemId: item, quantity: 1, reason: "disposed" });
       expect([await syncStateOf(off.movementId), off.shopifyPushQueued, await queuedPushJobs()]).toEqual(["none", false, 0]);
       // Підрахунок без змін (нульова дельта) — теж ні.
       const current = (await balance(db(), item)).onHand;
-      const same = await adjustToCount(env.ctx(OWNER), { operationId: newOperationId(), stockItemId: item, countedOnHand: current });
+      const same = await adjustToCount(prodCtx(OWNER), { operationId: newOperationId(), stockItemId: item, countedOnHand: current });
       expect([same.shopifySyncState, same.shopifyPushQueued, await queuedPushJobs()]).toEqual(["none", false, 0]);
       // Повтор форми не ставить нове завдання.
       const operationId = newOperationId();
-      await receiveStock(env.ctx(STAFF), { operationId, stockItemId: item, quantity: 1, reason: "purchase" });
+      await receiveStock(prodCtx(STAFF), { operationId, stockItemId: item, quantity: 1, reason: "purchase" });
       await clearPushJobs();
-      const replay = await receiveStock(env.ctx(STAFF), { operationId, stockItemId: item, quantity: 1, reason: "purchase" });
+      const replay = await receiveStock(prodCtx(STAFF), { operationId, stockItemId: item, quantity: 1, reason: "purchase" });
       expect([replay.replay, replay.shopifySyncState, replay.shopifyPushQueued, await queuedPushJobs()]).toEqual([true, "pending", false, 0]);
       // Операція, що не відбулася (залишок змінився), не залишає завдання.
       await expect(
-        adjustToCount(env.ctx(OWNER), { operationId: newOperationId(), stockItemId: item, countedOnHand: 1, expectedOnHand: current + 100 }),
+        adjustToCount(prodCtx(OWNER), { operationId: newOperationId(), stockItemId: item, countedOnHand: 1, expectedOnHand: current + 100 }),
       ).rejects.toMatchObject({ code: "warehouse.error.stocktakeChanged" });
       expect(await queuedPushJobs()).toBe(0);
     });
     await clearPushJobs();
     await withPushMode("off", async () => {
-      const r = await receiveStock(env.ctx(STAFF), { operationId: newOperationId(), stockItemId: item, quantity: 3, reason: "purchase" });
-      const c = await adjustToCount(env.ctx(OWNER), { operationId: newOperationId(), stockItemId: item, countedOnHand: 5 });
+      const r = await receiveStock(prodCtx(STAFF), { operationId: newOperationId(), stockItemId: item, quantity: 3, reason: "purchase" });
+      const c = await adjustToCount(prodCtx(OWNER), { operationId: newOperationId(), stockItemId: item, countedOnHand: 5 });
       expect([await syncStateOf(r.movementId), r.shopifyPushQueued, c.shopifySyncState, c.shopifyPushQueued]).toEqual([
         "skipped",
         false,
@@ -605,11 +608,24 @@ describe("Shopify push queue (warehouse.shopifyPush = deltas)", () => {
     });
   });
 
+  it("demo: nothing is sent to Shopify, so internal changes are «not sent» and no push is queued or announced (e2e-5)", async () => {
+    const item = await openedItem("OPS-PUSH-DEMO", 5);
+    await withPushMode("deltas", async () => {
+      await clearPushJobs();
+      const demo = env.ctx(STAFF);
+      expect(demo.mode).toBe("demo");
+      const r = await receiveStock(demo, { operationId: newOperationId(), stockItemId: item, quantity: 2, reason: "purchase" });
+      expect([await syncStateOf(r.movementId), r.shopifyPushQueued, await queuedPushJobs()]).toEqual(["skipped", false, 0]);
+      const c = await adjustToCount(env.ctx(OWNER), { operationId: newOperationId(), stockItemId: item, countedOnHand: 3 });
+      expect([c.shopifySyncState, c.shopifyPushQueued, await queuedPushJobs()]).toEqual(["skipped", false, 0]);
+    });
+  });
+
   it("a not yet opened product never queues a push (its movements are added to the snapshot on opening)", async () => {
     const item = await freshItem("OPS-PUSH-NEW");
     await withPushMode("deltas", async () => {
       await clearPushJobs();
-      const r = await receiveStock(env.ctx(STAFF), { operationId: newOperationId(), stockItemId: item, quantity: 4, reason: "purchase" });
+      const r = await receiveStock(prodCtx(STAFF), { operationId: newOperationId(), stockItemId: item, quantity: 4, reason: "purchase" });
       expect([await syncStateOf(r.movementId), r.shopifyPushQueued, await queuedPushJobs()]).toEqual(["skipped", false, 0]);
     });
   });
@@ -621,7 +637,7 @@ describe("customer returns and Shopify restock", () => {
     const orderId = await env.orderId("#1001");
     await withPushMode("deltas", async () => {
       await clearPushJobs();
-      const restocked = await receiveStock(env.ctx(STAFF), {
+      const restocked = await receiveStock(prodCtx(STAFF), {
         operationId: newOperationId(),
         stockItemId: item,
         quantity: 2,
@@ -640,7 +656,7 @@ describe("customer returns and Shopify restock", () => {
         shopifyAlreadyApplied: true,
       });
 
-      const notRestocked = await receiveStock(env.ctx(STAFF), {
+      const notRestocked = await receiveStock(prodCtx(STAFF), {
         operationId: newOperationId(),
         stockItemId: item,
         quantity: 1,
@@ -653,7 +669,7 @@ describe("customer returns and Shopify restock", () => {
         1,
       ]);
       // Для інших причин прапорець не діє: закупівля завжди надсилається.
-      const purchase = await receiveStock(env.ctx(STAFF), {
+      const purchase = await receiveStock(prodCtx(STAFF), {
         operationId: newOperationId(),
         stockItemId: item,
         quantity: 1,
@@ -662,7 +678,7 @@ describe("customer returns and Shopify restock", () => {
       });
       expect(await syncStateOf(purchase.movementId)).toBe("pending");
       // Лише пошкоджені одиниці (on_hand не змінюється) і матеріали — none, як і без прапорця.
-      const damagedOnly = await receiveStock(env.ctx(STAFF), {
+      const damagedOnly = await receiveStock(prodCtx(STAFF), {
         operationId: newOperationId(),
         stockItemId: item,
         quantity: 0,
@@ -672,7 +688,7 @@ describe("customer returns and Shopify restock", () => {
       expect(await syncStateOf(damagedOnly.movementId)).toBe("none");
       const [material] = await db().select({ id: packagingMaterials.id }).from(packagingMaterials).where(eq(packagingMaterials.code, "box_l"));
       const materialItem = await ensureStockItemForMaterial(db(), material!.id);
-      const m = await receiveStock(env.ctx(STAFF), {
+      const m = await receiveStock(prodCtx(STAFF), {
         operationId: newOperationId(),
         stockItemId: materialItem,
         quantity: 1,
@@ -790,6 +806,39 @@ describe("notes and helpers", () => {
 
 // Справжні паралельні транзакції — лише на PostgreSQL (TEST_DATABASE_URL); на PGlite (один процес, одне з'єднання)
 // ці перевірки ПРОПУСКАЮТЬСЯ (у звіті vitest — skipped), а не «проходять» без виконання.
+describe.skipIf(!process.env.TEST_DATABASE_URL)("threshold change vs. a concurrent movement (real PostgreSQL, inventory-7)", () => {
+  it("a threshold change waits for the movement's balance lock: no contradictory low_stock + out_of_stock", async () => {
+    expect(env.handle.driver).toBe("pg");
+    for (const bulk of [true, false]) {
+      const item = await freshItem(bulk ? "OPS-THR-RACE-B" : "OPS-THR-RACE-S", 10);
+      expect(await openAlertKinds(db(), item)).toEqual([]);
+      const warehouse = await getDefaultWarehouse(db());
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      let moved!: () => void;
+      const movedSignal = new Promise<void>((r) => (moved = r));
+      // Транзакція A: увесь залишок — у брак (available 0 → out_of_stock), лишається відкритою.
+      const a = db().transaction(async (tx) => {
+        await applyMovements(tx, STAFF, [
+          { warehouseId: warehouse.id, stockItemId: item, type: "defect_mark", idempotencyKey: inventoryKeys.manual(newOperationId()), onHandDelta: -10, defectiveDelta: 10, reason: "other" },
+        ]);
+        moved();
+        await gate;
+      });
+      await movedSignal;
+      // Поки A відкрита: поріг 20 (за старим залишком 10 це було б «мало»).
+      const threshold = bulk
+        ? setLowStockThresholds(env.ctx(OWNER), { stockItemIds: [item], threshold: 20 })
+        : setLowStockThreshold(env.ctx(OWNER), { stockItemId: item, threshold: 20 });
+      await new Promise((r) => setTimeout(r, 300));
+      release();
+      await a;
+      await threshold;
+      expect(await openAlertKinds(db(), item)).toEqual(["out_of_stock"]);
+    }
+  });
+});
+
 describe.skipIf(!process.env.TEST_DATABASE_URL)("stocktake concurrency (real PostgreSQL)", () => {
   it("two simultaneous counts of the same item end consistently (last count wins, ledger sums to the balance)", async () => {
     expect(env.handle.driver).toBe("pg");
@@ -865,8 +914,8 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("stocktake concurrency (real Pos
       const results = await Promise.all(
         Array.from({ length: 9 }, (_, i) =>
           i % 3 === 2
-            ? adjustToCount(env.ctx(OWNER), { operationId: newOperationId(), stockItemId: items[i % 3]!, countedOnHand: 7 + i })
-            : receiveStock(env.ctx(STAFF), { operationId: newOperationId(), stockItemId: items[i % 3]!, quantity: 1 + i, reason: "purchase" }),
+            ? adjustToCount(prodCtx(OWNER), { operationId: newOperationId(), stockItemId: items[i % 3]!, countedOnHand: 7 + i })
+            : receiveStock(prodCtx(STAFF), { operationId: newOperationId(), stockItemId: items[i % 3]!, quantity: 1 + i, reason: "purchase" }),
         ),
       );
       expect(results.every((r) => r.shopifyPushQueued)).toBe(true);

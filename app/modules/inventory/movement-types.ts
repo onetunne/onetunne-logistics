@@ -91,6 +91,61 @@ export const MOVEMENT_RULES: Readonly<Record<MovementType, MovementRule>> = {
   transfer_out: { buckets: { onHand: "-" }, kinds: BOTH, negativeOnHand: false, shopifyPushable: true },
 };
 
+/**
+ * Усі коди причин руху (inventory_movements.reason), які записує застосунок. Підпис — i18n `warehouse.reason.<код>`
+ * (uk/en). Тест tests/stage5/movement-reasons.test.ts перевіряє переклади й те, що кожен літерал причини в модулях,
+ * які створюють рухи, є в цьому переліку — новий код без перекладу не пройде перевірку.
+ */
+export const MOVEMENT_REASON_CODES = [
+  // Склад, ручні операції (modules/warehouse/constants.ts: RECEIPT/DEFECT/WRITE_OFF_REASONS, STOCKTAKE/REPAIR_REASON)
+  "customer_return",
+  "purchase",
+  "found",
+  "other",
+  "damaged_in_warehouse",
+  "production",
+  "disposed",
+  "returned_to_manufacturer",
+  "lost",
+  "stocktake",
+  "repaired",
+  // Початкові залишки (inventory/opening.server.ts)
+  "shopify_snapshot",
+  "shopify_snapshot_clamped",
+  // Резерви замовлень (inventory/reservations.server.ts)
+  "order_paid",
+  "order_cancelled",
+  "quantity_changed",
+  "variant_changed",
+  "line_removed",
+  "handed_over",
+  "handed_over_unreserved",
+  "snapshot_committed",
+  // Виробництво (production/batches.server.ts)
+  "batch_started",
+  "batch_closed",
+  "batch_cancelled",
+  "production_receipt",
+  "production_over_receipt",
+  // Пакувальні матеріали (packaging/materials.server.ts, consumption.server.ts)
+  "packing_box",
+  "packing_kit",
+  "material_receipt",
+  "write_off",
+  "correction",
+  "stock_count",
+  // Синхронізація залишків Shopify (inventory-sync/accept.server.ts, conflicts.server.ts)
+  "shopify_conflict",
+  "shopify_auto_accept",
+  // Демо-дані
+  "demo_seed",
+] as const;
+export type MovementReasonCode = (typeof MOVEMENT_REASON_CODES)[number];
+
+export function isMovementReasonCode(value: unknown): value is MovementReasonCode {
+  return typeof value === "string" && (MOVEMENT_REASON_CODES as readonly string[]).includes(value);
+}
+
 export function isMovementType(value: unknown): value is MovementType {
   return typeof value === "string" && (MOVEMENT_TYPES as readonly string[]).includes(value);
 }

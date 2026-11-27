@@ -325,6 +325,11 @@ const messages: MessageModule = {
     "shopify.jobs.type.pushOrder": "Передача змін замовлення в Shopify",
     "shopify.jobs.type.fulfillShipment": "Передача трек-номера в Shopify",
     "shopify.jobs.type.trackingPoll": "Перевірка статусів відстеження",
+    "shopify.jobs.type.syncProductCollections": "Оновлення колекцій товару з Shopify",
+    "shopify.jobs.type.syncCollection": "Оновлення колекції з Shopify",
+    "shopify.jobs.type.deleteCollection": "Видалення колекції",
+    "shopify.jobs.type.collectionsPage": "Повна синхронізація колекцій",
+    "shopify.jobs.type.collectionMembershipsPage": "Повна синхронізація товарів у колекціях",
   },
   en: {
     "settings.customs.registrationConfirm": "I confirm: the shipping address matches the recipient's registered address, and this is allowed by Nova Post rules",
@@ -632,6 +637,11 @@ const messages: MessageModule = {
     "shopify.jobs.type.pushOrder": "Passing order changes to Shopify",
     "shopify.jobs.type.fulfillShipment": "Passing the tracking number to Shopify",
     "shopify.jobs.type.trackingPoll": "Tracking status check",
+    "shopify.jobs.type.syncProductCollections": "Product collections update from Shopify",
+    "shopify.jobs.type.syncCollection": "Collection update from Shopify",
+    "shopify.jobs.type.deleteCollection": "Collection deletion",
+    "shopify.jobs.type.collectionsPage": "Full collection sync",
+    "shopify.jobs.type.collectionMembershipsPage": "Full sync of products in collections",
   },
 };
 

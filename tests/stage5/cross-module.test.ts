@@ -39,17 +39,18 @@ describe("production receipt → Shopify push queue", () => {
     const stockItemId = await stockItemFor(db(), variantId);
     const current = await getSetting(db(), "warehouse");
 
-    const run = async () => {
-      const { batchId } = await createBatch(env.ctx(OWNER), {
+    const run = async (mode: "demo" | "production" = "production") => {
+      const ctx = (actor: typeof OWNER) => ({ ...env.ctx(actor), mode });
+      const { batchId } = await createBatch(ctx(OWNER), {
         title: "Інтеграційна партія",
         plannedReadyDate: "2030-01-15",
         manufacturer: "Вигаданий виробник",
         notes: null,
         lines: [{ variantId, quantity: 4 }],
       });
-      await startProduction(env.ctx(OWNER), batchId, 1);
+      await startProduction(ctx(OWNER), batchId, 1);
       const [line] = await db().select().from(productionBatchLines).where(eq(productionBatchLines.batchId, batchId));
-      await receiveProduction(env.ctx(STAFF), batchId, {
+      await receiveProduction(ctx(STAFF), batchId, {
         idempotencyKey: globalThis.crypto.randomUUID(),
         lines: [{ batchLineId: line!.id, good: 3, defective: 1, defectReason: "подряпини" }],
       });
@@ -65,6 +66,11 @@ describe("production receipt → Shopify push queue", () => {
       await updateSetting(db(), OWNER, "warehouse", { ...current, shopifyPush: "deltas" });
       expect(await run()).toBe("pending");
       expect(await queuedPushJobs()).toBe(1);
+
+      // Демо: Shopify не підключено — «не надсилалося», без завдання передачі (e2e-5).
+      await db().delete(jobs).where(eq(jobs.type, "inventory.push"));
+      expect(await run("demo")).toBe("skipped");
+      expect(await queuedPushJobs()).toBe(0);
 
       await db().delete(jobs).where(eq(jobs.type, "inventory.push"));
       await updateSetting(db(), OWNER, "warehouse", { ...(await getSetting(db(), "warehouse")), shopifyPush: "off" });

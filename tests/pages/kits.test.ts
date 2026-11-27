@@ -107,11 +107,20 @@ describe("kits loader", () => {
     setContext(STAFF);
     const data = await load("?edit=new");
     expect(data).toMatchObject({ canEdit: false, creating: false, editing: null, materials: [], productOptions: [] });
-    expect(data.templates.map((t) => t.name).sort()).toEqual(["Крило: болти та інструкція", "Стандартний комплект"]);
-    expect(data.counts).toEqual({ all: 2, active: 2, inactive: 0 });
+    expect(data.templates.map((t) => t.name).sort()).toEqual([
+      "Крило Model S: скотч для кронштейна",
+      "Крило: болти та інструкція",
+      "Стандартний комплект",
+      "Шини: фіксація скотчем",
+    ]);
+    expect(data.counts).toEqual({ all: 4, active: 4, inactive: 0 });
     expect(data.models).toEqual(expect.arrayContaining(["Model S", "Model X"]));
     expect((await load("?applies=products")).templates.map((t) => t.name)).toEqual(["Крило: болти та інструкція"]);
-    expect((await load("?model=Model%20X")).templates).toHaveLength(2); // «усі» шаблони підходять будь-якій моделі
+    expect((await load("?applies=collections")).templates.map((t) => t.name).sort()).toEqual(["Крило Model S: скотч для кронштейна", "Шини: фіксація скотчем"]);
+    // «Усі товари» підходять будь-якій моделі; шаблон із фільтром Model S — лише Model S; колекція шин — модель 10x2.5.
+    expect((await load("?model=Model%20X")).templates.map((t) => t.name).sort()).toEqual(["Крило: болти та інструкція", "Стандартний комплект"]);
+    expect((await load("?model=Model%20S")).templates).toHaveLength(3);
+    expect((await load("?model=10x2.5&applies=collections")).templates.map((t) => t.name)).toEqual(["Шини: фіксація скотчем"]);
     expect((await load("?model=10x2.5&applies=products")).templates).toEqual([]);
     expect((await load("?q=болти")).templates.map((t) => t.name)).toEqual(["Крило: болти та інструкція"]);
     expect((await load("?status=inactive")).templates).toEqual([]);
@@ -127,7 +136,8 @@ describe("kits loader", () => {
 
   it("order check shows the combined kit and the suggested box (needs orders.view)", async () => {
     const data = await load("?order=1012");
-    expect(data.check).toMatchObject({ found: true, orderNumber: "#1012", boxReason: "weight_only" });
+    // #1012: крило Model X без габаритів + тримач білий з габаритами → підбір неточний.
+    expect(data.check).toMatchObject({ found: true, orderNumber: "#1012", boxReason: "partial_dimensions" });
     if (data.check?.found) expect(data.check.materials.map((x) => x.code).sort()).toEqual(["bolts_m5", "card_thanks", "instruction_fender", "sticker_logo"]);
     expect((await load("?order=%23424242")).check).toEqual({ found: false, query: "#424242" });
     setContext(makeActor({ id: "y", displayName: "Y", role: "staff", overrides: { revoke: ["orders.view"] } }));
@@ -145,7 +155,7 @@ describe("kits rendering", () => {
     expect(html).toContain('name="productIds"');
     expect(html).toContain(uk("packaging.kits.delete"));
     expect(html).toContain(uk("packaging.check.title"));
-    expect(html).toContain(uk("packaging.boxReason.weight_only"));
+    expect(html).toContain(uk("packaging.boxReason.partial_dimensions"));
   });
 
   it("staff: read-only list", async () => {

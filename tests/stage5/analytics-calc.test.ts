@@ -23,7 +23,7 @@ import {
   weightedVelocity,
   type ForecastSettings,
 } from "~/modules/warehouse-analytics/calc";
-import { buildCsv, CSV_BOM, csvCell, csvDecimal, csvFileName } from "~/modules/warehouse-analytics/csv";
+import { buildCsv, CSV_BOM, csvAmount, csvCell, CsvDecimal, csvDecimal, csvFileName } from "~/modules/warehouse-analytics/csv";
 import { EXPORT_HEADERS, exportResponseOutcome, MAX_EXPORT_MOVEMENTS } from "~/modules/warehouse-analytics/export-contract";
 import { analyticsSearch, filtersOf, parseAnalyticsQuery, parseExportParams } from "~/modules/warehouse-analytics/params";
 import { inventoryValueOf } from "~/modules/warehouse-analytics/queries.server";
@@ -289,7 +289,9 @@ describe("CSV", () => {
   it("quotes separators, quotes, newlines and edge spaces; numbers stay numbers", () => {
     expect(csvCell("plain", ";")).toBe("plain");
     expect(csvCell("a;b", ";")).toBe('"a;b"');
-    expect(csvCell("a;b", ",")).toBe("a;b");
+    // Текст з будь-яким із двох роздільників — у лапках (Excel ділить за системним роздільником, security-1).
+    expect(csvCell("a;b", ",")).toBe('"a;b"');
+    expect(csvCell("a,b", ";")).toBe('"a,b"');
     expect(csvCell("a,b", ",")).toBe('"a,b"');
     expect(csvCell('Тримач "Pro"', ";")).toBe('"Тримач ""Pro"""');
     expect(csvCell("line1\nline2", ";")).toBe('"line1\nline2"');
@@ -300,6 +302,15 @@ describe("CSV", () => {
     expect(csvCell(null, ";")).toBe("");
     expect(csvCell(undefined, ";")).toBe("");
     expect(csvCell(true, ";")).toBe("true");
+    // Числа: десятковий знак профілю («;» → кома для Excel uk/EU, «,» → крапка), без лапок.
+    expect(csvCell(12.5, ";")).toBe("12,5");
+    expect(csvCell(12.5, ",")).toBe("12.5");
+    expect(csvCell(csvDecimal(12.5, 1), ";")).toBe("12,5");
+    expect(csvCell(csvDecimal(12.5, 1), ",")).toBe("12.5");
+    expect(csvCell(csvAmount("-120.00"), ";")).toBe("-120,00");
+    expect(csvCell(csvAmount("120.00"), ",")).toBe("120.00");
+    // Не число в CsvDecimal — як текст, з усіма захистами.
+    expect(csvCell(new CsvDecimal("=1+2"), ";")).toBe("'=1+2");
   });
 
   it("neutralises spreadsheet formulas in text (CSV injection)", () => {
@@ -307,6 +318,36 @@ describe("CSV", () => {
       expect(csvCell(bad, ";").replace(/^"/, "").startsWith("'"), bad).toBe(true);
     }
     expect(csvCell("OT-PH-BLK", ";")).toBe("OT-PH-BLK"); // дефіс усередині — не формула
+    expect(csvCell('  "=1+2"', ";").replace(/^"/, "").startsWith("'"), "formula after spaces/quotes").toBe(true);
+  });
+
+  it("neutralises formulas after the OTHER separator and line breaks (Excel splits on its own list separator)", () => {
+    const pieces = (cell: string) => cell.split(/[,;\t\r\n]/).map((p) => p.replace(/^[\s"]+/, ""));
+    const values = [
+      "Bag,=1+2",
+      "Bag;=1+2",
+      "Black,=HYPERLINK(CHAR(104)),x",
+      "Bag; =WEBSERVICE(CHAR(104))",
+      'Bag;"=1+2"',
+      "x\n=1+2",
+      "x\r\n@SUM(A1)",
+      "a\t+1",
+      "a,-2+3;b",
+    ];
+    for (const v of values) {
+      for (const sep of [";", ","]) {
+        const cell = csvCell(v, sep);
+        for (const piece of pieces(cell)) expect(/^[=+\-@]/.test(piece), `${JSON.stringify(v)} sep ${sep}: ${JSON.stringify(cell)}`).toBe(false);
+      }
+    }
+    expect(csvCell("Bag,=1+2", ";")).toBe(`"Bag,'=1+2"`);
+    expect(csvCell("Bag;=1+2", ",")).toBe(`"Bag;'=1+2"`);
+    // Рядок файлу: жоден шматок після поділу комою, крапкою з комою чи переносом рядка не починається з формули.
+    const csv = buildCsv([{ header: "a", value: (r: { v: string }) => r.v }, { header: "b", value: () => 5 }], [{ v: "Black,=HYPERLINK(CHAR(104)),x" }], {
+      bom: false,
+    });
+    expect(csv).toBe(`a;b\r\n"Black,'=HYPERLINK(CHAR(104)),x";5\r\n`);
+    for (const piece of pieces(csv)) expect(/^[=+\-@]/.test(piece), piece).toBe(false);
   });
 
   it("builds a UTF-8 BOM file with CRLF lines and the chosen separator", () => {
@@ -321,9 +362,13 @@ describe("CSV", () => {
     ];
     const csv = buildCsv(cols, rows);
     expect(csv.startsWith(CSV_BOM)).toBe(true);
+    // Текстовий рядок суми лишається текстом; суми з даних передаються як csvAmount (export.server.ts).
     expect(csv.slice(1)).toBe('sku;qty;unit_cost\r\nA-1;3;12.50\r\n"B;2";-1;\r\n');
-    expect(buildCsv(cols, rows, { separator: "comma", bom: false })).toBe("sku,qty,unit_cost\r\nA-1,3,12.50\r\nB;2,-1,\r\n");
-    expect(csvDecimal(1 / 3, 3)).toBe("0.333");
+    expect(buildCsv(cols, rows, { separator: "comma", bom: false })).toBe('sku,qty,unit_cost\r\nA-1,3,12.50\r\n"B;2",-1,\r\n');
+    const money = [{ header: "unit_cost", value: (r: (typeof rows)[number]) => csvAmount(r.price) }, { header: "cover", value: () => csvDecimal(12.5, 1) }];
+    expect(buildCsv(money, rows, { bom: false })).toBe("unit_cost;cover\r\n12,50;12,5\r\n;12,5\r\n");
+    expect(buildCsv(money, rows, { separator: "comma", bom: false })).toBe("unit_cost,cover\r\n12.50,12.5\r\n,12.5\r\n");
+    expect(csvDecimal(1 / 3, 3)?.value).toBe("0.333");
     expect(csvDecimal(null, 2)).toBeNull();
     expect(csvFileName("sales", "2026-11-01", "2026-11-30")).toBe("sales_2026-11-01_2026-11-30.csv");
     expect(csvFileName("Склад ../x")).toBe("x.csv");
