@@ -186,9 +186,10 @@ export { RETURN_PENDING_WINDOW_MS } from "./returns.server";
  *   невідомий) і резерви відкритих замовлень із неперенесеними змінами позицій Shopify (orders.shopify_lines_pending_at).
  * Часткове виконання ЛИШЕ позицій без доставки (orders.shopify_shippable_fulfilled = false: цифрова подарункова картка,
  * цифрові товари) фізичних позицій не торкається — вони й далі «committed» у Shopify, тож рахуються як невиконані.
- * Shopify: «committed — Committed when a placed order isn't fulfilled»; «After the order is fulfilled, Shopify decrements
- * the committed inventory quantity» (docs/research/stage5/shopify-inventory-quantities.md); PARTIALLY_FULFILLED — «Some of
- * the items in the order have been fulfilled» (OrderDisplayFulfillmentStatus, 2026-10).
+ * Shopify (docs/apps/build/inventory-management-apps.md): «Inventory is committed when a placed order hasn't been
+ * fulfilled.»; «After the order is fulfilled, Shopify decrements the committed inventory quantity.»; PARTIALLY_FULFILLED —
+ * «Some of the items in the order have been fulfilled» (OrderDisplayFulfillmentStatus, 2026-10).
+ * Причини uncertain повертаються й окремо (partiallyFulfilled, linesPending — FulfillmentTiming) для пояснення власнику.
  * Статус Shopify RESTOCKED у 2026-10 замінено на UNFULFILLED (лишається лише для старих даних) — повернення
  * визначаються за current_quantity, а не за статусом (returns.server.ts).
  */
@@ -198,7 +199,7 @@ export async function orderTiming(db: DbOrTx, warehouseId: string, stockItemIds:
   const ids = [...stockItemIds];
   const get = (id: string) => {
     let t = out.get(id);
-    if (!t) out.set(id, (t = { inFlight: 0, fulfilledOutside: 0, uncertain: false }));
+    if (!t) out.set(id, (t = { inFlight: 0, fulfilledOutside: 0, uncertain: false, partiallyFulfilled: false, linesPending: false }));
     return t;
   };
   const shipped = inArray(orders.status, [...SHIPPED_STATUSES]);
@@ -219,17 +220,26 @@ export async function orderTiming(db: DbOrTx, warehouseId: string, stockItemIds:
         then least(${stockReservations.consumedQty}, ${lineQty}) else 0 end), 0)`.mapWith(Number),
       fulfilledOutside: sql<number>`coalesce(sum(case when not ${shipped} and ${orders.status} <> 'cancelled' and ${fs} = 'fulfilled'
         then ${stockReservations.reservedQty} else 0 end), 0)`.mapWith(Number),
-      uncertain: sql<boolean>`coalesce(bool_or(
-        ((${partialPhysical} or ${fs} = 'restocked')
-          and (${stockReservations.reservedQty} > 0 or (${shipped} and ${stockReservations.consumedQty} > 0)))
-        or (${linesPending} and ${stockReservations.reservedQty} > 0)), false)`,
+      partiallyFulfilled: sql<boolean>`coalesce(bool_or((${partialPhysical} or ${fs} = 'restocked')
+        and (${stockReservations.reservedQty} > 0 or (${shipped} and ${stockReservations.consumedQty} > 0))), false)`,
+      linesPending: sql<boolean>`coalesce(bool_or(${linesPending} and ${stockReservations.reservedQty} > 0), false)`,
     })
     .from(stockReservations)
     .innerJoin(orders, eq(orders.id, stockReservations.orderId))
     .leftJoin(orderLineItems, eq(orderLineItems.id, stockReservations.orderLineItemId))
     .where(and(eq(stockReservations.warehouseId, warehouseId), inArray(stockReservations.stockItemId, ids)))
     .groupBy(stockReservations.stockItemId);
-  for (const r of rows) Object.assign(get(r.stockItemId), { inFlight: r.inFlight, fulfilledOutside: r.fulfilledOutside, uncertain: Boolean(r.uncertain) });
+  for (const r of rows) {
+    const partiallyFulfilled = Boolean(r.partiallyFulfilled);
+    const pending = Boolean(r.linesPending);
+    Object.assign(get(r.stockItemId), {
+      inFlight: r.inFlight,
+      fulfilledOutside: r.fulfilledOutside,
+      uncertain: partiallyFulfilled || pending,
+      partiallyFulfilled,
+      linesPending: pending,
+    });
+  }
 
   // Історичні позиції: уперше побачені вже переданими (до знімка) — рядка резерву немає, але Shopify, поки не виконав
   // замовлення, тримає їх у committed (і on_hand), тоді як у залишку застосунку їх немає.
@@ -238,7 +248,7 @@ export async function orderTiming(db: DbOrTx, warehouseId: string, stockItemIds:
       stockItemId: stockItems.id,
       inFlight: sql<number>`coalesce(sum(case when ${notFulfilled}
         then greatest(coalesce(${orderLineItems.currentQuantity}, ${orderLineItems.quantity}), 0) else 0 end), 0)`.mapWith(Number),
-      uncertain: sql<boolean>`coalesce(bool_or(${partialPhysical}), false)`,
+      partiallyFulfilled: sql<boolean>`coalesce(bool_or(${partialPhysical}), false)`,
     })
     .from(orderLineItems)
     .innerJoin(orders, eq(orders.id, orderLineItems.orderId))
@@ -255,7 +265,7 @@ export async function orderTiming(db: DbOrTx, warehouseId: string, stockItemIds:
   for (const r of historical) {
     const t = get(r.stockItemId);
     t.inFlight += r.inFlight;
-    t.uncertain ||= Boolean(r.uncertain);
+    if (r.partiallyFulfilled) t.uncertain = t.partiallyFulfilled = true;
   }
   return out;
 }
@@ -277,7 +287,8 @@ function withReturns(t: FulfillmentTiming, r: ReturnsTiming): FulfillmentTiming 
  *   міг поповнити «доступно» сам), а склад ще не оприбуткував стільки ПРИДАТНИХ повернень покупця (від останнього
  *   узгодження) — автоприйняття такої різниці подвоїло б одиниці або додало б брак як придатний товар;
  * - returnsAwaiting: склад оприбуткував повернення, яке Shopify ще має поповнити сам;
- * - uncertain: частково виконані замовлення або returnsPending > 0.
+ * - uncertain: частково виконані замовлення (partiallyFulfilled), неперенесені зміни позицій Shopify (linesPending) або
+ *   returnsPending > 0.
  */
 export async function fulfillmentTiming(
   db: DbOrTx,

@@ -158,11 +158,17 @@ export function pickLocation(nodes: readonly GqlLocation[], hasMore: boolean): L
  * відправлення одиниці, яких склад ще не оприбуткував як повернення покупця (від останнього узгодження).
  * returnsAwaiting — навпаки: склад оприбуткував повернення покупця (Shopify поповнює сам), а відшкодування з
  * поверненням на склад у Shopify ще немає — Shopify має додати ці одиниці сам (returns.server.ts).
+ * partiallyFulfilled / linesPending — окремі причини uncertain (для пояснення власнику, яку саме перевірку зробити):
+ * частково виконані (або старі «restocked») замовлення / резерви відкритих замовлень із неперенесеними змінами позицій
+ * Shopify. uncertain = partiallyFulfilled || linesPending || returnsPending > 0 (orderTiming/fulfillmentTiming);
+ * не передано — невідомо (старі спостереження).
  */
 export interface FulfillmentTiming {
   inFlight: number;
   fulfilledOutside: number;
   uncertain: boolean;
+  partiallyFulfilled?: boolean;
+  linesPending?: boolean;
   returnsPending?: number;
   returnsAwaiting?: number;
 }
@@ -200,6 +206,13 @@ export interface LevelComparison {
   inFlight: number;
   fulfilledOutside: number;
   uncertain: boolean;
+  /**
+   * Причини uncertain (див. FulfillmentTiming): частково виконані замовлення / резерви відкритих замовлень із
+   * неперенесеними змінами позицій Shopify. compareLevels задає завжди; у спостереженнях, збережених до появи полів
+   * (inventory_conflicts.details), їх немає — причина невідома.
+   */
+  partiallyFulfilled?: boolean;
+  linesPending?: boolean;
   /** Повернені/відшкодовані після відправлення одиниці, яких склад ще не оприбуткував (див. FulfillmentTiming). */
   returnsPending: number;
   /** Оприбутковані складом повернення, які Shopify ще має поповнити сам (див. FulfillmentTiming). */
@@ -246,6 +259,8 @@ export function compareLevels(shopify: ShopifyLevelQuantities, app: AppLevel, ti
     inFlight: timing.inFlight,
     fulfilledOutside: timing.fulfilledOutside,
     uncertain: timing.uncertain,
+    partiallyFulfilled: timing.partiallyFulfilled ?? false,
+    linesPending: timing.linesPending ?? false,
     returnsPending: timing.returnsPending ?? 0,
     returnsAwaiting: timing.returnsAwaiting ?? 0,
   };

@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import type { DatabaseHandle } from "~/db/client.server";
@@ -26,6 +28,8 @@ import { fakeInventoryAdmin, type FakeInventoryAdmin } from "./inventory-sync-fi
  *     резервує за старими позиціями, committed Shopify — уже за новими → невизначеність (без автоприйняття).
  * (b) Часткове виконання лише позицій без доставки (orders.shopify_shippable_fulfilled = false): фізичні позиції ще
  *     committed у Shopify — як невиконані (передані перевізнику — inFlight), а не «невизначено» з хибною розбіжністю.
+ * Причини невизначеності повертаються окремо (partiallyFulfilled, linesPending; рев'ю R5B-1) — щоб пояснення власнику
+ * називало саме ту причину, яка є.
  * Справжній PostgreSQL — TEST_DATABASE_URL.
  */
 const SHOP = "ot-precision.myshopify.com";
@@ -141,20 +145,23 @@ describe("(a) reservations of orders with pending Shopify line changes", () => {
 
     // Shopify змінив позиції замовлення (застосунок їх не застосував — напр., була активна накладна): резерв застосунку
     // (2) застарів, committed Shopify уже за новими позиціями. Разом із неоплаченим замовленням (+1 committed, якого
-    // застосунок не бачить) committed знову 2, а on_hand Shopify на 1 більший: без позначки ця різниця виглядала б
-    // «чистою» зміною в Shopify й прийнялася б автоматично.
+    // застосунок не бачить) committed знову 2, а on_hand Shopify на 1 більший. Сама різниця on_hand тут справжня, але
+    // поки резерв застарілий, розподіл committed між замовленнями невідомий — обережно: не приймаємо автоматично,
+    // рішення власника (без позначки різницю було б прийнято як «чисту» зміну в Shopify).
     await h.db.update(orders).set({ shopifyLinesPendingAt: new Date() }).where(eq(orders.id, o.id));
     fake.setLevel(items[1]!.gid, { available: 11, onHand: 13, committed: 2 });
-    expect(await timing(1)).toMatchObject({ uncertain: true, inFlight: 0, fulfilledOutside: 0 });
+    expect(await timing(1)).toMatchObject({ uncertain: true, linesPending: true, partiallyFulfilled: false, inFlight: 0, fulfilledOutside: 0 });
     expect(await withApply(() => reconcileItem(1))).toEqual(["opened"]);
     expect(await onHand(1)).toBe(12);
     expect(await externalMovements(1)).toHaveLength(0);
     const obs = parseObservation((await openConflict(1))!.details)!;
     expect(obs).toMatchObject({ diff: 1, expectedDiff: 0, reservationExcess: 0, uncertain: true, autoApplyBlockers: ["uncertain"] });
+    // Причина збережена в спостереженні окремо: пояснення має назвати неперенесені зміни позицій, а не часткове виконання.
+    expect(obs).toMatchObject({ linesPending: true, partiallyFulfilled: false });
 
     // Позиції оновлено (позначку знято) — невизначеності більше немає.
     await h.db.update(orders).set({ shopifyLinesPendingAt: null }).where(eq(orders.id, o.id));
-    expect(await timing(1)).toMatchObject({ uncertain: false });
+    expect(await timing(1)).toMatchObject({ uncertain: false, linesPending: false, partiallyFulfilled: false });
   });
 
   it("a pending flag on an order without reserved units of the item does not make it uncertain", async () => {
@@ -165,8 +172,18 @@ describe("(a) reservations of orders with pending Shopify line changes", () => {
     await h.db.update(stockReservations).set({ reservedQty: 0 }).where(eq(stockReservations.orderId, o.id));
     expect(await timing(2)).toMatchObject({ uncertain: false });
     await h.db.update(stockReservations).set({ reservedQty: 1 }).where(eq(stockReservations.orderId, o.id));
-    expect(await timing(2)).toMatchObject({ uncertain: true });
+    expect(await timing(2)).toMatchObject({ uncertain: true, linesPending: true, partiallyFulfilled: false });
+
+    // Обидві причини на одній позиції — обидві видно; зняли одну — лишається інша.
+    await h.db.update(orders).set({ fulfillmentStatus: "partially_fulfilled", shopifyShippableFulfilled: true }).where(eq(orders.id, o.id));
+    expect(await timing(2)).toMatchObject({ uncertain: true, linesPending: true, partiallyFulfilled: true });
     await h.db.update(orders).set({ shopifyLinesPendingAt: null }).where(eq(orders.id, o.id));
+    expect(await timing(2)).toMatchObject({ uncertain: true, linesPending: false, partiallyFulfilled: true });
+    await h.db
+      .update(orders)
+      .set({ fulfillmentStatus: o.fulfillmentStatus, shopifyShippableFulfilled: o.shopifyShippableFulfilled })
+      .where(eq(orders.id, o.id));
+    expect(await timing(2)).toMatchObject({ uncertain: false, linesPending: false, partiallyFulfilled: false });
   });
 });
 
@@ -186,7 +203,7 @@ describe("(b) partially fulfilled orders where Shopify fulfilled only items with
     // Невідомо (null) або виконано фізичні позиції (true) — як раніше: розподіл невідомий.
     for (const shippable of [null, true]) {
       await h.db.update(orders).set({ shopifyShippableFulfilled: shippable }).where(eq(orders.id, o.id));
-      expect(await timing(3), String(shippable)).toMatchObject({ inFlight: 0, uncertain: true });
+      expect(await timing(3), String(shippable)).toMatchObject({ inFlight: 0, uncertain: true, partiallyFulfilled: true, linesPending: false });
     }
     await h.db.update(orders).set({ fulfillmentStatus: "fulfilled", shopifyShippableFulfilled: true }).where(eq(orders.id, o.id));
   });
@@ -221,6 +238,16 @@ describe("(b) partially fulfilled orders where Shopify fulfilled only items with
     expect(await openConflict(41)).toBeNull();
 
     await h.db.update(orders).set({ shopifyShippableFulfilled: null }).where(eq(orders.id, o.id));
-    expect(await timing(41)).toMatchObject({ inFlight: 0, uncertain: true });
+    expect(await timing(41)).toMatchObject({ inFlight: 0, uncertain: true, partiallyFulfilled: true, linesPending: false });
+  });
+});
+
+describe("Shopify sentences quoted in orderTiming are verbatim (R5B-3)", () => {
+  it("quotes shopify.dev inventory-management-apps.md exactly, not a paraphrase", () => {
+    // Коментар — опора правила; перевірено curl: https://shopify.dev/docs/apps/build/inventory-management-apps.md.
+    const src = fs.readFileSync(path.resolve("app/modules/inventory-sync/reconcile.server.ts"), "utf8").replace(/\s*\n\s*\*\s*/g, " ");
+    expect(src).toContain("«Inventory is committed when a placed order hasn't been fulfilled.»");
+    expect(src).toContain("«After the order is fulfilled, Shopify decrements the committed inventory quantity.»");
+    expect(src).not.toContain("Committed when a placed order isn't fulfilled");
   });
 });
