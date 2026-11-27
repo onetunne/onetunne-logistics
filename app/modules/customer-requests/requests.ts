@@ -56,7 +56,8 @@ interface RequestRule {
  * - COUNTRY_UNSUPPORTED / COUNTRY_SHIPPING_DISABLED — рішення магазину, не клієнта;
  * - ADDRESS_LINE1_EMPTY_LINE2_FILLED, ADDRESS_FIELD_TOO_LONG, ADDRESS_DUPLICATED_FIELDS, CITY_CONTAINS_POSTAL_CODE —
  *   дані вже є, менеджер перекладає/скорочує їх сам;
- * - будь-які нові/невідомі коди (безпечно за замовчуванням: спершу вирішити, чи стосуються вони клієнта).
+ * - будь-які нові/невідомі коди (безпечно за замовчуванням: спершу вирішити, чи стосуються вони клієнта);
+ * - проблеми з пропозицією виправлення (крім неоднозначного телефону): дані вже є, менеджер лише підтверджує.
  * Ключі — рядки (а не IssueCode), щоб перелік не ламався, коли набір кодів змінюється; відповідність ISSUE_CODES
  * перевіряє тест.
  */
@@ -74,7 +75,7 @@ const RULES: Readonly<Record<string, RequestRule>> = {
   POSTAL_CODE_REGION_MISMATCH: {
     key: "postalCodeConfirm",
     defaultField: "shipping.postalCode",
-    requiredData: ["postal_code", "city"],
+    requiredData: ["postal_code", "province"],
   },
   PHONE_MISSING: { key: "phone", defaultField: "shipping.phone", requiredData: ["phone_with_country_code"] },
   PHONE_INVALID: { key: "phoneConfirm", defaultField: "shipping.phone", requiredData: ["phone_with_country_code"] },
@@ -102,6 +103,18 @@ export interface IssueLike {
   field?: string | null;
   /** Якщо передано — враховуються лише відкриті. */
   status?: string;
+  /** Пропозиція виправлення (дані вже є в замовленні — менеджер лише підтверджує). */
+  suggestion?: { candidates?: readonly string[] | null } | null;
+}
+
+/**
+ * Неоднозначний номер (кілька прочитань) — лише клієнт знає, яке правильне: питаємо навіть за наявності кандидатів.
+ * Для решти кодів пропозиція означає, що дані вже є в замовленні (індекс із поля «Місто», «Texas» → TX).
+ */
+const ASK_EVEN_WITH_SUGGESTION: ReadonlySet<string> = new Set(["PHONE_AMBIGUOUS"]);
+
+function hasSuggestion(issue: IssueLike): boolean {
+  return (issue.suggestion?.candidates?.length ?? 0) > 0;
 }
 
 /** Поле проблеми приймається лише якщо це поле контакту/адреси (не товар, не замовлення в цілому). */
@@ -115,6 +128,8 @@ function contactField(field: string | null | undefined): string | null {
 export function customerRequestFor(issue: IssueLike): CustomerRequest | null {
   if (issue.status !== undefined && issue.status !== "open") return null;
   if (!Object.prototype.hasOwnProperty.call(RULES, issue.code)) return null;
+  // Дані вже є в замовленні (є пропозиція) — клієнта не питаємо, менеджер підтверджує пропозицію.
+  if (hasSuggestion(issue) && !ASK_EVEN_WITH_SUGGESTION.has(issue.code)) return null;
   const rule = RULES[issue.code];
   if (!rule) return null;
   return {

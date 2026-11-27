@@ -5,15 +5,16 @@
  */
 import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { auditLog, orders, sandboxCarrierShipments, shipmentEvents, shipments } from "~/db/schema";
+import { auditLog, issues, orderChanges, orders, sandboxCarrierShipments, shipmentEvents, shipments } from "~/db/schema";
 import { ForbiddenError, makeActor } from "~/domain/permissions";
 import { createCarrierRegistry } from "~/integrations/carriers";
 import { CarrierError, type CarrierAdapter, type CarrierCapabilities, type CreatedShipment, type LookupResult } from "~/integrations/carriers/types";
 import { loadOrderRow } from "~/modules/orders/repository.server";
-import { validateOrderById } from "~/modules/orders/workflow.server";
+import { dismissIssue, validateOrderById } from "~/modules/orders/workflow.server";
+import { problemCategory, problemSource } from "~/modules/problems/categories";
 import { getSetting, updateSetting } from "~/modules/settings/settings.server";
 import { isReissuable, reissueWaybill } from "~/modules/shipments/reissue.server";
-import { createWaybill, linkWaybillManually } from "~/modules/shipments/waybill.server";
+import { cancelWaybill, createWaybill, linkWaybillManually } from "~/modules/shipments/waybill.server";
 import type { ServiceContext } from "~/server/types";
 import { createTestEnv, OWNER, STAFF, type TestEnv } from "../helpers";
 
@@ -35,6 +36,8 @@ class StubCarrier implements CarrierAdapter {
   };
   cancelResult = true;
   cancelThrows: Error | null = null;
+  /** Виконується під час запиту скасування (імітація паралельної передачі посилки). */
+  onCancel: (() => Promise<void>) | null = null;
   cancelCalls: string[] = [];
   createCalls = 0;
   private n = 0;
@@ -48,6 +51,7 @@ class StubCarrier implements CarrierAdapter {
   }
   async cancelShipment(number: string) {
     this.cancelCalls.push(number);
+    if (this.onCancel) await this.onCancel();
     if (this.cancelThrows) throw this.cancelThrows;
     return { cancelled: this.cancelResult };
   }
@@ -78,6 +82,23 @@ async function withWaybill(number: string, c: ServiceContext = ctx) {
 
 async function orderShipments(orderId: string) {
   return ctx.db.select().from(shipments).where(eq(shipments.orderId, orderId));
+}
+
+/** Демо-замовлення з проблемами, виправлені напряму (чисті замовлення демо вже використано вище). */
+const FIXED_DATA: Record<string, Partial<typeof orders.$inferInsert>> = {
+  "#1013": { shipCity: "Stockholm", shipPhone: "+46 70 123 45 67" },
+  "#1010": { shipCountryCode: "DE", shipCity: "Berlin", shipPostalCode: "10115", shipPhone: "+49 1512 3456780" },
+};
+
+async function patchOrder(number: string, patch: Partial<typeof orders.$inferInsert> = {}) {
+  await ctx.db.update(orders).set(patch).where(eq(orders.id, await env.orderId(number)));
+}
+
+async function openIssues(orderId: string, code: string) {
+  return ctx.db
+    .select()
+    .from(issues)
+    .where(and(eq(issues.orderId, orderId), eq(issues.code, code), eq(issues.status, "open")));
 }
 
 async function eventsOf(shipmentId: string) {
@@ -168,32 +189,122 @@ describe("reissueWaybill: blocked steps", () => {
     expect((await eventsOf(old.id)).map((e) => e.type)).toContain("cancel_refused");
   });
 
-  it("no answer from the carrier to the cancellation → «cancel failed», the waybill stays active", async () => {
+  it("no answer from the carrier to the cancellation → «cancel failed», the waybill stays active, a problem asks to check", async () => {
     const id = await env.orderId("#1003");
     const [active] = await ctx.db.select().from(shipments).where(and(eq(shipments.orderId, id), eq(shipments.status, "created")));
+    // Явна відмова (попередній тест) проблеми «невідомо, чи скасовано» не відкриває.
+    expect(await openIssues(id, "CARRIER_CANCEL_UNKNOWN")).toHaveLength(0);
     stub.cancelThrows = new CarrierError("unknown_outcome", stub.code, "timeout");
     try {
       await expect(reissueWaybill(stubCtx, active!.id)).rejects.toMatchObject({ code: "waybill.cancelFailed" });
+      await expect(cancelWaybill(stubCtx, active!.id)).rejects.toMatchObject({ code: "waybill.cancelFailed" });
     } finally {
       stub.cancelThrows = null;
     }
     expect((await orderShipments(id)).map((s) => s.status)).toEqual(["created"]);
+    const unknown = await openIssues(id, "CARRIER_CANCEL_UNKNOWN");
+    expect(unknown).toHaveLength(1); // без дублікатів
+    expect(unknown[0]).toMatchObject({ severity: "error", shipmentId: active!.id, params: { carrier: "Stub carrier", waybill: active!.waybillNumber } });
+    expect(problemSource("CARRIER_CANCEL_UNKNOWN")).toBe("carrier");
+    expect(problemCategory("CARRIER_CANCEL_UNKNOWN")).toBe("carrier");
   });
 
-  it("new creation blocked after the cancellation → the result says the old one IS cancelled and why", async () => {
+  it("dry-run validation blocks the re-issue BEFORE the cancellation → nothing is cancelled", async () => {
     const { id, shipment: old } = await withWaybill("#1007");
-    // Дані змінилися після створення накладної (напр. місто втрачено) — нова перевірка заблокує створення.
+    // Дані змінилися після створення накладної (напр. місто втрачено) — нова накладна була б заблокована.
     await ctx.db.update(orders).set({ shipCity: null }).where(eq(orders.id, id));
+    const before = await loadOrderRow(ctx.db, id);
     const r = await reissueWaybill(ctx, old.id);
-    expect(r.kind).toBe("cancelled_only");
-    if (r.kind !== "cancelled_only") return;
-    expect(r.cancelled).toMatchObject({ id: old.id, status: "cancelled" });
-    expect(r.next).toMatchObject({ kind: "blocked", reason: "validation" });
+    expect(r).toMatchObject({ kind: "not_started", reason: "validation" });
+    if (r.kind !== "not_started") return;
+    expect(String(r.params?.issues).split(",")).toContain("CITY_MISSING");
     const rows = await orderShipments(id);
     expect(rows).toHaveLength(1);
-    expect(rows[0]?.status).toBe("cancelled");
-    expect((await loadOrderRow(ctx.db, id)).status).toBe("needs_correction");
-    expect((await eventsOf(old.id)).find((e) => e.type === "reissue_blocked")?.data).toMatchObject({ outcome: "blocked", reason: "validation" });
+    expect(rows[0]).toMatchObject({ id: old.id, status: "created" });
+    const after = await loadOrderRow(ctx.db, id);
+    expect(after).toMatchObject({ status: "waybill_created", version: before.version });
+    const [remote] = await ctx.db.select().from(sandboxCarrierShipments).where(eq(sandboxCarrierShipments.reference, old.carrierReference));
+    expect(remote?.cancelled).toBe(false);
+    expect((await eventsOf(old.id)).map((e) => e.type)).not.toContain("cancelled");
+  });
+
+  it("dry-run finds only auto-fixes → re-issue proceeds, fixes are applied with history and the new waybill is created", async () => {
+    await patchOrder("#1004", { shipPostalCode: "69001" });
+    const { id, shipment: old } = await withWaybill("#1004");
+    const city = (await loadOrderRow(ctx.db, id)).shipCity!;
+    await ctx.db.update(orders).set({ shipCity: `  ${city}  ` }).where(eq(orders.id, id));
+    const r = await reissueWaybill(ctx, old.id);
+    expect(r.kind).toBe("reissued");
+    const order = await loadOrderRow(ctx.db, id);
+    expect(order).toMatchObject({ status: "waybill_created", shipCity: city });
+    const changes = await ctx.db.select().from(orderChanges).where(eq(orderChanges.orderId, id));
+    expect(changes.some((c) => c.field === "shipping.city" && c.newValue === city)).toBe(true);
+    const rows = await orderShipments(id);
+    expect(rows.filter((s) => s.status === "created")).toHaveLength(1);
+    expect(rows.find((s) => s.id === old.id)?.status).toBe("cancelled");
+  });
+
+  it("creating the new waybill throws after the cancellation → «old one IS cancelled», never a generic error", async () => {
+    await patchOrder("#1005", { shipProvince: "TX" });
+    const { id, shipment: old } = await withWaybill("#1005", stubCtx);
+    let calls = 0;
+    const throwing: ServiceContext = {
+      ...stubCtx,
+      carriers: {
+        ...stubCtx.carriers,
+        getDefault: () => {
+          calls++;
+          if (calls > 1) throw new Error("db down");
+          return stubCtx.carriers.getDefault();
+        },
+      },
+    };
+    const r = await reissueWaybill(throwing, old.id);
+    expect(r).toMatchObject({ kind: "cancelled_only", cancelled: { id: old.id, status: "cancelled" }, next: { kind: "error", code: "error.generic" } });
+    expect((await orderShipments(id)).map((s) => s.status)).toEqual(["cancelled"]);
+    expect((await loadOrderRow(ctx.db, id)).status).toBe("awaiting_review");
+    expect((await eventsOf(old.id)).find((e) => e.type === "reissue_blocked")?.data).toMatchObject({ outcome: "error", code: "error.generic" });
+  });
+
+  it("handover recorded while the carrier cancels → error issue CARRIER_CANCEL_CONFLICT and a distinct error (cancel and re-issue)", async () => {
+    for (const [number, run] of [
+      ["#1013", (sid: string) => cancelWaybill(stubCtx, sid)],
+      ["#1010", (sid: string) => reissueWaybill(stubCtx, sid)],
+    ] as const) {
+      await patchOrder(number, FIXED_DATA[number]);
+      const { id, shipment } = await withWaybill(number, stubCtx);
+      stub.onCancel = async () => {
+        await ctx.db.update(shipments).set({ handedOverAt: new Date() }).where(eq(shipments.id, shipment.id));
+      };
+      stub.createCalls = 0;
+      try {
+        await expect(run(shipment.id), number).rejects.toMatchObject({
+          code: "waybill.cancelledButHandedOver",
+          params: { number: shipment.waybillNumber },
+        });
+      } finally {
+        stub.onCancel = null;
+      }
+      expect(stub.createCalls).toBe(0);
+      const [row] = await ctx.db.select().from(shipments).where(eq(shipments.id, shipment.id));
+      expect(row?.status).toBe("created");
+      // Подію й проблему збережено (транзакцію не відкочено).
+      expect((await eventsOf(shipment.id)).find((e) => e.type === "cancel_conflict_handed_over")?.data).toMatchObject({ carrierCancelled: true });
+      const conflict = await openIssues(id, "CARRIER_CANCEL_CONFLICT");
+      expect(conflict).toHaveLength(1);
+      expect(conflict[0]).toMatchObject({ severity: "error", params: { carrier: "Stub carrier", waybill: shipment.waybillNumber } });
+      // Менеджер закриває після з'ясування з перевізником.
+      await dismissIssue(ctx, conflict[0]!.id);
+      expect(await openIssues(id, "CARRIER_CANCEL_CONFLICT")).toHaveLength(0);
+    }
+  });
+
+  it("a successful cancellation closes the «unknown whether cancelled» problem", async () => {
+    const id = await env.orderId("#1003");
+    const [active] = await ctx.db.select().from(shipments).where(and(eq(shipments.orderId, id), eq(shipments.status, "created")));
+    expect(await openIssues(id, "CARRIER_CANCEL_UNKNOWN")).toHaveLength(1);
+    await cancelWaybill(stubCtx, active!.id);
+    expect(await openIssues(id, "CARRIER_CANCEL_UNKNOWN")).toHaveLength(0);
   });
 
   it("carrier rejects the new waybill (simulation) → old cancelled, rejection explained", async () => {

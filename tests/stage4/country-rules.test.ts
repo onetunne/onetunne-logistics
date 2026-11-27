@@ -7,11 +7,12 @@ import {
   addCountryRule,
   getCountryRule,
   listHistory,
+  markCountryRuleVerified,
   resetCountryRuleToDefault,
   testPostalCode,
   updateCountryRule,
 } from "~/modules/country-rules/country-rules.server";
-import { isChangedFromDefault, needsVerification, pickRuleValue } from "~/modules/country-rules/schema";
+import { isChangedFromDefault, needsVerification, pickRuleValue, withoutVerifyMarker } from "~/modules/country-rules/schema";
 import { DEFAULT_COUNTRY_RULES } from "~/modules/validation";
 import { validateOrderById } from "~/modules/orders/workflow.server";
 import { OWNER, STAFF, createTestEnv, type TestEnv } from "../helpers";
@@ -251,5 +252,42 @@ describe("testPostalCode", () => {
     expect(testPostalCode(nl, "(", "1012 AB")).toMatchObject({ patternValid: false, match: null });
     expect(testPostalCode(nl, null, " abc ")).toEqual({ patternValid: true, normalized: "ABC", match: null });
     expect(testPostalCode(nl, "   ", "x")).toMatchObject({ match: null });
+  });
+});
+
+describe("markCountryRuleVerified", () => {
+  it("removes only the marker sentence from the notes", () => {
+    expect(withoutVerifyMarker("Default rule — verify before production.")).toBeNull();
+    expect(withoutVerifyMarker("Default rule — verify before production. Eircode is optional.")).toBe("Eircode is optional.");
+    expect(withoutVerifyMarker("Checked by owner. Default rule — VERIFY before production.")).toBe("Checked by owner.");
+    expect(withoutVerifyMarker("Plain note")).toBe("Plain note");
+    expect(withoutVerifyMarker(null)).toBeNull();
+  });
+
+  it("owner marks a default rule verified: marker removed, other note text kept, history and audit written", async () => {
+    const before = await rule("IE");
+    expect(needsVerification(before.notes)).toBe(true);
+    await expect(markCountryRuleVerified(env.ctx(STAFF), "IE", before.version)).rejects.toBeInstanceOf(ForbiddenError);
+    await expect(markCountryRuleVerified(env.ctx(OWNER), "IE", before.version + 5)).rejects.toBeInstanceOf(ConflictError);
+
+    const r = await markCountryRuleVerified(env.ctx(OWNER), "IE", before.version);
+    expect(r).toMatchObject({ ok: true, unchanged: false, changed: ["notes"], version: before.version + 1, revalidated: 0 });
+    const after = await rule("IE");
+    expect(needsVerification(after.notes)).toBe(false);
+    expect(after.notes).toBe("Eircode is optional; when given it must be a valid Eircode.");
+    expect(pickRuleValue({ ...after, notes: null })).toEqual(pickRuleValue({ ...before, notes: null }));
+    // Перевірене типове правило — не «змінене».
+    expect(isChangedFromDefault(after)).toBe(false);
+
+    const history = await listHistory(env.handle.db, "IE");
+    expect(history[0]).toMatchObject({ version: after.version, source: "verify", changedBy: OWNER.id });
+    const [audit] = await env.handle.db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.action, "country_rule.verified"), eq(auditLog.entityId, "IE")));
+    expect(audit?.details).toMatchObject({ fields: ["notes"], version: after.version });
+
+    // Повтор — змін немає (позначки вже немає).
+    expect(await markCountryRuleVerified(env.ctx(OWNER), "IE", after.version)).toMatchObject({ ok: true, unchanged: true });
   });
 });

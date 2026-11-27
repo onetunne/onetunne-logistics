@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState } from "react";
 import {
   Form,
   useActionData,
@@ -27,6 +27,7 @@ import { createWaybills, type BulkWaybillSummary } from "~/modules/shipments/way
 import { getRequestContext } from "~/server/context.server";
 import { formString, toActionError } from "~/server/http.server";
 import {
+  Disclosure,
   Badge,
   Button,
   Card,
@@ -249,41 +250,6 @@ export async function action({ request }: ActionFunctionArgs): Promise<ActionRes
 
 type Row = Awaited<ReturnType<typeof loader>>["rows"][number];
 
-const MOBILE_QUERY = "(max-width: 767.98px)";
-/** До гідратації на телефоні вміст розкривного блока прихований (щоб фільтри не «блимали»). */
-const DISCLOSURE_CSS =
-  "@media (max-width: 767.98px){details[data-filters-disclosure]:not([data-ready])>:not(summary){display:none}}" +
-  "details[data-filters-disclosure]>summary{cursor:pointer;padding:2px 0}";
-
-/**
- * Розкривний блок фільтрів: на телефоні згорнутий за замовчуванням (прохання власника), на ширших екранах — відкритий.
- * TODO: перенести в UI-кіт (app/ui) разом зі стилем; зараз однакова копія є в app/pages/problems.tsx.
- */
-function FiltersDisclosure({ label, children }: { label: ReactNode; children: ReactNode }) {
-  const [open, setOpen] = useState(true);
-  const [ready, setReady] = useState(false);
-  useEffect(() => {
-    if (window.matchMedia?.(MOBILE_QUERY).matches) setOpen(false);
-    setReady(true);
-  }, []);
-  return (
-    <details
-      data-filters-disclosure=""
-      data-ready={ready ? "" : undefined}
-      open={open}
-      onToggle={(e) => setOpen(e.currentTarget.open)}
-    >
-      <style dangerouslySetInnerHTML={{ __html: DISCLOSURE_CSS }} />
-      <summary>
-        <Text as="span" variant="body-sm" weight="semibold">
-          {label}
-        </Text>
-      </summary>
-      <div style={{ paddingTop: "var(--ot-space-3)" }}>{children}</div>
-    </details>
-  );
-}
-
 function countCheckedOrders(): number {
   return document.querySelectorAll(`input[name="${SELECTION_NAME}"][form="${BULK_FORM_ID}"]:checked`).length;
 }
@@ -451,8 +417,9 @@ export default function OrdersPage() {
         <Tabs items={tabs} selected={selectedTab} ariaLabel={t("orders.tabs.label")} />
 
         <Card>
-          <FiltersDisclosure
-            label={activeFilters > 0 ? t("orders.filters.titleActive", { count: activeFilters }) : t("common.filters")}
+          <Disclosure
+            collapsedOnMobile
+            summary={activeFilters > 0 ? t("orders.filters.titleActive", { count: activeFilters }) : t("common.filters")}
           >
             <Form key={listKey} method="get" role="search">
               <Stack gap={4}>
@@ -502,7 +469,7 @@ export default function OrdersPage() {
                 </Stack>
               </Stack>
             </Form>
-          </FiltersDisclosure>
+          </Disclosure>
         </Card>
 
         {canBulk && rows.length > 0 ? (

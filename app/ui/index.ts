@@ -43,6 +43,7 @@ export {
   type SpinnerProps,
 } from "./Button";
 export { Badge, type BadgeProps, type BadgeTone } from "./Badge";
+export { Disclosure, type DisclosureProps } from "./Disclosure";
 export { Banner, type BannerProps, type BannerTone } from "./Banner";
 export {
   TextField,

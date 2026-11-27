@@ -11,9 +11,11 @@ const messages: MessageModule = {
     "countryRules.info.readOnly": "Перегляд правил. Змінювати правила може лише власник.",
     "countryRules.verify.title": "Типові правила потребують перевірки",
     "countryRules.verify.body":
-      "Правил з позначкою «verify before production» (типові значення, не перевірені бізнесом): {count}. Перевірте формат індексу, обов’язкові поля і платника мита перед роботою з реальними замовленнями.",
+      "Правил зі значком «Потребує перевірки» (типові значення, ще не перевірені бізнесом): {count}. Перед роботою з реальними замовленнями перевірте формат індексу, обов’язкові поля і платника мита, потім натисніть «Позначити як перевірене» в правилі країни.",
     "countryRules.verify.rule":
-      "Це типове правило ще не перевірене (позначка «verify before production» у примітках). Перевірте значення і приберіть позначку з приміток після перевірки.",
+      "Це типове правило ще не перевірене (значок «Потребує перевірки»). Перевірте значення й натисніть «Позначити як перевірене» — значок зникне, а зміну буде записано в історію.",
+    "countryRules.verify.ruleReadOnly": "Це типове правило ще не перевірене власником (значок «Потребує перевірки»).",
+    "countryRules.verify.button": "Позначити як перевірене",
 
     "countryRules.filters.searchPlaceholder": "Код (DE) або назва країни",
     "countryRules.filters.shipping": "Доставка",
@@ -81,6 +83,7 @@ const messages: MessageModule = {
     "countryRules.history.source.add": "країну додано",
     "countryRules.history.source.update": "зміна",
     "countryRules.history.source.reset": "повернення до типового",
+    "countryRules.history.source.verify": "позначено як перевірене",
     "countryRules.history.by.system": "Система",
     "countryRules.history.by.owner": "Власник",
     "countryRules.history.change": "{field}: {from} → {to}",
@@ -94,6 +97,7 @@ const messages: MessageModule = {
     "countryRules.result.unchanged": "Змін немає — правило не змінено.",
     "countryRules.result.reset": "Типове правило відновлено. Повторно перевірено відкритих замовлень країни: {count}.",
     "countryRules.result.added": "Країну додано. Повторно перевірено відкритих замовлень країни: {count}.",
+    "countryRules.result.verified": "Правило позначено як перевірене. Значення перевірки замовлень не змінилися.",
 
     "countryRules.error.invalid": "Некоректне значення",
     "countryRules.error.tooLong": "Занадто довге значення",
@@ -110,9 +114,11 @@ const messages: MessageModule = {
     "countryRules.info.readOnly": "Read-only view. Only the owner can change rules.",
     "countryRules.verify.title": "Default rules need verification",
     "countryRules.verify.body":
-      "Rules marked “verify before production” (default values not yet confirmed by the business): {count}. Check the postal code format, required fields and duty payer before working with real orders.",
+      "Rules with the “Needs verification” badge (default values not yet confirmed by the business): {count}. Before working with real orders, check the postal code format, required fields and duty payer, then click “Mark as verified” in the country rule.",
     "countryRules.verify.rule":
-      "This default rule has not been verified yet (marker “verify before production” in the notes). Check the values and remove the marker from the notes once verified.",
+      "This default rule has not been verified yet (“Needs verification” badge). Check the values and click “Mark as verified” — the badge disappears and the change is recorded in the history.",
+    "countryRules.verify.ruleReadOnly": "This default rule has not been verified by the owner yet (“Needs verification” badge).",
+    "countryRules.verify.button": "Mark as verified",
 
     "countryRules.filters.searchPlaceholder": "Code (DE) or country name",
     "countryRules.filters.shipping": "Shipping",
@@ -180,6 +186,7 @@ const messages: MessageModule = {
     "countryRules.history.source.add": "country added",
     "countryRules.history.source.update": "change",
     "countryRules.history.source.reset": "restored to default",
+    "countryRules.history.source.verify": "marked as verified",
     "countryRules.history.by.system": "System",
     "countryRules.history.by.owner": "Owner",
     "countryRules.history.change": "{field}: {from} → {to}",
@@ -193,6 +200,7 @@ const messages: MessageModule = {
     "countryRules.result.unchanged": "No changes — the rule was not modified.",
     "countryRules.result.reset": "Default rule restored. Open orders for the country re-checked: {count}.",
     "countryRules.result.added": "Country added. Open orders for the country re-checked: {count}.",
+    "countryRules.result.verified": "Rule marked as verified. The order check values did not change.",
 
     "countryRules.error.invalid": "Invalid value",
     "countryRules.error.tooLong": "Value is too long",

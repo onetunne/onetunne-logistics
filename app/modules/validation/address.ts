@@ -140,9 +140,10 @@ export function validateAddress(shipping: AddressInput, rules: CountryRules): Va
   }
 
   if (fromCity.length > 0) {
-    // Місто без індексу пропонується, лише якщо індекс у полі «Індекс» порожній або той самий;
-    // інакше дані суперечливі — лише попередження.
-    const consistent = fromCity.filter((e) => isBlank(rawPostal) || e.postalCode === postal);
+    // Місто без індексу пропонується, лише якщо в полі «Індекс» той самий індекс. Порожній індекс — спершу
+    // застосовують пропозицію індексу (POSTAL_CODE_MISSING), інакше прийняте місто без індексу втратило б код.
+    // Інший індекс — дані суперечливі. В обох випадках — лише попередження без пропозиції.
+    const consistent = isBlank(rawPostal) ? [] : fromCity.filter((e) => e.postalCode === postal);
     const cities = [...new Set(consistent.map((e) => e.city))];
     const suggestion = cities.length > 0 ? { field: "shipping.city", candidates: cities } : null;
     issues.push(issue("CITY_CONTAINS_POSTAL_CODE", "shipping.city", {}, "warning", suggestion));

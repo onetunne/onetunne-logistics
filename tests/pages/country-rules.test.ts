@@ -258,6 +258,32 @@ describe("country rules page render", () => {
     expect(html).toContain(esc(uk("countryRules.reset.isDefault")));
   });
 
+  it("owner marks a rule verified from the page: badge and banner disappear, history shows it", async () => {
+    setContext(OWNER);
+    let html = await render("/demo/country-rules?country=LT");
+    expect(html).toContain('value="verify"');
+    // Службову англійську позначку не показуємо (дані гідратації в <script> — не видимий текст).
+    expect(html.replace(/<script[\s\S]*?<\/script>/g, "")).not.toContain("verify before production");
+    // Збереження форми (примітки без позначки + keepVerifyMarker) позначку не знімає.
+    const form = await formFor("LT", { notes: "Official format is LT-12345." });
+    expect(await act({ intent: "update", ...form, keepVerifyMarker: "1" })).toMatchObject({ ok: true });
+    const saved = await getCountryRule(env.handle.db, "LT");
+    expect(saved?.notes).toBe("Default rule — verify before production. Official format is LT-12345.");
+    const { expectedVersion } = await formFor("LT", {});
+    expect(await act({ intent: "verify", countryCode: "LT", expectedVersion: expectedVersion ?? "" })).toMatchObject({
+      ok: true,
+      message: "countryRules.result.verified",
+    });
+    html = await render("/demo/country-rules?country=LT");
+    expect(html).not.toContain(esc(uk("countryRules.verify.rule")));
+    expect(html).not.toContain('value="verify"');
+    expect(html).toContain(esc(uk("countryRules.history.source.verify")));
+    // Працівник не може позначати.
+    setContext(STAFF);
+    expect(await act({ intent: "verify", countryCode: "LV", expectedVersion: "1" })).toMatchObject({ ok: false, error: "error.forbidden" });
+    setContext(OWNER);
+  });
+
   it("owner sees reset for a changed rule and the change in history (production)", async () => {
     setContext(OWNER, "production");
     expect(await act({ intent: "update", ...(await formFor("BE", { notes: "Checked" })) })).toMatchObject({ ok: true });

@@ -13,6 +13,8 @@ export const MAX_EXAMPLE_LENGTH = 20;
 export const MAX_NAME_LENGTH = 80;
 /** Позначка в примітках типових правил: правило потребує перевірки перед роботою. */
 export const VERIFY_MARKER = "verify before production";
+/** Повне речення позначки (як у типових правилах, app/modules/validation/default-country-rules.ts). */
+export const VERIFY_NOTE = "Default rule — verify before production.";
 
 /** Поля правила, які редагує власник (назви країни — лише під час додавання/скидання). */
 export const EDITABLE_RULE_FIELDS = [

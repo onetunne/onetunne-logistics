@@ -11,6 +11,7 @@ import {
   Checkbox,
   ConfirmSubmitButton,
   DataTable,
+  Disclosure,
   EmptyState,
   Grid,
   KeyValueList,
@@ -362,5 +363,34 @@ describe("Checkbox submits 'on' when checked (stage 4 regression)", () => {
     expect(plain).not.toMatch(/value=/);
     const withValue = renderToString(h(Checkbox, { label: "x", name: "ids", value: "abc" }));
     expect(withValue).toMatch(/value="abc"/);
+  });
+});
+
+describe("Disclosure", () => {
+  it("collapsedOnMobile: open in SSR markup but hidden on phones until hydration (no flash), shared CSS classes", () => {
+    const html = renderToString(h(Disclosure, { summary: "Фільтри", collapsedOnMobile: true }, h("p", null, "body")));
+    expect(html).toMatch(/<details class="ot-disclosure ot-disclosure--collapse-mobile" open="">/);
+    expect(html).not.toContain("data-ready");
+    expect(html).toContain('<summary class="ot-disclosure__summary">');
+    expect(html).toContain('<div class="ot-disclosure__content"><p>body</p></div>');
+    expect(html).not.toContain("<style"); // без вбудованого CSS у сторінках
+  });
+
+  it("plain disclosure follows defaultOpen and is ready immediately", () => {
+    const closed = renderToString(h(Disclosure, { summary: "S" }, "x"));
+    expect(closed).toMatch(/<details class="ot-disclosure" data-ready="">/);
+    expect(renderToString(h(Disclosure, { summary: "S", defaultOpen: true }, "x"))).toContain('open=""');
+  });
+});
+
+describe("mobile CSS contracts (app/ui/styles.css)", () => {
+  it("tap targets, badge wrapping in cards, tab and invoice scroll hints", async () => {
+    const fs = await import("node:fs");
+    const css = fs.readFileSync("app/ui/styles.css", "utf8");
+    expect(css).toMatch(/details > summary \{[^}]*min-height: 44px;[^}]*cursor: pointer;/);
+    expect(css).toMatch(/\.ot-dt__cell \.ot-badge \{[^}]*white-space: normal;/);
+    expect(css).toMatch(/\.ot-card__title a \{[^}]*display: inline-block;[^}]*padding-block: 10px;[^}]*margin-block: -10px;/);
+    expect(css).toMatch(/\.ot-tabs__list\[data-fade="end"\] \{[^}]*mask-image/);
+    expect(css).toMatch(/@media \(max-width: 599\.98px\) \{[^@]*\.ot-invoice__scroll-hint \{\s*display: block;/);
   });
 });

@@ -63,7 +63,7 @@ import {
 import { isReissuable, reissueWaybill, type ReissueResult } from "~/modules/shipments/reissue.server";
 import { loadShopifyPushState, resendOrderToShopify } from "~/modules/shopify-sync/sync.server";
 import { markHandedOver, refreshShipmentTracking } from "~/modules/tracking/tracking.server";
-import { SHIPPING_FIELDS, type ShippingField } from "~/modules/validation/types";
+import { MAX_CANDIDATE_LENGTH, SHIPPING_FIELDS, type ShippingField } from "~/modules/validation/types";
 import { getRequestContext } from "~/server/context.server";
 import { formString, toActionError } from "~/server/http.server";
 import type { RequestContext } from "~/server/types";
@@ -98,7 +98,6 @@ import {
  */
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const MAX_CANDIDATE_LENGTH = 200;
 const MAX_WAYBILL_INPUT = 60;
 
 /** Поля форми «Виправити дані»: ім'я input → максимальна довжина (як у orderDataPatchSchema). */
@@ -530,7 +529,7 @@ function reissueResult(r: ReissueResult, t: TFunction): ActionResult {
   return {
     ok: true,
     message: "order.reissue.result.cancelledOnly",
-    params: { ...innerParams, old },
+    params: { ...innerParams, old, orderStatus: t(`status.${r.orderStatus}`) },
     extra: [
       ...(inner.ok ? [inner.message, ...(inner.extra ?? [])] : []),
       unknown ? "order.reissue.result.unknownNext" : "order.reissue.result.fixAndCreate",
@@ -1063,6 +1062,7 @@ function IssuesCard({ data }: { data: Data }) {
 
 function IssueItem({ issue, data }: { issue: Issue; data: Data }) {
   const t = useT();
+  const locale = useLocale();
   const can = useCan();
   const busy = useBusy();
   const label = fieldLabel(issue.field, data.items, t);
@@ -1086,7 +1086,7 @@ function IssueItem({ issue, data }: { issue: Issue; data: Data }) {
           {t("order.issues.field", { field: label })}
         </Text>
       ) : null}
-      <Text variant="body-sm">{t(`issue.${issue.code}.help`, localizeParams(issue.params, t))}</Text>
+      <Text variant="body-sm">{t(`issue.${issue.code}.help`, localizeParams(issue.params, t, locale))}</Text>
 
       {isCarrier && message ? (
         <Text variant="body-sm">{t("order.issues.carrierMessage", { message: codeText(message, t) })}</Text>

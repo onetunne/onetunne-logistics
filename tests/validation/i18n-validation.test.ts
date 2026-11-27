@@ -46,7 +46,9 @@ describe("validation i18n messages", () => {
           ? ["fields", "message", "reason", "shipsTo"]
           : key.startsWith("issue.DELIVERY_PROBLEM") || key.startsWith("issue.CARRIER_SHIPMENT_DELETED")
             ? ["carrier", "code", "status", "waybill"] // створюються сервісом відстеження, не валідатором
-            : [];
+            : key.startsWith("issue.CARRIER_CANCEL_")
+              ? ["carrier", "waybill"] // створюються сервісом накладних під час скасування
+              : [];
         for (const p of placeholders(value)) expect(allowed.has(p ?? "") || extra.includes(p ?? ""), `${locale}:${key} {${p}}`).toBe(true);
       }
     }

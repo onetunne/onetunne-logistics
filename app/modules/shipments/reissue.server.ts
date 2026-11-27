@@ -57,7 +57,7 @@ export type ReissueResult =
   /** Стару накладну скасовано, нову створено (або знайдено звіркою). */
   | { kind: "reissued"; cancelled: ShipmentRow; created: ShipmentRow; recovered: boolean }
   /** Стару накладну СКАСОВАНО, нову не створено: `next` пояснює причину (перевірка даних, перевізник тощо). */
-  | { kind: "cancelled_only"; cancelled: ShipmentRow; next: ReissueBlockedNext }
+  | { kind: "cancelled_only"; cancelled: ShipmentRow; next: ReissueBlockedNext; orderStatus: OrderStatus }
   /**
    * Нічого не змінено: нову накладну створити неможливо, тож стару не скасовували.
    * `validation` — пробна перевірка даних знайшла блокуючі проблеми (params.issues — їхні коди через кому).
@@ -161,7 +161,8 @@ export async function reissueWaybill(ctx: ServiceContext, shipmentId: string, op
       outcome: "error",
       code,
     });
-    return { kind: "cancelled_only", cancelled: cancel.shipment, next: { kind: "error", code } };
+    const orderStatus = (await loadOrderRow(ctx.db, order.id)).status;
+    return { kind: "cancelled_only", cancelled: cancel.shipment, next: { kind: "error", code }, orderStatus };
   }
 
   if (next.kind === "created" || next.kind === "recovered" || next.kind === "already_exists") {
@@ -184,5 +185,6 @@ export async function reissueWaybill(ctx: ServiceContext, shipmentId: string, op
     outcome: next.kind,
     ...(next.kind === "blocked" ? { reason: next.reason } : {}),
   });
-  return { kind: "cancelled_only", cancelled: cancel.shipment, next };
+  // Фактичний статус (може бути «Очікує перевірки» або «Потребує виправлення») — для точного повідомлення.
+  return { kind: "cancelled_only", cancelled: cancel.shipment, next, orderStatus: (await loadOrderRow(ctx.db, order.id)).status };
 }

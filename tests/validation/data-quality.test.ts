@@ -363,7 +363,11 @@ describe("postal code inside the city field", () => {
       params: { example: "10115" },
       suggestion: { field: "shipping.postalCode", candidates: ["10115"] },
     });
-    expect(find(r.issues, "CITY_CONTAINS_POSTAL_CODE")?.suggestion).toEqual({ field: "shipping.city", candidates: ["Berlin"] });
+    // Місто без індексу НЕ пропонується, доки індекс порожній: прийняте першим, воно втратило б код.
+    expect(find(r.issues, "CITY_CONTAINS_POSTAL_CODE")).toMatchObject({ severity: "warning", suggestion: null });
+    // Після прийняття індексу з'являється пропозиція міста.
+    const after = run({ city: "Berlin 10115", postalCode: "10115" });
+    expect(find(after.issues, "CITY_CONTAINS_POSTAL_CODE")?.suggestion).toEqual({ field: "shipping.city", candidates: ["Berlin"] });
     const nl = run({ countryCode: "NL", city: "1011ab Amsterdam", postalCode: "", address1: "Voorbeeldstraat 7", phone: "+31 6 12345678" });
     expect(find(nl.issues, "POSTAL_CODE_MISSING")?.suggestion?.candidates).toEqual(["1011 AB"]);
   });

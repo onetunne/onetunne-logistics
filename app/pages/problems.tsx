@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useState } from "react";
 import {
   Form,
   Link,
@@ -35,9 +35,11 @@ import {
   type ProblemGroup,
   type ProblemIssue,
 } from "~/modules/problems/problems.server";
+import { MAX_CANDIDATE_LENGTH } from "~/modules/validation/types";
 import { getRequestContext } from "~/server/context.server";
 import { formString, toActionError, type ActionError } from "~/server/http.server";
 import {
+  Disclosure,
   Banner,
   Button,
   Card,
@@ -57,7 +59,6 @@ import {
   type TabItem,
 } from "~/ui";
 
-const MAX_CANDIDATE_LENGTH = 200;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const BULK_FORM_ID = "problems-bulk-form";
 const SELECTION_NAME = "orderIds";
@@ -352,41 +353,6 @@ interface PendingSubmit {
   candidate: string | null;
 }
 
-const MOBILE_QUERY = "(max-width: 767.98px)";
-/** До гідратації на телефоні вміст розкривного блока прихований (щоб фільтри не «блимали»). */
-const DISCLOSURE_CSS =
-  "@media (max-width: 767.98px){details[data-filters-disclosure]:not([data-ready])>:not(summary){display:none}}" +
-  "details[data-filters-disclosure]>summary{cursor:pointer;padding:2px 0}";
-
-/**
- * Розкривний блок фільтрів: на телефоні згорнутий за замовчуванням (прохання власника), на ширших екранах — відкритий.
- * TODO: перенести в UI-кіт (app/ui) разом зі стилем; зараз однакова копія є в app/pages/orders.tsx.
- */
-function FiltersDisclosure({ label, children }: { label: ReactNode; children: ReactNode }) {
-  const [open, setOpen] = useState(true);
-  const [ready, setReady] = useState(false);
-  useEffect(() => {
-    if (window.matchMedia?.(MOBILE_QUERY).matches) setOpen(false);
-    setReady(true);
-  }, []);
-  return (
-    <details
-      data-filters-disclosure=""
-      data-ready={ready ? "" : undefined}
-      open={open}
-      onToggle={(e) => setOpen(e.currentTarget.open)}
-    >
-      <style dangerouslySetInnerHTML={{ __html: DISCLOSURE_CSS }} />
-      <summary>
-        <Text as="span" variant="body-sm" weight="semibold">
-          {label}
-        </Text>
-      </summary>
-      <div style={{ paddingTop: "var(--ot-space-3)" }}>{children}</div>
-    </details>
-  );
-}
-
 export default function ProblemsPage() {
   const data = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
@@ -512,8 +478,9 @@ export default function ProblemsPage() {
         </Stack>
 
         <Card>
-          <FiltersDisclosure
-            label={
+          <Disclosure
+            collapsedOnMobile
+            summary={
               activeFormFilters > 0 ? t("problems.filters.titleActive", { count: activeFormFilters }) : t("common.filters")
             }
           >
@@ -568,7 +535,7 @@ export default function ProblemsPage() {
                 </Stack>
               </Stack>
             </Form>
-          </FiltersDisclosure>
+          </Disclosure>
         </Card>
 
         {groups.length > 0 ? (
@@ -864,7 +831,7 @@ function IssueItem({
       <Text variant="caption" tone="subdued">
         {meta.join(" · ")}
       </Text>
-      {hasKey(helpKey) ? <Text>{t(helpKey, localizeParams(issue.params, t))}</Text> : null}
+      {hasKey(helpKey) ? <Text>{t(helpKey, localizeParams(issue.params, t, locale))}</Text> : null}
       {issue.carrierMessage ? (
         <Text variant="body-sm" tone="subdued">
           {t("problems.issue.carrierMessage", { message: localizeCode(issue.carrierMessage, t) })}

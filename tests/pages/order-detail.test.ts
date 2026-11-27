@@ -19,6 +19,7 @@ import type {
   TrackingSnapshot,
 } from "~/integrations/carriers/types";
 import { DemoShopifyGateway } from "~/integrations/shopify/types";
+import { makeT } from "~/i18n";
 import { resetEnvCache } from "~/lib/env.server";
 import { DEFAULT_SETTINGS } from "~/modules/settings/schema";
 import { updateSetting } from "~/modules/settings/settings.server";
@@ -789,6 +790,22 @@ describe("order detail: tracking and handover (stage 3)", () => {
   });
 });
 
+describe("order detail: long suggestion candidates", () => {
+  it("accepts a stored candidate longer than 64 characters (address line 2 → line 1)", async () => {
+    const line2 = "Musterstraße 12, Hinterhaus, Aufgang B, 3. Etage links, bei Familie Beispiel";
+    expect(line2.length).toBeGreaterThan(64);
+    const id = await cleanOrder({ shipAddress1: null, shipAddress2: line2 });
+    await act(id, { intent: "validate" });
+    const issue = (await load(id)).openIssues.find((i) => i.code === "ADDRESS_LINE1_EMPTY_LINE2_FILLED");
+    expect(issue?.suggestion?.candidates).toEqual([line2]);
+    expect(await act(id, { intent: "acceptSuggestion", issueId: issue!.id, candidate: line2 })).toMatchObject({
+      ok: true,
+      message: "result.suggestion.accepted",
+    });
+    expect(await act(id, { intent: "acceptSuggestion", issueId: issue!.id, candidate: "x".repeat(201) })).toMatchObject({ ok: false });
+  });
+});
+
 describe("order detail: re-issue and Shopify re-sync (stage 4)", () => {
   it("a created waybill shows the waybill view with «Переоформити» and «Скасувати й виправити дані» instead of create", async () => {
     const { id, shipmentId, number } = await withWaybill();
@@ -844,31 +861,52 @@ describe("order detail: re-issue and Shopify re-sync (stage 4)", () => {
     expect(html).toContain("Накладну переоформлено — створено нове покоління");
   });
 
-  it("re-issue blocked after the cancellation: the banner says the old waybill IS cancelled and what blocks the new one", async () => {
-    const { id, shipmentId, number } = await withWaybill();
+  it("re-issue blocked by the dry-run data check: nothing is cancelled, the banner names the problems and the way out", async () => {
+    const { id, shipmentId } = await withWaybill();
     const { handle } = await getDemoRuntime();
     await handle.db.update(orders).set({ shipCity: null }).where(eq(orders.id, id));
     const r = await act(id, { intent: "reissueWaybill", shipmentId });
     expect(r).toMatchObject({
       ok: true,
-      message: "order.reissue.result.cancelledOnly",
-      extra: ["result.waybill.blocked.validation", "order.reissue.result.fixAndCreate"],
+      message: "order.reissue.result.notStarted",
+      extra: ["result.waybill.blocked.validation", "order.reissue.result.validationIssues", "order.reissue.result.correctInstead"],
       tone: "warning",
     });
-    expect(r.ok && r.params?.old).toBe(number);
+    expect(r.ok && String(r.params?.issues)).toContain("Немає міста");
+    const data = await load(id);
+    expect(data.shipments.filter((s) => s.active)).toHaveLength(1);
+    expect(data.order).toMatchObject({ status: "waybill_created" });
+    const html = await render(id, { method: "POST", fields: { intent: "reissueWaybill", shipmentId } });
+    expect(html).toContain("стару накладну не скасовано");
+    expect(html).toContain("Проблеми з даними: Немає міста");
+    expect(html).toContain("«Скасувати й виправити дані»");
+  });
+
+  it("re-issue blocked after the cancellation: the banner says the old waybill IS cancelled and shows the real status", async () => {
+    const { id, shipmentId, number } = await withWaybill();
+    const { handle } = await getDemoRuntime();
+    const sim = DEFAULT_SETTINGS.testCarrier;
+    const owner = makeActor({ id: "demo-owner", displayName: "Owner", role: "owner" });
+    await updateSetting(handle.db, owner, "testCarrier", { ...sim, simulation: "reject" });
+    try {
+      const r = await act(id, { intent: "reissueWaybill", shipmentId });
+      expect(r).toMatchObject({
+        ok: true,
+        message: "order.reissue.result.cancelledOnly",
+        extra: ["result.waybill.rejected", "order.reissue.result.fixAndCreate"],
+        tone: "critical",
+      });
+      expect(r.ok && r.params?.old).toBe(number);
+      expect(r.ok && r.params?.orderStatus).toBe("Потребує виправлення");
+    } finally {
+      await updateSetting(handle.db, owner, "testCarrier", sim);
+    }
     const data = await load(id);
     expect(data.shipments.filter((s) => s.active)).toHaveLength(0);
     expect(data.order).toMatchObject({ status: "needs_correction", editable: true });
-  });
-
-  it("the result banner text of a blocked re-issue is explicit", async () => {
-    const { id, shipmentId, number } = await withWaybill();
-    const { handle } = await getDemoRuntime();
-    await handle.db.update(orders).set({ shipCity: null }).where(eq(orders.id, id));
-    const html = await render(id, { method: "POST", fields: { intent: "reissueWaybill", shipmentId } });
-    expect(html).toContain(`Стару накладну ${number} СКАСОВАНО, але нову не створено.`);
-    expect(html).toContain("Спершу виправте проблеми з даними замовлення.");
-    expect(html).toContain("Замовлення повернулося до «Очікує перевірки».");
+    expect(makeT("uk")("order.reissue.result.fixAndCreate", { orderStatus: "Потребує виправлення" })).toContain(
+      "Статус замовлення зараз — «Потребує виправлення»",
+    );
   });
 
   it("«Скасувати й виправити дані» cancels only and explains the next step", async () => {
@@ -878,6 +916,12 @@ describe("order detail: re-issue and Shopify re-sync (stage 4)", () => {
       message: "result.waybill.cancelled",
       extra: ["order.correct.result"],
     });
+    // Банер не повторює «Накладну скасовано.» двічі.
+    for (const locale of ["uk", "en"] as const) {
+      const t = makeT(locale);
+      const first = t("result.waybill.cancelled").replace(/\.$/, "");
+      expect(t("order.correct.result"), locale).not.toContain(first);
+    }
     const data = await load(id);
     expect(data.shipments.filter((s) => s.active)).toHaveLength(0);
     expect(data.order).toMatchObject({ status: "awaiting_review", editable: true });

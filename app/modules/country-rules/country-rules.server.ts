@@ -23,6 +23,8 @@ import {
   type CountryRuleSnapshot,
   type CountryRuleValue,
   type EditableRuleField,
+  needsVerification,
+  withoutVerifyMarker,
 } from "./schema";
 
 /**
@@ -32,11 +34,11 @@ import {
  */
 
 /** Чисті допоміжні функції для loader сторінки (імпорт через .server — не потрапляють у клієнтський код). */
-export { defaultRuleFor, isChangedFromDefault, needsVerification } from "./schema";
+export { defaultRuleFor, isChangedFromDefault, needsVerification, withVerifyMarker, withoutVerifyMarker } from "./schema";
 
 export type CountryRuleRow = typeof countryRules.$inferSelect;
 export type CountryRuleHistoryRow = typeof countryRulesHistory.$inferSelect;
-export type HistorySource = "initial" | "add" | "update" | "reset";
+export type HistorySource = "initial" | "add" | "update" | "reset" | "verify";
 
 export type CountryRuleChangeResult =
   | { ok: true; countryCode: string; version: number; changed: EditableRuleField[]; unchanged: boolean; revalidated: number }
@@ -125,7 +127,8 @@ async function writeVersion(
     .returning({ code: countryRules.countryCode });
   if (updated.length === 0) throw new ConflictError();
   await tx.insert(countryRulesHistory).values({ countryCode: code, version, source, value: next, changedBy: ctx.actor.id, changedAt: now });
-  await writeAudit(tx, ctx.actor, source === "reset" ? "country_rule.reset" : "country_rule.update", { type: "country_rule", id: code }, {
+  const action = source === "reset" ? "country_rule.reset" : source === "verify" ? "country_rule.verified" : "country_rule.update";
+  await writeAudit(tx, ctx.actor, action, { type: "country_rule", id: code }, {
     version,
     fields: changed,
   });
@@ -189,6 +192,29 @@ export async function resetCountryRuleToDefault(
   const result = await ctx.db.transaction((tx) => writeVersion(tx, ctx, code, expectedVersion, next, "reset"));
   const revalidated = result.unchanged ? 0 : await revalidateCountryOrders(ctx, code);
   return { ok: true, countryCode: code, ...result, revalidated };
+}
+
+/**
+ * «Позначити як перевірене»: власник підтвердив значення типового правила — позначку «verify before production»
+ * прибрано з приміток (решта тексту приміток зберігається), нова версія з історією (джерело "verify") і журналом.
+ * Значення перевірки замовлень не змінюються, тож повторна перевірка не потрібна. Без позначки — «змін немає».
+ */
+export async function markCountryRuleVerified(
+  ctx: ServiceContext,
+  countryCode: string,
+  expectedVersion: number,
+): Promise<CountryRuleChangeResult> {
+  requirePermission(ctx.actor, MANAGE);
+  const code = normalizeCode(countryCode);
+  const result = await ctx.db.transaction(async (tx) => {
+    const [current] = await tx.select().from(countryRules).where(eq(countryRules.countryCode, code));
+    if (!current) throw new NotFoundError("countryRule");
+    if (current.version !== expectedVersion) throw new ConflictError();
+    if (!needsVerification(current.notes)) return { version: current.version, changed: [], unchanged: true };
+    const next: CountryRuleSnapshot = { ...snapshotOf(current), notes: withoutVerifyMarker(current.notes) };
+    return writeVersion(tx, ctx, code, expectedVersion, next, "verify");
+  });
+  return { ok: true, countryCode: code, ...result, revalidated: 0 };
 }
 
 /** Назва країни з Intl (якщо власник не вказав). */

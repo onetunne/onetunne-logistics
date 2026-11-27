@@ -20,7 +20,8 @@ const messages: MessageModule = {
     "customerRequest.item.city": "місто або населений пункт;",
     "customerRequest.item.province": "штат, область або регіон;",
     "customerRequest.item.postalCode": "поштовий індекс;",
-    "customerRequest.item.postalCodeConfirm": "поштовий індекс і місто — щоб переконатися, що вони відповідають одне одному;",
+    "customerRequest.item.postalCodeConfirm":
+      "поштовий індекс і штат/регіон — щоб переконатися, що вони відповідають одне одному;",
     "customerRequest.item.phone": "номер телефону одержувача з кодом країни (для зв'язку служби доставки);",
     "customerRequest.item.phoneConfirm": "правильний номер телефону одержувача з кодом країни (для зв'язку служби доставки);",
     "customerRequest.item.phoneMobile": "мобільний номер телефону одержувача з кодом країни (служба доставки надсилає SMS);",
@@ -54,7 +55,7 @@ const messages: MessageModule = {
     "customerRequest.item.city": "the city or town;",
     "customerRequest.item.province": "the state, province or region;",
     "customerRequest.item.postalCode": "the postal code;",
-    "customerRequest.item.postalCodeConfirm": "the postal code and city — so we can make sure they match;",
+    "customerRequest.item.postalCodeConfirm": "the postal code and state/region — so we can make sure they match;",
     "customerRequest.item.phone": "the recipient's phone number with the country code (for the delivery service);",
     "customerRequest.item.phoneConfirm": "the recipient's correct phone number with the country code (for the delivery service);",
     "customerRequest.item.phoneMobile": "the recipient's mobile phone number with the country code (the delivery service sends SMS);",

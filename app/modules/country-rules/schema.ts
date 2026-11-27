@@ -9,6 +9,7 @@ import {
   MAX_NOTES_LENGTH,
   MAX_PATTERN_LENGTH,
   VERIFY_MARKER,
+  VERIFY_NOTE,
   type EditableRuleField,
 } from "./constants";
 import { compilePostalPattern } from "~/modules/validation/postal";
@@ -123,9 +124,31 @@ export function defaultRuleFor(countryCode: string): DefaultCountryRule | undefi
 export function isChangedFromDefault(rule: CountryRuleSnapshot & { countryCode: string }): boolean {
   const def = defaultRuleFor(rule.countryCode);
   if (!def) return true;
-  return changedFields(pickRuleValue(rule), pickRuleValue(def)).length > 0 || rule.nameEn !== def.nameEn || rule.nameUk !== def.nameUk;
+  // Позначка перевірки — не зміна значень: перевірене типове правило лишається «типовим».
+  const a = { ...pickRuleValue(rule), notes: withoutVerifyMarker(rule.notes) };
+  const b = { ...pickRuleValue(def), notes: withoutVerifyMarker(def.notes) };
+  return changedFields(a, b).length > 0 || rule.nameEn !== def.nameEn || rule.nameUk !== def.nameUk;
 }
 
 export function needsVerification(notes: string | null): boolean {
   return notes !== null && notes.toLowerCase().includes(VERIFY_MARKER);
+}
+
+/** Речення з позначкою (напр. «Default rule — verify before production.»), без урахування регістру. */
+const VERIFY_SENTENCE_RE = new RegExp(`[^.!?\\n]*${VERIFY_MARKER.replace(/ /g, "\\s+")}[^.!?\\n]*[.!?]?`, "gi");
+
+/**
+ * Примітки без позначки «потребує перевірки» (решта тексту зберігається). Порожній результат → null.
+ * Збережена позначка лишається англійською для сумісності; в інтерфейсі її замінює значок «Потребує перевірки».
+ */
+export function withoutVerifyMarker(notes: string | null): string | null {
+  if (notes === null) return null;
+  const cleaned = notes.replace(VERIFY_SENTENCE_RE, " ").replace(/[ \t]{2,}/g, " ").replace(/ *\n */g, "\n").trim();
+  return cleaned === "" ? null : cleaned;
+}
+
+/** Повертає позначку на початок приміток (форма показує примітки без неї, але збереження не має її знімати). */
+export function withVerifyMarker(notes: string | null): string {
+  const rest = withoutVerifyMarker(notes);
+  return rest ? `${VERIFY_NOTE} ${rest}` : VERIFY_NOTE;
 }

@@ -109,6 +109,16 @@ tests/            unit + інтеграційні тести (PGlite)
 - Документи: `pages/order-document.tsx` (PDF перевізника через fetch), `pages/order-invoice.tsx` (друк інвойсу).
 - Nova Global Partners API: Basic auth + company_id за договором; поки `not_configured`.
 
+## Етап 4 (перевірка даних, проблеми, підготовка ШІ)
+- Валідатор: `modules/validation/` — regions.ts (ISO 3166-2), postal-region.ts, city-postal.ts, categories.ts (категорія для
+  кожного коду; новий код без категорії не компілюється). Шаблони індексів власника — лише безпечні (`isSafePostalPattern`).
+- Пропозиції застосовуються лише з збережених кандидатів (`acceptSuggestion`, MAX_CANDIDATE_LENGTH у validation/types.ts).
+- Переоформлення: `modules/shipments/reissue.server.ts` (перевірка даних до скасування, CAS, одна активна накладна).
+- «Проблеми»: `modules/problems/`; правила країн: `modules/country-rules/` (історія `country_rules_history`).
+- ШІ/WhatsApp — лише підготовка: `modules/assistant/tools.server.ts` (права, підтвердження, режими, аудит),
+  `modules/privacy/redact.ts`, `integrations/knowledge/`, `modules/customer-requests/`. Опис — `docs/ai-whatsapp-readiness.md`.
+- Прапорці форм: сервер читає `form.has(name)`; Checkbox без value (браузер надсилає "on").
+
 ## Нотатки для наступних етапів
 - Етап 2: Dev Dashboard → Custom Distribution, `shopify app config link`, мінімальні scopes (план у `shopify.app.toml`),
   запит Protected Customer Data, робочий ShopifyGateway (GraphQL Admin API), webhooks orders/*, імпорт старих замовлень,

@@ -22,10 +22,13 @@ import {
   isChangedFromDefault,
   listCountryRules,
   listHistory,
+  markCountryRuleVerified,
   needsVerification,
   resetCountryRuleToDefault,
   testPostalCode,
   updateCountryRule,
+  withVerifyMarker,
+  withoutVerifyMarker,
   type CountryRuleChangeResult,
   type CountryRuleHistoryRow,
   type CountryRuleRow,
@@ -73,7 +76,7 @@ import {
 const MAX_QUERY_LENGTH = 60;
 const SHIPPING_FILTERS = ["all", "enabled", "disabled"] as const;
 type ShippingFilter = (typeof SHIPPING_FILTERS)[number];
-const MUTATION_INTENTS = ["update", "reset", "add"] as const;
+const MUTATION_INTENTS = ["update", "reset", "add", "verify"] as const;
 type MutationIntent = (typeof MUTATION_INTENTS)[number];
 const RULE_FLAGS = ["shippingEnabled", "postalCodeRequired", "provinceRequired", "phoneRequired"] as const;
 
@@ -119,6 +122,8 @@ function ruleView(r: CountryRuleRow) {
     phoneRequired: r.phoneRequired,
     dutyPayer: r.dutyPayer,
     notes: r.notes,
+    /** Примітки для показу: без англійської службової позначки (її замінює значок «Потребує перевірки»). */
+    notesDisplay: withoutVerifyMarker(r.notes),
     version: r.version,
     hasDefault: def !== undefined,
     changed: isChangedFromDefault(r),
@@ -201,7 +206,8 @@ function ruleInput(form: FormData) {
     postalCodePattern: formString(form, "postalCodePattern"),
     postalCodeExample: formString(form, "postalCodeExample"),
     dutyPayer: formString(form, "dutyPayer"),
-    notes: formString(form, "notes"),
+    // Форма показує примітки без службової позначки; поки правило не позначено перевіреним, позначку зберігаємо.
+    notes: form.get("keepVerifyMarker") === "1" ? withVerifyMarker(formString(form, "notes")) : formString(form, "notes"),
   };
 }
 
@@ -213,7 +219,14 @@ function expectedVersion(form: FormData): number | null {
 function toResult(intent: MutationIntent, r: CountryRuleChangeResult, countryCode: string): CountryRulesActionResult {
   if (!r.ok) return { ok: false, error: "error.validation", fieldErrors: r.fieldErrors, intent, countryCode };
   if (r.unchanged) return { ok: true, message: "countryRules.result.unchanged", tone: "info", intent, countryCode: r.countryCode };
-  const message = intent === "add" ? "countryRules.result.added" : intent === "reset" ? "countryRules.result.reset" : "countryRules.result.updated";
+  const message =
+    intent === "add"
+      ? "countryRules.result.added"
+      : intent === "reset"
+        ? "countryRules.result.reset"
+        : intent === "verify"
+          ? "countryRules.result.verified"
+          : "countryRules.result.updated";
   return { ok: true, message, params: { count: r.revalidated }, intent, countryCode: r.countryCode };
 }
 
@@ -244,6 +257,7 @@ export async function action({ request }: ActionFunctionArgs): Promise<CountryRu
     const version = expectedVersion(form);
     if (version === null) return { ok: false, error: "error.generic", intent, countryCode };
     if (intent === "reset") return toResult(intent, await resetCountryRuleToDefault(ctx, countryCode, version), countryCode);
+    if (intent === "verify") return toResult(intent, await markCountryRuleVerified(ctx, countryCode, version), countryCode);
     return toResult(intent, await updateCountryRule(ctx, countryCode, ruleInput(form), version), countryCode);
   } catch (e) {
     return { ...toActionError(e), intent: isMutationIntent(intent) ? intent : "unknown", countryCode };
@@ -505,17 +519,34 @@ function RuleDetail({
       <Stack gap={4}>
         <RuleBadges rule={rule} />
         <ActionBanner data={result} />
-        {rule.needsVerification ? <Banner tone="warning">{t("countryRules.verify.rule")}</Banner> : null}
+        {rule.needsVerification ? (
+          <Banner tone="warning">
+            <Stack gap={3}>
+              <Text>{t(canManage ? "countryRules.verify.rule" : "countryRules.verify.ruleReadOnly")}</Text>
+              {canManage ? (
+                <Form method="post">
+                  <input type="hidden" name="intent" value="verify" />
+                  <input type="hidden" name="countryCode" value={rule.countryCode} />
+                  <input type="hidden" name="expectedVersion" value={rule.version} />
+                  <Button type="submit" variant="secondary" loading={pendingIntent === "verify"}>
+                    {t("countryRules.verify.button")}
+                  </Button>
+                </Form>
+              ) : null}
+            </Stack>
+          </Banner>
+        ) : null}
 
         {canManage ? (
           <Form method="post">
             <input type="hidden" name="intent" value="update" />
             <input type="hidden" name="countryCode" value={rule.countryCode} />
             <input type="hidden" name="expectedVersion" value={rule.version} />
+            {rule.needsVerification ? <input type="hidden" name="keepVerifyMarker" value="1" /> : null}
             <Stack gap={4}>
               <RuleFields
                 idPrefix={`rule-${rule.countryCode}`}
-                values={rule}
+                values={{ ...rule, notes: rule.notesDisplay }}
                 dutyPayers={dutyPayers}
                 fieldError={fieldError}
                 pattern={pattern}
@@ -542,7 +573,7 @@ function RuleDetail({
               { key: "province", label: t("countryRules.field.provinceRequired"), value: yesNoText(t, rule.provinceRequired) },
               { key: "phone", label: t("countryRules.field.phoneRequired"), value: yesNoText(t, rule.phoneRequired) },
               { key: "duty", label: t("countryRules.field.dutyPayer"), value: t(`planned.countryRules.duty.${rule.dutyPayer}`) },
-              { key: "notes", label: t("countryRules.field.notes"), value: rule.notes ?? "—" },
+              { key: "notes", label: t("countryRules.field.notes"), value: rule.notesDisplay ?? "—" },
             ]}
           />
         )}

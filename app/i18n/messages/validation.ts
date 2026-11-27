@@ -56,7 +56,7 @@ const messages: MessageModule = {
     "issue.CITY_MISSING.help": "Не вказано місто доставки. Додайте місто з адреси клієнта.",
     "issue.CITY_CONTAINS_POSTAL_CODE.title": "Індекс у полі «Місто»",
     "issue.CITY_CONTAINS_POSTAL_CODE.help":
-      "У назві міста є поштовий індекс. Підтвердьте запропоновану назву міста без індексу. Якщо запропонованого варіанта немає, індекс у місті відрізняється від поля «Індекс» — з'ясуйте правильний індекс у клієнта.",
+      "У назві міста є поштовий індекс. Якщо поле «Індекс» порожнє, спершу застосуйте запропонований індекс (проблема «Немає поштового індексу») — після цього з’явиться пропозиція назви міста без індексу. Якщо індекс заповнено, підтвердьте запропоновану назву міста без індексу; якщо варіанта немає, індекс у місті відрізняється від поля «Індекс» — з'ясуйте правильний індекс у клієнта.",
     "issue.COUNTRY_MISSING.title": "Немає країни",
     "issue.COUNTRY_MISSING.help":
       "Не вказано країну доставки, тому неможливо перевірити індекс і правила доставки. Вкажіть дволітерний код країни ISO 3166-1, напр. DE.",
@@ -226,7 +226,7 @@ const messages: MessageModule = {
     "issue.CITY_MISSING.help": "The shipping city is empty. Add the city from the customer's address.",
     "issue.CITY_CONTAINS_POSTAL_CODE.title": "Postal code in the City field",
     "issue.CITY_CONTAINS_POSTAL_CODE.help":
-      "The city name contains a postal code. Confirm the suggested city name without the code. If no suggestion is offered, the code in the city differs from the Postal code field — confirm the correct postal code with the customer.",
+      "The city name contains a postal code. If the Postal code field is empty, first apply the suggested postal code (the “Postal code missing” problem) — then a city name without the code is suggested. If the postal code is filled in, confirm the suggested city name without the code; if no suggestion is offered, the code in the city differs from the Postal code field — confirm the correct postal code with the customer.",
     "issue.COUNTRY_MISSING.title": "Country missing",
     "issue.COUNTRY_MISSING.help":
       "The shipping country is empty, so the postal code and shipping rules cannot be checked. Enter the two-letter ISO 3166-1 country code, e.g. DE.",

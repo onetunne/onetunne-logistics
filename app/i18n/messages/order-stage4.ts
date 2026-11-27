@@ -21,7 +21,7 @@ const messages: MessageModule = {
     "order.reissue.bodyManual":
       "Ручну прив’язку номера {number} буде знято; у перевізника нічого не скасовується — за потреби скасуйте накладну в його кабінеті. Потім застосунок створить нову накладну через API.",
     "order.reissue.dataNote":
-      "Нова накладна міститиме поточні дані застосунку. Якщо її створення буде заблоковано (наприклад, проблеми з даними), стара накладна все одно залишиться скасованою — замовлення повернеться до «Очікує перевірки».",
+      "Нова накладна міститиме поточні дані застосунку. Якщо її створення буде заблоковано (наприклад, проблеми з даними), стара накладна все одно залишиться скасованою — замовлення повернеться до перевірки даних («Очікує перевірки» або «Потребує виправлення»).",
     "order.reissue.labelsNote": "Надруковані документи старої накладної більше не використовуйте.",
     "order.reissue.confirm": "Так, переоформити",
     "order.reissue.unavailable.status": "Переоформлення доступне лише для статусів «Накладна створена» та «Очікує комплектації».",
@@ -44,12 +44,12 @@ const messages: MessageModule = {
       "Накладну переоформлено: {old} скасовано; відповідь перевізника не надійшла, але звірка знайшла нову накладну {number}. Дубліката не створено.",
     "order.reissue.result.cancelledOnly": "Стару накладну {old} СКАСОВАНО, але нову не створено.",
     "order.reissue.result.fixAndCreate":
-      "Замовлення повернулося до «Очікує перевірки». Усуньте причину й створіть нову накладну на цій сторінці.",
+      "Статус замовлення зараз — «{orderStatus}». Усуньте причину й створіть нову накладну на цій сторінці.",
     "order.reissue.result.unknownNext": "Не створюйте накладну повторно, доки не з’ясовано результат (див. картку «Накладна»).",
     "order.reissue.result.notStarted": "Нічого не змінено: нову накладну зараз створити неможливо, тому стару накладну не скасовано.",
     "order.reissue.result.concurrent":
       "Цю накладну вже переоформлює інший запит — повторно нічого не створено (захист від дублікатів). Оновіть сторінку.",
-    "order.correct.result": "Накладну скасовано. Виправте дані замовлення, потім створіть нову накладну.",
+    "order.correct.result": "Виправте дані замовлення, потім створіть нову накладну.",
     "order.reissue.result.validationIssues": "Проблеми з даними: {issues}.",
     "order.reissue.result.correctInstead":
       "Поки накладна активна, дані замовлення не редагуються: скористайтеся «Скасувати й виправити дані», виправте дані, потім створіть нову накладну.",
@@ -128,7 +128,7 @@ const messages: MessageModule = {
     "order.reissue.bodyManual":
       "The manual link of number {number} will be removed; nothing is cancelled at the carrier — cancel it in the carrier's portal if needed. Then the app creates a new waybill via the API.",
     "order.reissue.dataNote":
-      "The new waybill uses the current app data. If its creation is blocked (e.g. data problems), the old waybill still stays cancelled — the order returns to “Awaiting review”.",
+      "The new waybill uses the current app data. If its creation is blocked (e.g. data problems), the old waybill still stays cancelled — the order goes back to the data check (“Awaiting review” or “Needs correction”).",
     "order.reissue.labelsNote": "Do not use printed documents of the old waybill any more.",
     "order.reissue.confirm": "Yes, re-issue",
     "order.reissue.unavailable.status": "Re-issuing is only available in “Waybill created” and “Awaiting picking”.",
@@ -148,12 +148,12 @@ const messages: MessageModule = {
     "order.reissue.result.recovered":
       "Waybill re-issued: {old} cancelled; the carrier did not respond, but reconciliation found the new waybill {number}. No duplicate was created.",
     "order.reissue.result.cancelledOnly": "The old waybill {old} IS CANCELLED, but no new waybill was created.",
-    "order.reissue.result.fixAndCreate": "The order is back in “Awaiting review”. Resolve the cause and create a new waybill on this page.",
+    "order.reissue.result.fixAndCreate": "The order status is now “{orderStatus}”. Resolve the cause and create a new waybill on this page.",
     "order.reissue.result.unknownNext": "Do not create the waybill again until the outcome is clarified (see the “Waybill” card).",
     "order.reissue.result.notStarted": "Nothing changed: a new waybill cannot be created right now, so the old waybill was not cancelled.",
     "order.reissue.result.concurrent":
       "Another request is already re-issuing this waybill — nothing was created again (duplicate protection). Refresh the page.",
-    "order.correct.result": "Waybill cancelled. Correct the order data, then create a new waybill.",
+    "order.correct.result": "Correct the order data, then create a new waybill.",
     "order.reissue.result.validationIssues": "Data problems: {issues}.",
     "order.reissue.result.correctInstead":
       "While the waybill is active, the order data cannot be edited: use “Cancel and correct data”, fix the data, then create a new waybill.",

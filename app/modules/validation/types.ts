@@ -138,6 +138,13 @@ export interface CountryRule {
 
 export type CountryRules = ReadonlyMap<string, CountryRule>;
 
+/**
+ * Найбільша довжина кандидата пропозиції, яку приймає форма «Застосувати» (сторінка замовлення й «Проблеми»).
+ * Сервер однаково приймає лише кандидат, збережений у проблемі (acceptSuggestion); обмеження — лише захист форми.
+ * Кандидати бувають довгими (перенесення address2 у address1, місто без індексу), тож запас — до 200 символів.
+ */
+export const MAX_CANDIDATE_LENGTH = 200;
+
 export interface Suggestion {
   field: FieldPath;
   /** 1 кандидат — запропоноване виправлення (потребує підтвердження); >1 — вибір менеджера. */

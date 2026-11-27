@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DICTIONARIES, MESSAGE_MODULES } from "~/i18n";
+import { DICTIONARIES, MESSAGE_MODULES, translate } from "~/i18n";
 import {
   buildCustomerRequestDraft,
   CUSTOMER_REQUEST_ISSUE_CODES,
@@ -43,7 +43,7 @@ describe("customer requests mapping", () => {
 
   it("maps newer data-quality codes; formatting problems the manager can fix are not asked", () => {
     expect(customerRequestFor({ code: "PHONE_NOT_MOBILE" })?.templateKey).toBe("customerRequest.item.phoneMobile");
-    expect(customerRequestFor({ code: "POSTAL_CODE_REGION_MISMATCH" })?.requiredData).toEqual(["postal_code", "city"]);
+    expect(customerRequestFor({ code: "POSTAL_CODE_REGION_MISMATCH" })?.requiredData).toEqual(["postal_code", "province"]);
     expect(customerRequestFor({ code: "ADDRESS_NO_HOUSE_NUMBER" })?.templateKey).toBe("customerRequest.item.houseNumber");
     expect(customerRequestFor({ code: "EMAIL_MISSING" })?.templateKey).toBe("customerRequest.item.email");
     for (const code of ["ADDRESS_FIELD_TOO_LONG", "ADDRESS_DUPLICATED_FIELDS", "CITY_CONTAINS_POSTAL_CODE", "ADDRESS_LINE1_EMPTY_LINE2_FILLED"]) {
@@ -140,5 +140,25 @@ describe("customer request draft", () => {
       expect(DICTIONARIES.uk[`customerRequest.item.${k}`], k).toBeTruthy();
       expect(DICTIONARIES.en[`customerRequest.item.${k}`], k).toBeTruthy();
     }
+  });
+});
+
+describe("customer requests: issues with a suggestion", () => {
+  it("skips issues whose data is already in the order (the manager confirms the suggestion)", () => {
+    expect(customerRequestFor({ code: "POSTAL_CODE_MISSING", suggestion: { candidates: ["10115"] } })).toBeNull();
+    expect(customerRequestFor({ code: "PROVINCE_INVALID", field: "shipping.province", suggestion: { candidates: ["TX"] } })).toBeNull();
+    // Без пропозиції — питаємо.
+    expect(customerRequestFor({ code: "POSTAL_CODE_MISSING", suggestion: null })?.templateKey).toBe("customerRequest.item.postalCode");
+    expect(customerRequestFor({ code: "PROVINCE_INVALID", suggestion: { candidates: [] } })?.templateKey).toBe("customerRequest.item.province");
+    // Неоднозначний номер: лише клієнт знає правильний — питаємо й з кандидатами.
+    expect(customerRequestFor({ code: "PHONE_AMBIGUOUS", suggestion: { candidates: ["+39 361 234 5678", "+44 361 234 5678"] } })?.templateKey).toBe(
+      "customerRequest.item.phoneConfirm",
+    );
+    expect(buildCustomerRequestDraft([{ code: "POSTAL_CODE_MISSING", suggestion: { candidates: ["10115"] } }], "uk")).toBeNull();
+  });
+
+  it("the postal/region confirmation asks for the state/region, not the city", () => {
+    expect(translate("uk", "customerRequest.item.postalCodeConfirm")).toContain("поштовий індекс і штат/регіон");
+    expect(translate("en", "customerRequest.item.postalCodeConfirm")).toContain("postal code and state/region");
   });
 });
