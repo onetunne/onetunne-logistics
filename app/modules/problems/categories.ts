@@ -1,12 +1,11 @@
-import { ISSUE_CODES } from "~/modules/validation/types";
+import { issueCategory } from "~/modules/validation/categories";
+import { ISSUE_CODES, type IssueCode } from "~/modules/validation/types";
 
 /**
  * Категорії та джерела проблем для розділу «Проблеми» (чисті функції, без БД).
- *
- * TODO(stage-4): після появи `issueCategory(code)` у `~/modules/validation/categories.ts` замінити тіло
- * `problemCategory` на:
- *   const c = issueCategory(code as never); return isProblemCategory(c) ? c : "other";
- * і видалити TEMP_CATEGORY_BY_CODE. Решта коду (фільтри SQL, лічильники) користується лише `problemCategory`.
+ * Категорія коду визначається валідатором (`issueCategory`, app/modules/validation/categories.ts);
+ * тут додано лише "other" для кодів, яких валідатор ще не знає. Решта коду (фільтри SQL, лічильники)
+ * користується лише `problemCategory`.
  */
 export const PROBLEM_CATEGORIES = ["address", "phone", "contact", "customs", "carrier", "shopify", "delivery", "other"] as const;
 export type ProblemCategory = (typeof PROBLEM_CATEGORIES)[number];
@@ -23,42 +22,13 @@ export function isProblemSource(value: unknown): value is ProblemSource {
   return typeof value === "string" && (PROBLEM_SOURCES as readonly string[]).includes(value);
 }
 
-/** Тимчасова відповідність (див. TODO вище). Невідомі коди → "other". */
-const TEMP_CATEGORY_BY_CODE: Readonly<Record<string, ProblemCategory>> = {
-  PHONE_MISSING: "phone",
-  PHONE_INVALID: "phone",
-  PHONE_AMBIGUOUS: "phone",
-  EMAIL_INVALID: "contact",
-  NAME_MISSING: "contact",
-  ADDRESS_MISSING: "address",
-  CITY_MISSING: "address",
-  COUNTRY_MISSING: "address",
-  COUNTRY_UNSUPPORTED: "address",
-  COUNTRY_SHIPPING_DISABLED: "address",
-  POSTAL_CODE_MISSING: "address",
-  POSTAL_CODE_INVALID: "address",
-  PROVINCE_MISSING: "address",
-  PRODUCT_NOT_LINKED: "customs",
-  PRODUCT_WEIGHT_MISSING: "customs",
-  PRODUCT_HS_CODE_MISSING: "customs",
-  PRODUCT_HS_CODE_INVALID: "customs",
-  PRODUCT_ORIGIN_MISSING: "customs",
-  PRODUCT_CUSTOMS_DESCRIPTION_MISSING: "customs",
-  PRODUCT_PRICE_INVALID: "customs",
-  CARRIER_REJECTED: "carrier",
-  CARRIER_RESULT_UNKNOWN: "carrier",
-  CARRIER_UNAVAILABLE: "carrier",
-  SHOPIFY_ORDER_CHANGED: "shopify",
-  SHOPIFY_SYNC_FAILED: "shopify",
-  SHOPIFY_CANCELLED_AFTER_SHIPMENT: "shopify",
-  SHOPIFY_COUNTRY_NOT_SHIPPED: "shopify",
-  SHOPIFY_FULFILLMENT_FAILED: "shopify",
-  DELIVERY_PROBLEM: "delivery",
-  CARRIER_SHIPMENT_DELETED: "delivery",
-};
+const KNOWN_CODES: ReadonlySet<string> = new Set(ISSUE_CODES);
 
+/** Категорія за кодом (валідатор — `issueCategory`); невідомі коди (напр. нові, ще без категорії) → "other". */
 export function problemCategory(code: string): ProblemCategory {
-  return Object.hasOwn(TEMP_CATEGORY_BY_CODE, code) ? TEMP_CATEGORY_BY_CODE[code]! : "other";
+  if (!KNOWN_CODES.has(code)) return "other";
+  const category: unknown = issueCategory(code as IssueCode);
+  return isProblemCategory(category) ? category : "other";
 }
 
 /** Коди, що створює сервіс відстеження (мають префікс CARRIER_/DELIVERY_, але джерело — відстеження). */
