@@ -70,7 +70,7 @@
   асистента (етап 4); попередження про низькі залишки (`stock_alerts`) — джерело для майбутніх сповіщень.
 
 ## 9. Факти Shopify API (перевірено за shopify.dev, версія 2026-10)
-Повні таблиці з посиланнями — у дослідженні етапу 5 (робочі нотатки розробника).
+Повні таблиці з посиланнями — `docs/research/stage5/`.
 - Стани: `available`, `committed`, `reserved`, `damaged`, `safety_stock`, `quality_control`, `incoming`, `on_hand`;
   `on_hand = available + committed + reserved + damaged + safety_stock + quality_control`.
 - Замовлення: `available −n`, `committed +n`. Виконання: `committed −n` (отже `on_hand −n`) — **Shopify сам**.
