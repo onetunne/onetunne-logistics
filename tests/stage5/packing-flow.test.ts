@@ -227,8 +227,9 @@ describe("confirm «Packed»", () => {
     const [boxS] = await env.handle.db.select().from(packagingMaterials).where(eq(packagingMaterials.code, "box_s"));
     const saved = await savePackingParcel(env.ctx(STAFF), id, { expectedVersion: (await activePacking(id)).version, boxMaterialId: boxS!.id });
     expect(saved.changed).toEqual(["parcel.box"]);
-    // Вибрана коробка S (200 × 150 × 80) ≠ типова упаковка накладної → справжня розбіжність.
-    expect(saved.mismatch).toMatchObject({ weight: null, dims: { waybillMm: [350, 250, 80], packedMm: [200, 150, 80] } });
+    // Рекомендована коробка S (200 × 150 × 80) вміщується в габарити типової упаковки накладної (35 × 25 × 8 см —
+    // верхня межа, а не вимір) → не розбіжність (e2e-3): вибір ★ сам по собі не вимагає переоформлення.
+    expect(saved.mismatch).toBeNull();
     const p = await activePacking(id);
     const before = { box: await materialOnHand("box_s"), sticker: await materialOnHand("sticker_logo"), card: await materialOnHand("card_thanks") };
     const [a, b] = await Promise.all([confirmPacked(env.ctx(STAFF), id, p.version), confirmPacked(env.ctx(STAFF), id, p.version)]);

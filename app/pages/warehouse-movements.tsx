@@ -5,7 +5,7 @@ import { can } from "~/domain/permissions";
 import { hasKey, useLocale, useT, type Locale } from "~/i18n";
 import { formatDateTime, formatMoney, formatNumber } from "~/lib/format";
 import { movementHistory, type MovementFilters, type MovementView } from "~/modules/inventory/ledger.server";
-import { MOVEMENT_TYPES, isMovementType, type MovementType } from "~/modules/inventory/movement-types";
+import { MOVEMENT_TYPES, isMovementType, type MovementType, shopifySyncStateForDisplay } from "~/modules/inventory/movement-types";
 import {
   ITEM_KINDS,
   MAX_SEARCH_LENGTH,
@@ -115,7 +115,7 @@ function buildSearch(f: Partial<MovementPageFilters>): string {
 }
 
 /** Собівартість — спільним детермінованим форматером (lib/format), як на інших сторінках складу. */
-function serialize(m: MovementView, locale: Locale) {
+function serialize(m: MovementView, locale: Locale, mode: "demo" | "production") {
   return {
     id: m.id,
     createdAt: m.createdAt.toISOString(),
@@ -137,7 +137,7 @@ function serialize(m: MovementView, locale: Locale) {
     note: m.note,
     actorId: m.actorId,
     actorName: m.actorName,
-    shopifySyncState: m.shopifySyncState,
+    shopifySyncState: shopifySyncStateForDisplay(mode, m.shopifySyncState),
     unitCost: m.unitCost,
     costCurrency: m.costCurrency,
     unitCostText: m.unitCost && m.costCurrency ? formatMoney(m.unitCost, m.costCurrency, locale) : null,
@@ -196,7 +196,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
   return {
     filters: { ...filters, page },
-    rows: result.rows.map((r) => serialize(r, ctx.locale)),
+    rows: result.rows.map((r) => serialize(r, ctx.locale, ctx.mode)),
     total: result.total,
     page,
     pages,

@@ -188,3 +188,12 @@ export function defaultShopifySyncState(
   if (kind !== "product" || onHandDelta === 0 || !MOVEMENT_RULES[type].shopifyPushable) return "none";
   return pushMode === "deltas" ? "pending" : "skipped";
 }
+
+/**
+ * Стан передачі для показу в історії рухів. Демо ніколи не з'єднується з Shopify (movementOptionsFor вимикає передачу),
+ * але демо-база, створена до цього правила, може містити рухи "pending" — показуємо їх як «Не надсилалося», щоб не
+ * створювати враження, що зміни буде надіслано.
+ */
+export function shopifySyncStateForDisplay(mode: "demo" | "production", state: ShopifySyncState): ShopifySyncState {
+  return mode === "demo" && state === "pending" ? "skipped" : state;
+}

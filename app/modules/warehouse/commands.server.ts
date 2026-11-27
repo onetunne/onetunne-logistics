@@ -49,7 +49,7 @@ import {
   RECEIPT_REASONS,
   displayVariantTitle,
 } from "./constants";
-import { markDefective, OPERATION_PERMISSIONS, receiveStock, type OperationResult } from "./operations.server";
+import { markDefective, OPERATION_PERMISSIONS, receiveStock, recordedReceiptState, type OperationResult } from "./operations.server";
 import { listStock, loadAlertSummary, type StockRow } from "./stock.server";
 
 // ---------------------------------------------------------------------------
@@ -606,27 +606,45 @@ async function previewChange(
     available: row?.available ?? 0,
     defective: row?.defective ?? 0,
   };
-  const key = inventoryKeys.manual(input.operationId);
-  const [existing] = await ctx.db
-    .select({
-      stockItemId: inventoryMovements.stockItemId,
-      type: inventoryMovements.type,
-      onHandDelta: inventoryMovements.onHandDelta,
-      defectiveDelta: inventoryMovements.defectiveDelta,
-    })
-    .from(inventoryMovements)
-    .where(eq(inventoryMovements.idempotencyKey, key));
-  // Те саме порівняння, що й у applyDeltaOperation (operations.server.ts): повтор — лише та сама позиція, вид і дельти.
-  const alreadyApplied = Boolean(
-    existing &&
-      row?.stockItemId &&
-      existing.stockItemId === row.stockItemId &&
-      existing.type === CHANGE_MOVEMENT_TYPE[kind] &&
-      existing.onHandDelta === delta.onHand &&
-      existing.defectiveDelta === delta.defective,
-  );
-  // Ідентифікатор уже використано для іншої дії: підтвердження однаково буде відхилено — кажемо це одразу, без «повтору».
-  if (existing && !alreadyApplied) throw new DomainError("warehouse.error.operationReused", 409);
+  let alreadyApplied: boolean;
+  if (kind === "receive_stock") {
+    // Надходження повернення може бути записане двома рухами (надходження + рух браку пошкоджених, ключ
+    // manual:<uuid>:return_defect) — те саме порівняння, що й у receiveStock (operations.server.ts recordedReceiptState).
+    const state = row?.stockItemId
+      ? await recordedReceiptState(ctx.db, {
+          operationId: input.operationId,
+          stockItemId: row.stockItemId,
+          quantity: input.quantity,
+          defectiveQuantity: input.defectiveQuantity ?? 0,
+        })
+      : (await ctx.db.select({ id: inventoryMovements.id }).from(inventoryMovements).where(eq(inventoryMovements.idempotencyKey, inventoryKeys.manual(input.operationId)))).length > 0
+        ? "other"
+        : "none";
+    alreadyApplied = state === "same";
+    if (state === "other") throw new DomainError("warehouse.error.operationReused", 409);
+  } else {
+    const key = inventoryKeys.manual(input.operationId);
+    const [existing] = await ctx.db
+      .select({
+        stockItemId: inventoryMovements.stockItemId,
+        type: inventoryMovements.type,
+        onHandDelta: inventoryMovements.onHandDelta,
+        defectiveDelta: inventoryMovements.defectiveDelta,
+      })
+      .from(inventoryMovements)
+      .where(eq(inventoryMovements.idempotencyKey, key));
+    // Те саме порівняння, що й у applyDeltaOperation (operations.server.ts): повтор — лише та сама позиція, вид і дельти.
+    alreadyApplied = Boolean(
+      existing &&
+        row?.stockItemId &&
+        existing.stockItemId === row.stockItemId &&
+        existing.type === CHANGE_MOVEMENT_TYPE[kind] &&
+        existing.onHandDelta === delta.onHand &&
+        existing.defectiveDelta === delta.defective,
+    );
+    // Ідентифікатор уже використано для іншої дії: підтвердження однаково буде відхилено — кажемо це одразу, без «повтору».
+    if (existing && !alreadyApplied) throw new DomainError("warehouse.error.operationReused", 409);
+  }
   // Повтор нічого не змінить: «стане» = «зараз».
   const after = alreadyApplied
     ? { ...current }
@@ -676,7 +694,8 @@ const receiveStockCommand = defineCommand({
   name: "receive_stock",
   description:
     "Receive stock without a production batch (purchase, customer return, found units): adds good units to on hand " +
-    "and damaged units to defective. Customer returns are not pushed to Shopify (Shopify restocks them itself). " +
+    "and damaged units to defective. Customer returns are not pushed to Shopify (Shopify restocks them itself); " +
+    "damaged units of such a return are then taken out of Shopify's available by a defect movement. " +
     "Exactly one of sku/barcode. Requires human confirmation; pass the same operationId on retries.",
   input: z
     .object({

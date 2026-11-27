@@ -6,7 +6,11 @@
  * надсилається в Shopify — skipped, бо Shopify поповнює сам). Ці дві події приходять у будь-якому порядку, тож до
  * другої з них різниця з Shopify пояснюється поверненням і автоприйняття її подвоїло б або скасувало б:
  * - pending — Shopify міг уже поповнити (поточна кількість позиції замовлення зменшилася після списання), а склад ще не
- *   оприбуткував стільки придатних одиниць (пошкоджені — у браку, а Shopify поповнив їх як доступні);
+ *   оприбуткував стільки одиниць (on_hand надходжень повернення). Повернення, яке Shopify поповнив, записується з УСІМА
+ *   одиницями в on_hand, а пошкоджені окремим рухом браку (manual:<uuid>:return_defect) переходять у брак — його −дельту
+ *   надіслано в Shopify (warehouse/operations.server.ts). Надходження «надіслати в Shopify», «пошкоджені в Shopify не
+ *   поповнювали» і записані до цієї зміни тримають пошкоджені одразу в браку — тут вони не рахуються (Shopify їх не
+ *   поповнював або вже враховано); returnOrderSuggestions (для підказки у формі) рахує on_hand + defective;
  * - awaiting — склад оприбуткував повернення (не надіслане), а відшкодування з поверненням у Shopify ще немає: Shopify
  *   додасть ці одиниці сам («Надіслати склад» їх не надсилає — pure.ts pushPlan).
  *
@@ -190,7 +194,8 @@ export async function loadReturnsState(
     .having(sql`${historicalQty} > 0`);
   for (const r of historical) order(get(r.stockItemId), r.orderId).returned += r.qty;
 
-  // Оприбутковані повернення: лише придатні одиниці (on_hand); пошкоджені Shopify теж поповнив як доступні.
+  // Оприбутковані повернення: одиниці on_hand надходжень (для поповненого Shopify повернення — усі, разом із
+  // пошкодженими, які окремий рух браку зняв у Shopify); пошкоджені, записані одразу в брак, Shopify не поповнював.
   const inWindow = sql`${inventoryMovements.createdAt} >= ${since}`;
   const skipped = sql`${inventoryMovements.shopifySyncState} = 'skipped'`;
   const receipts = await db
@@ -223,4 +228,78 @@ export async function loadReturnsState(
     o.receivedSkipped += r.skipped;
   }
   return out;
+}
+
+export interface ReturnOrderSuggestion {
+  orderId: string;
+  orderNumber: string;
+  /** Повернено/відшкодовано в Shopify, але ще не оприбутковано складом як повернення цього замовлення (одиниць). */
+  units: number;
+}
+
+/** Найбільше підказок у формі повернення. */
+export const RETURN_SUGGESTIONS_LIMIT = 10;
+
+/**
+ * Підказки номера замовлення у формі повернення покупця (лише читання, без звернень до Shopify): замовлення, у яких
+ * позицію цього товару нещодавно повернули/відшкодували в Shopify (поточна кількість менша за списану —
+ * loadReturnsState, те саме вікно RETURN_PENDING_WINDOW_MS), а склад ще не отримав стільки одиниць повернень із цим
+ * замовленням (returned − отримано > 0). Отримано — УСІ фізично отримані одиниці (on_hand + defective надходжень
+ * повернення): на відміну від обліку для звірки (лише on_hand), пошкоджені одиниці, записані одразу в брак («надіслати
+ * в Shopify», «пошкоджені в Shopify не повертали», записи до розділення — operations.server.ts), теж отримані —
+ * інакше замовлення лишалося б у підказках після отримання всього повернення. Повернення без замовлення не
+ * віднімаються: невідомо, якого замовлення вони стосуються, — саме тому склад обирає замовлення. Лише номер замовлення
+ * (без даних покупця); найновіші зміни першими.
+ */
+export async function returnOrderSuggestions(
+  db: DbOrTx,
+  warehouseId: string,
+  stockItemId: string,
+  now: Date = new Date(),
+  limit: number = RETURN_SUGGESTIONS_LIMIT,
+): Promise<ReturnOrderSuggestion[]> {
+  const state = (await loadReturnsState(db, warehouseId, [stockItemId], now)).get(stockItemId);
+  if (!state) return [];
+  const candidates = [...state.orders].filter(([, o]) => o.returned - o.received > 0);
+  if (candidates.length === 0) return [];
+  // Пошкоджені одиниці тих самих надходжень повернення (defective), які облік для звірки не рахує.
+  const damagedRows = await db
+    .select({
+      orderId: inventoryMovements.orderId,
+      damaged: sql<number>`coalesce(sum(${inventoryMovements.defectiveDelta}), 0)`.mapWith(Number),
+    })
+    .from(inventoryMovements)
+    .where(
+      and(
+        eq(inventoryMovements.warehouseId, warehouseId),
+        eq(inventoryMovements.stockItemId, stockItemId),
+        eq(inventoryMovements.type, "receipt_manual"),
+        inArray(inventoryMovements.reason, [...SHOPIFY_RESTOCK_REASONS]),
+        inArray(
+          inventoryMovements.orderId,
+          candidates.map(([orderId]) => orderId),
+        ),
+      ),
+    )
+    .groupBy(inventoryMovements.orderId);
+  const damaged = new Map(damagedRows.map((r) => [r.orderId, r.damaged]));
+  const open = new Map<string, number>();
+  for (const [orderId, o] of candidates) {
+    const units = o.returned - o.received - Math.max(0, damaged.get(orderId) ?? 0);
+    if (units > 0) open.set(orderId, units);
+  }
+  if (open.size === 0) return [];
+  const rows = await db
+    .select({
+      id: orders.id,
+      orderNumber: orders.orderNumber,
+      changedAt: sql<string>`coalesce(${orders.shopifyUpdatedAt}, ${orders.updatedAt})`,
+    })
+    .from(orders)
+    .where(inArray(orders.id, [...open.keys()]));
+  return rows
+    .map((r) => ({ orderId: r.id, orderNumber: r.orderNumber, units: open.get(r.id) ?? 0, at: new Date(r.changedAt).getTime() }))
+    .sort((a, b) => b.at - a.at || a.orderNumber.localeCompare(b.orderNumber))
+    .slice(0, Math.max(0, limit))
+    .map(({ orderId, orderNumber, units }) => ({ orderId, orderNumber, units }));
 }

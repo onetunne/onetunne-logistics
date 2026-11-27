@@ -101,7 +101,7 @@ describe("default box is consistent with the waybill", () => {
     expect((await loadPackingScreen(env.ctx(), id)).mismatch).toBeNull();
   });
 
-  it("an exact fit computed after the waybill (default package) is preselected and its real difference is reported", async () => {
+  it("an exact fit computed after the waybill (default package) is preselected; inside the default package it is not a mismatch", async () => {
     const id = ids["#1012"]!; // крило Model X + тримач білий; накладна вже з типовою упаковкою
     await setVariantDims("OT-FK-X", [180, 120, 30]);
     await setVariantDims("OT-PH-WHT", [120, 80, 40]);
@@ -111,7 +111,10 @@ describe("default box is consistent with the waybill", () => {
     expect(screen.suggestion.reason).toBe("fits");
     expect(p.boxMaterialId).toBe(screen.suggestion.boxId);
     const box = screen.boxes.find((b) => b.id === p.boxMaterialId)!;
-    expect(screen.mismatch?.dims).toMatchObject({ waybillMm: [350, 250, 80], packedMm: [...box.innerDimsMm!].sort((a, b) => b - a) });
+    // Габарити типової упаковки — верхня межа (e2e-3): менша коробка не потребує переоформлення.
+    expect([...box.innerDimsMm!].sort((a, b) => b - a).every((v, i) => v <= [350, 250, 80][i]! + 10)).toBe(true);
+    expect(screen.waybillParcel).toMatchObject({ dimsMm: [350, 250, 80], dimsUpperBound: true });
+    expect(screen.mismatch).toBeNull();
   });
 });
 

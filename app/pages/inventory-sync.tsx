@@ -369,6 +369,27 @@ function OverviewCard({ data }: { data: LoaderData }) {
   const locationName = o.locationId ? (data.locations?.find((l) => l.id === o.locationId)?.name ?? o.locationId) : null;
   const scopeBadge = (granted: boolean) => <Badge tone={granted ? "success" : "warning"}>{granted ? t("inventorySync.overview.granted") : t("inventorySync.overview.missing")}</Badge>;
   const s = o.lastReconcile?.summary;
+  // Демо: Shopify не підключено — передача, зміни з Shopify, планова звірка й черга не діють. Збережене налаштування
+  // показуємо лише як «обрано в налаштуваннях» (діятиме в робочому застосунку), а не як поточний стан.
+  const demoRow = (note: string, setting: string | null, hint?: string) => (
+    <Stack gap={1}>
+      <span>{note}</span>
+      {setting ? (
+        <Text variant="caption" tone="subdued">
+          {t("inventorySync.overview.demo.setting", { value: setting })}
+        </Text>
+      ) : null}
+      {hint ? (
+        <Text variant="caption" tone="subdued">
+          {hint}
+        </Text>
+      ) : null}
+    </Stack>
+  );
+  const queueText =
+    [o.queued.push ? t("inventorySync.overview.queuedPush") : null, o.queued.reconcile ? t("inventorySync.overview.queuedReconcile", { count: o.queued.reconcile }) : null]
+      .filter(Boolean)
+      .join(" · ") || "—";
   return (
     <Card title={t("inventorySync.overview.title")}>
       <Stack gap={4}>
@@ -388,7 +409,9 @@ function OverviewCard({ data }: { data: LoaderData }) {
             {
               key: "push",
               label: t("inventorySync.overview.pushMode"),
-              value: (
+              value: demo ? (
+                demoRow(t("inventorySync.overview.demo.push"), t(`settings.warehouse.shopifyPush.${o.pushMode}`), t("inventorySync.overview.settingsHint"))
+              ) : (
                 <Stack gap={1}>
                   <span>{t(`inventorySync.overview.pushMode.${o.pushMode}`)}</span>
                   <Text variant="caption" tone="subdued">
@@ -397,7 +420,13 @@ function OverviewCard({ data }: { data: LoaderData }) {
                 </Stack>
               ),
             },
-            { key: "external", label: t("inventorySync.overview.externalMode"), value: t(`inventorySync.overview.externalMode.${o.externalMode}`) },
+            {
+              key: "external",
+              label: t("inventorySync.overview.externalMode"),
+              value: demo
+                ? demoRow(t("inventorySync.overview.demo.external"), t(`settings.warehouse.externalShopifyChanges.${o.externalMode}`))
+                : t(`inventorySync.overview.externalMode.${o.externalMode}`),
+            },
             {
               key: "location",
               label: t("inventorySync.overview.location"),
@@ -414,13 +443,27 @@ function OverviewCard({ data }: { data: LoaderData }) {
                 t("inventorySync.overview.locationNone")
               ),
             },
-            {
-              key: "pending",
-              label: t("inventorySync.overview.pending"),
-              value: o.push.pending
-                ? `${formatNumber(o.push.pending, locale)} · ${t("inventorySync.overview.oldestPending", { date: formatDateTime(o.push.oldestPendingAt, locale) })}`
-                : "0",
-            },
+            // Демо: нові рухи не отримують «Очікує надсилання» (movementOptionsFor); такі позначки можуть лишитися лише в
+            // старій демо-базі — показуємо їх як ті, що НЕ будуть надіслані (а без них рядок не потрібен).
+            ...(demo
+              ? o.push.pending > 0
+                ? [
+                    {
+                      key: "pending",
+                      label: t("inventorySync.overview.demo.pending"),
+                      value: demoRow(formatNumber(o.push.pending, locale), null, t("inventorySync.overview.demo.pendingHint")),
+                    },
+                  ]
+                : []
+              : [
+                  {
+                    key: "pending",
+                    label: t("inventorySync.overview.pending"),
+                    value: o.push.pending
+                      ? `${formatNumber(o.push.pending, locale)} · ${t("inventorySync.overview.oldestPending", { date: formatDateTime(o.push.oldestPendingAt, locale) })}`
+                      : "0",
+                  },
+                ]),
             { key: "failed", label: t("inventorySync.overview.failed"), value: formatNumber(o.push.failed, locale) },
             {
               key: "lastPush",
@@ -454,7 +497,9 @@ function OverviewCard({ data }: { data: LoaderData }) {
             {
               key: "nextReconcile",
               label: t("inventorySync.overview.nextReconcile"),
-              value: (
+              value: demo ? (
+                demoRow(t("inventorySync.overview.demo.nextReconcile"), null)
+              ) : (
                 <Stack gap={1}>
                   <span>
                     {o.nextScheduledReconcileAt ? formatDateTime(o.nextScheduledReconcileAt, locale) : t("inventorySync.overview.nextReconcileNone")}
@@ -468,10 +513,8 @@ function OverviewCard({ data }: { data: LoaderData }) {
             {
               key: "queued",
               label: t("inventorySync.overview.queue"),
-              value:
-                [o.queued.push ? t("inventorySync.overview.queuedPush") : null, o.queued.reconcile ? t("inventorySync.overview.queuedReconcile", { count: o.queued.reconcile }) : null]
-                  .filter(Boolean)
-                  .join(" · ") || "—",
+              // Демо: обробник черги не запускається (немає Shopify) — завдання зі старої демо-бази не виконаються.
+              value: demo && queueText !== "—" ? demoRow(queueText, null, t("inventorySync.overview.demo.queue")) : queueText,
             },
           ]}
         />

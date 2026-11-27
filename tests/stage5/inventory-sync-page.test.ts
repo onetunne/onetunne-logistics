@@ -2,10 +2,10 @@ import { createElement as h } from "react";
 import { renderToString } from "react-dom/server";
 import { Outlet, StaticRouterProvider, createStaticHandler, createStaticRouter } from "react-router";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { ActionResult } from "~/components/action-banner";
 import type { DatabaseHandle } from "~/db/client.server";
-import { inventoryConflicts, jobs, productVariants, shopInstallations } from "~/db/schema";
+import { inventoryConflicts, inventoryMovements, jobs, productVariants, shopInstallations } from "~/db/schema";
 import { DEMO_SETTINGS, seedReferenceData } from "~/db/seed/seed.server";
 import { makeActor, type Actor } from "~/domain/permissions";
 import { DICTIONARIES } from "~/i18n";
@@ -350,5 +350,79 @@ describe("round 2 review: explainable conflicts and safe actions", () => {
     expect(row.unsentDelta).toBeGreaterThanOrEqual(2);
     const html = await render("/app/warehouse/shopify");
     expect(html).toContain(esc(uk("inventorySync.action.accept.unsentWarning").replace("{delta}", `+${row.unsentDelta}`)));
+  });
+});
+
+describe("demo: Shopify push is shown as not applicable (e2e-5)", () => {
+  const demoKeys = ["inventorySync.overview.demo.push", "inventorySync.overview.demo.external", "inventorySync.overview.demo.nextReconcile"];
+  const setting = (key: string) => esc(uk("inventorySync.overview.demo.setting").replace("{value}", uk(key)));
+
+  it("push «on» / automatic acceptance / scheduled reconcile: demo explains nothing is sent, production text is unchanged", async () => {
+    const before = await getSetting(db.db, "warehouse");
+    await updateSetting(db.db, OWNER, "warehouse", { ...before, shopifyPush: "deltas", externalShopifyChanges: "apply" });
+    try {
+      setContext(OWNER, "demo");
+      const demo = await render("/demo/warehouse/shopify");
+      for (const key of demoKeys) expect(demo, key).toContain(esc(uk(key)));
+      // Збережене налаштування — лише як «обрано в налаштуваннях», не як поточний стан «Увімкнено».
+      expect(demo).toContain(setting("settings.warehouse.shopifyPush.deltas"));
+      expect(demo).toContain(setting("settings.warehouse.externalShopifyChanges.apply"));
+      for (const key of ["inventorySync.overview.pushMode.deltas", "inventorySync.overview.externalMode.apply", "inventorySync.overview.nextReconcileHint"]) {
+        expect(demo, key).not.toContain(esc(uk(key)));
+      }
+      expect(demo).not.toContain(esc(uk("inventorySync.banner.autoApplyPaused")));
+
+      setContext(OWNER, "production");
+      const prod = await render("/app/warehouse/shopify");
+      for (const key of ["inventorySync.overview.pushMode.deltas", "inventorySync.overview.externalMode.apply", "inventorySync.overview.nextReconcileHint"]) {
+        expect(prod, key).toContain(esc(uk(key)));
+      }
+      for (const key of [...demoKeys, "inventorySync.overview.demo.pending"]) expect(prod, key).not.toContain(esc(uk(key)));
+      expect(prod).not.toContain(setting("settings.warehouse.shopifyPush.deltas"));
+    } finally {
+      await updateSetting(db.db, OWNER, "warehouse", { ...(await getSetting(db.db, "warehouse")), shopifyPush: before.shopifyPush, externalShopifyChanges: "review" });
+    }
+  });
+
+  it("old demo database: «waiting to be sent» movements and a queued push are shown as never sent", async () => {
+    // Рух «Очікує надсилання» і завдання передачі — як у демо-базі, створеній до movementOptionsFor.
+    const current = await getSetting(db.db, "warehouse");
+    await updateSetting(db.db, OWNER, "warehouse", { ...current, shopifyPush: "deltas" });
+    const { applied } = await apply(db.db, { stockItemId: items[0]!.stockItemId, type: "receipt_manual", idempotencyKey: `manual:${crypto.randomUUID()}`, onHandDelta: 1 });
+    expect(applied[0]!.shopifySyncState).toBe("pending");
+    const { enqueueInventoryPush } = await import("~/modules/inventory-sync/schedule.server");
+    await enqueueInventoryPush(db.db);
+    try {
+      setContext(OWNER, "demo");
+      const data = await load();
+      expect(data.overview.push.pending).toBeGreaterThan(0);
+      expect(data.overview.queued.push).toBe(true);
+      const demo = await render("/demo/warehouse/shopify");
+      expect(demo).toContain(esc(uk("inventorySync.overview.demo.pending")));
+      expect(demo).toContain(esc(uk("inventorySync.overview.demo.pendingHint")));
+      expect(demo).toContain(esc(uk("inventorySync.overview.demo.queue")));
+      expect(demo).not.toContain(esc(uk("inventorySync.overview.pending")));
+      expect(demo).not.toContain(esc(uk("inventorySync.action.pushNow")));
+      expect(demo).not.toContain(esc(uk("inventorySync.action.skipPending")));
+
+      setContext(OWNER, "production");
+      const prod = await render("/app/warehouse/shopify");
+      expect(prod).toContain(esc(uk("inventorySync.overview.pending")));
+      expect(prod).toContain(esc(uk("inventorySync.action.pushNow")));
+      for (const key of ["inventorySync.overview.demo.pendingHint", "inventorySync.overview.demo.queue"]) expect(prod, key).not.toContain(esc(uk(key)));
+    } finally {
+      await updateSetting(db.db, OWNER, "warehouse", { ...(await getSetting(db.db, "warehouse")), shopifyPush: "off" });
+    }
+  });
+
+  it("fresh demo database (no «waiting» movements, empty queue): no pending row and no queue note", async () => {
+    await db.db.update(inventoryMovements).set({ shopifySyncState: "skipped" }).where(eq(inventoryMovements.shopifySyncState, "pending"));
+    await db.db.delete(jobs).where(inArray(jobs.type, Object.values(INVENTORY_SYNC_JOB)));
+    setContext(OWNER, "demo");
+    const demo = await render("/demo/warehouse/shopify");
+    for (const key of ["inventorySync.overview.pending", "inventorySync.overview.demo.pending", "inventorySync.overview.demo.queue"]) {
+      expect(demo, key).not.toContain(esc(uk(key)));
+    }
+    expect(demo).toContain(esc(uk("inventorySync.overview.demo.push")));
   });
 });

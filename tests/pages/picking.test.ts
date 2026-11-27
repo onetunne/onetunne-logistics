@@ -315,7 +315,8 @@ describe("packing screen: changing the box (regression)", () => {
     // Форма тепер підставляє габарити й тару коробки L.
     screen = (await call(packingOrder, path, params)) as Screen;
     expect(screen.parcel).toMatchObject({ lengthMm: 400, widthMm: 300, heightMm: 200, weightGrams: goods + boxL.tareWeightGrams!, savedWeightGrams: null, savedDimsMm: null });
-    expect(screen.mismatch?.dims).toEqual({ waybillMm: [350, 250, 80], packedMm: [400, 300, 200] });
+    // Коробка L більша за типову упаковку накладної (верхня межа) → справжня розбіжність «більша посилка».
+    expect(screen.mismatch?.dims).toEqual({ waybillMm: [350, 250, 80], packedMm: [400, 300, 200], exceeds: true });
     html = await render(packingOrder, "picking/:orderId", path);
     expect(hidden(html, "dimsPrefill")).toBe("400x300x200");
     expect(hidden(html, "weightPrefill")).toBe(String(goods + boxL.tareWeightGrams!));
@@ -338,10 +339,12 @@ describe("packing screen: changing the box (regression)", () => {
       },
       params,
     );
-    expect(r2).toMatchObject({ ok: true, params: { count: 1 }, extra: ["packing.parcel.mismatch"] });
+    // Порівнюються габарити S (вміщується в типову упаковку накладної — не розбіжність), а не попередньої L (більша).
+    expect(r2).toMatchObject({ ok: true, params: { count: 1 }, extra: [] });
     expect(await orderParcel()).toEqual({ box: boxS.id, w: null, l: null, wd: null, h: null });
     screen = (await call(packingOrder, path, params)) as Screen;
-    expect(screen.mismatch?.dims).toEqual({ waybillMm: [350, 250, 80], packedMm: [200, 150, 80] });
+    expect(screen.parcel).toMatchObject({ lengthMm: 200, widthMm: 150, heightMm: 80, savedDimsMm: null });
+    expect(screen.mismatch).toBeNull();
 
     // Зважена вага (≠ підказці) зберігається як ручне коригування; габарити — ні.
     const r3 = await post(

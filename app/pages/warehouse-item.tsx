@@ -9,6 +9,7 @@ import { formatDateTime, formatMoney, formatNumber } from "~/lib/format";
 import type { StockLevelStatus } from "~/modules/inventory/alerts";
 import { ensureStockItemForMaterial, ensureStockItemForVariant, movementHistory, type MovementView } from "~/modules/inventory/ledger.server";
 import { getDefaultWarehouse } from "~/modules/inventory/warehouse.server";
+import { returnOrderSuggestions } from "~/modules/inventory-sync/returns.server";
 import { getSetting } from "~/modules/settings/settings.server";
 import {
   DEFAULT_COST_CURRENCY,
@@ -47,6 +48,7 @@ import {
 } from "~/modules/warehouse/operations.server";
 import { getStockItemCard, lastStocktake, listItemAlerts, listItemReservations } from "~/modules/warehouse/stock.server";
 import { getRequestContext } from "~/server/context.server";
+import { shopifySyncStateForDisplay } from "~/modules/inventory/movement-types";
 import { formString, toActionError } from "~/server/http.server";
 import {
   Badge,
@@ -94,7 +96,7 @@ function itemPushesToShopify(
   return mode === "production" && card.kind === "product" && card.tracking === "opened" && shopifyPush === "deltas";
 }
 
-function serializeMovement(m: MovementView, locale: Locale) {
+function serializeMovement(m: MovementView, locale: Locale, mode: "demo" | "production") {
   return {
     id: m.id,
     createdAt: m.createdAt.toISOString(),
@@ -109,7 +111,7 @@ function serializeMovement(m: MovementView, locale: Locale) {
     reason: m.reason,
     note: m.note,
     actorName: m.actorName,
-    shopifySyncState: m.shopifySyncState,
+    shopifySyncState: shopifySyncStateForDisplay(mode, m.shopifySyncState),
     unitCost: m.unitCost,
     costCurrency: m.costCurrency,
     unitCostText: m.unitCost && m.costCurrency ? formatMoney(m.unitCost, m.costCurrency, locale) : null,
@@ -135,6 +137,16 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         lastStocktake(ctx.db, sid),
       ])
     : [[], { rows: [], total: 0, totalQty: 0 }, { rows: [], total: 0 }, null];
+  // Підказки замовлення для повернення покупця (форма надходження): лише номер; посилання — лише з orders.view.
+  const canSeeOrders = can(ctx.actor, "orders.view");
+  const returnSuggestions =
+    sid && card.kind === "product" && can(ctx.actor, "warehouse.receive")
+      ? (await returnOrderSuggestions(ctx.db, warehouse.id, sid)).map((s) => ({
+          orderNumber: s.orderNumber,
+          units: s.units,
+          orderId: canSeeOrders ? s.orderId : null,
+        }))
+      : [];
   return {
     item: {
       ...card,
@@ -153,13 +165,15 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
       totalQty: reservations.totalQty,
       rows: reservations.rows.map((r) => ({ ...r, placedAt: r.placedAt.toISOString(), updatedAt: r.updatedAt.toISOString() })),
     },
-    movements: history.rows.map((r) => serializeMovement(r, ctx.locale)),
+    movements: history.rows.map((r) => serializeMovement(r, ctx.locale, ctx.mode)),
     movementsTotal: history.total,
     lastStocktake: last ? { at: last.at.toISOString(), actorName: last.actorName, delta: last.delta } : null,
     canSeeCosts: includeCosts,
     /** Внутрішні зміни цього товару надсилаються в Shopify (передачу ввімкнено, товар відкрито). */
     // У демо Shopify не підключено: нічого не надсилається (ledger movementOptionsFor), тож і підказок про передачу немає.
     pushesToShopify: itemPushesToShopify(ctx.mode, card, settings.shopifyPush),
+    /** Нещодавні повернення в Shopify, яких склад ще не отримав (returns.server.ts) — без звернень до Shopify. */
+    returnSuggestions,
     operationIds: {
       receive: newOperationId(),
       defect: newOperationId(),
@@ -265,6 +279,8 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<I
         const reason = formString(form, "reason") as ReceiptReason;
         // Повернення покупця: за замовчуванням Shopify поповнює сам (не надсилаємо); прапорець — повернення без поповнення.
         const restockedInShopify = !form.has("pushToShopify");
+        // Пошкоджені одиниці в Shopify на склад не повертали (лише якісні): у Shopify нічого не знімаємо.
+        const damagedRestockedInShopify = !form.has("damagedNotRestocked");
         const r = await receiveStock(ctx, {
           operationId,
           stockItemId,
@@ -273,24 +289,33 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<I
           reason,
           orderId,
           restockedInShopify,
+          damagedRestockedInShopify,
           unitCost: formString(form, "unitCost") || null,
           costCurrency: formString(form, "costCurrency") || null,
           note,
         });
         // «Повернення не надсилається в Shopify…» — лише коли передача справді діє (не в демо: N3).
-        const notPushed =
-          (SHOPIFY_RESTOCK_REASONS as readonly string[]).includes(reason) &&
-          restockedInShopify &&
-          (quantity ?? 0) > 0 &&
-          r.shopifySyncState === "skipped" &&
-          itemPushesToShopify(ctx.mode, card, (await getSetting(ctx.db, "warehouse")).shopifyPush);
-        return operationResult(
+        const pushes = itemPushesToShopify(ctx.mode, card, (await getSetting(ctx.db, "warehouse")).shopifyPush);
+        const restockReturn = (SHOPIFY_RESTOCK_REASONS as readonly string[]).includes(reason) && restockedInShopify;
+        const notPushed = restockReturn && r.shopifySyncState === "skipped" && pushes;
+        // Пошкоджені одиниці такого повернення Shopify теж поповнив — їх знімає з «доступно» Shopify окремий рух браку
+        // (operations.server.ts). Загальне «Зміну буде надіслано…» поруч із «не надсилається» суперечило б — замість нього.
+        const damagedPushed = notPushed && r.returnDefect?.shopifySyncState === "pending";
+        // Обрано «пошкоджені в Shopify на склад не повертали»: брак лише на складі, у Shopify нічого не змінюється.
+        const damagedKept = restockReturn && !damagedRestockedInShopify && (defective ?? 0) > 0 && !r.returnDefect && pushes;
+        const result = operationResult(
           intent,
           r,
           "warehouse.op.received",
           { quantity: quantity ?? 0, damaged: defective ?? 0 },
-          notPushed ? ["warehouse.op.returnNotPushed"] : [],
+          [
+            ...(notPushed ? ["warehouse.op.returnNotPushed"] : []),
+            ...(damagedPushed ? ["warehouse.op.returnDamagedPushed"] : []),
+            ...(damagedKept ? ["warehouse.op.returnDamagedKept"] : []),
+          ],
         );
+        if (damagedPushed && result.ok && result.extra) result.extra = result.extra.filter((k) => k !== "warehouse.op.pushQueued");
+        return result;
       }
       case "defect": {
         const quantity = parseFormInt(formString(form, "quantity"), 1, MAX_OPERATION_QUANTITY);
@@ -641,6 +666,7 @@ export default function WarehouseItemPage() {
                     operationId={data.operationIds.receive}
                     canSeeCosts={data.canSeeCosts}
                     pushesToShopify={data.pushesToShopify}
+                    returnSuggestions={data.returnSuggestions}
                     fieldError={fieldErrorFor("receive")}
                   />
                 </Disclosure>
@@ -826,17 +852,21 @@ function QuantityField({
 
 const asInt = (raw: string): number | null => (/^\d{1,7}$/.test(raw.trim()) ? Number(raw.trim()) : null);
 
+type ReturnSuggestion = LoaderData["returnSuggestions"][number];
+
 function ReceiveForm({
   item,
   operationId,
   canSeeCosts,
   pushesToShopify,
+  returnSuggestions,
   fieldError,
 }: {
   item: Item;
   operationId: string;
   canSeeCosts: boolean;
   pushesToShopify: boolean;
+  returnSuggestions: ReturnSuggestion[];
   fieldError: FieldErrorFn;
 }) {
   const t = useT();
@@ -844,8 +874,12 @@ function ReceiveForm({
   const [quantity, setQuantity] = useState("");
   const [damaged, setDamaged] = useState("");
   const [reason, setReason] = useState<string>(RECEIPT_REASONS[0]);
+  const [orderNumber, setOrderNumber] = useState("");
+  const [pushReturn, setPushReturn] = useState(false);
   const q = asInt(quantity) ?? 0;
   const d = asInt(damaged) ?? 0;
+  const orderLinked = ORDER_LINKED_REASONS.includes(reason);
+  const shopifyReturn = pushesToShopify && (SHOPIFY_RESTOCK_REASONS as readonly string[]).includes(reason);
   return (
     <Form method="post">
       <OperationFields intent="receive" operationId={operationId} />
@@ -882,16 +916,30 @@ function ReceiveForm({
             value={reason}
             onChange={(e) => setReason(e.currentTarget.value)}
           />
-          {ORDER_LINKED_REASONS.includes(reason) ? (
-            <TextField
-              id="wh-receive-order"
-              name="orderNumber"
-              label={t("warehouse.op.orderNumber")}
-              helpText={t("warehouse.op.orderNumberHelp")}
-              maxLength={64}
-              autoComplete="off"
-              error={fieldError("orderNumber")}
-            />
+          {orderLinked ? (
+            <Stack gap={2}>
+              <TextField
+                id="wh-receive-order"
+                name="orderNumber"
+                label={t("warehouse.op.orderNumber")}
+                helpText={t("warehouse.op.orderNumberHelp")}
+                maxLength={64}
+                autoComplete="off"
+                value={orderNumber}
+                onChange={(e) => setOrderNumber(e.currentTarget.value)}
+                error={fieldError("orderNumber")}
+              />
+              {orderNumber.trim() === "" ? (
+                <ReturnOrderHint
+                  suggestions={returnSuggestions}
+                  onPick={(value) => {
+                    setOrderNumber(value);
+                    // Підказка зникає разом із кнопкою — фокус переходить у заповнене поле (клавіатура, екранні читачі).
+                    document.getElementById("wh-receive-order")?.focus();
+                  }}
+                />
+              ) : null}
+            </Stack>
           ) : null}
           {canSeeCosts ? (
             <>
@@ -914,12 +962,25 @@ function ReceiveForm({
             </>
           ) : null}
         </Grid>
-        {pushesToShopify && (SHOPIFY_RESTOCK_REASONS as readonly string[]).includes(reason) ? (
+        {shopifyReturn ? (
           <Checkbox
             id="wh-receive-push"
             name="pushToShopify"
             label={t("warehouse.op.receive.pushReturn")}
             helpText={t("warehouse.op.receive.pushReturnHelp")}
+            checked={pushReturn}
+            onChange={(e) => setPushReturn(e.currentTarget.checked)}
+          />
+        ) : null}
+        {/* Shopify поповнив лише якісні одиниці (пошкоджені не відшкодовано / без поповнення) — тоді брак не знімається
+            з «доступно» Shopify (operations.server.ts damagedRestockedInShopify). Лише коли є пошкоджені й повернення
+            не надсилається (інакше пошкоджені в Shopify не надсилаються й так). */}
+        {shopifyReturn && !pushReturn && d > 0 ? (
+          <Checkbox
+            id="wh-receive-damaged-kept"
+            name="damagedNotRestocked"
+            label={t("warehouse.op.receive.damagedNotRestocked")}
+            helpText={t("warehouse.op.receive.damagedNotRestockedHelp")}
           />
         ) : null}
         <NoteField id="wh-receive-note" />
@@ -935,6 +996,47 @@ function ReceiveForm({
         </div>
       </Stack>
     </Form>
+  );
+}
+
+/**
+ * Повернення покупця без номера замовлення зіставляється з поверненнями в Shopify лише за кількістю
+ * (docs/stage5-design.md §10.1): підказка вказати замовлення і нещодавні повернення в Shopify, яких склад ще не отримав
+ * (лише номер замовлення — без даних покупця). Кнопка підставляє номер у поле; посилання на замовлення — лише з
+ * orders.view (orderId приходить із loader лише тоді). Номер необов'язковий.
+ */
+function ReturnOrderHint({ suggestions, onPick }: { suggestions: ReturnSuggestion[]; onPick: (orderNumber: string) => void }) {
+  const t = useT();
+  const href = useHref();
+  return (
+    <Stack gap={2}>
+      <Text variant="body-sm" tone="subdued">
+        {t("warehouse.op.receive.orderHint")}
+      </Text>
+      {suggestions.length > 0 ? (
+        <Stack gap={1}>
+          <Text variant="body-sm">{t("warehouse.op.receive.suggestions")}</Text>
+          <Stack as="ul" direction="horizontal" gap={2}>
+            {suggestions.map((s) => (
+              <Stack as="li" key={s.orderNumber} direction="horizontal" gap={1} align="center">
+                <Button
+                  size="sm"
+                  onClick={() => onPick(s.orderNumber)}
+                  aria-label={t("warehouse.op.receive.useSuggestion", { order: s.orderNumber, count: s.units })}
+                >
+                  {t("warehouse.op.receive.suggestion", { order: s.orderNumber, count: s.units })}
+                </Button>
+                {s.orderId ? (
+                  <Link to={href(`orders/${s.orderId}`)} aria-label={t("warehouse.op.receive.openOrder", { order: s.orderNumber })}>
+                    {t("warehouse.op.receive.openOrderShort")}
+                  </Link>
+                ) : null}
+              </Stack>
+            ))}
+          </Stack>
+        </Stack>
+      ) : null}
+    </Stack>
   );
 }
 

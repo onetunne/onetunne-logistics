@@ -100,6 +100,10 @@ const messages: MessageModule = {
       "Перед увімкненням: «Склад → Звірка з Shopify» → «Звірити все» й розв'яжіть розбіжності. Потрібен дозвіл write_inventory. Зміни, зроблені до увімкнення, не надсилаються. Продажі Shopify рахує сам.",
     "settings.warehouse.pushOnBanner":
       "Передачу змін у Shopify увімкнено: надходження, брак і коригування змінюють «доступно» в Shopify.",
+    "settings.warehouse.demoBanner":
+      "Демо: Shopify не підключено. «Передачу змін складу в Shopify» і «Зміни залишку, зроблені в Shopify» можна змінити й зберегти для перегляду, але в демо вони не діють: у Shopify нічого не надсилається (зміни складу позначаються «Не надсилалося»), змін залишку з Shopify немає.",
+    "settings.warehouse.shopifyPushDemo": "Демо: не діє — Shopify не підключено, нічого не надсилається.",
+    "settings.warehouse.externalShopifyChangesDemo": "Демо: не діє — Shopify не підключено, змін залишку з Shopify немає.",
     "settings.warehouse.externalShopifyChanges": "Зміни залишку, зроблені в Shopify",
     "settings.warehouse.externalShopifyChanges.review": "Показувати як розбіжність (рішення власника)",
     "settings.warehouse.externalShopifyChanges.apply": "Приймати автоматично, якщо різниця однозначна",
@@ -279,6 +283,10 @@ const messages: MessageModule = {
       "Before enabling: «Warehouse → Shopify reconciliation» → «Reconcile all» and resolve the differences. Requires the write_inventory permission. Changes made before enabling are not sent. Shopify counts sales itself.",
     "settings.warehouse.pushOnBanner":
       "Sending changes to Shopify is on: receipts, defects and adjustments change «available» in Shopify.",
+    "settings.warehouse.demoBanner":
+      "Demo: Shopify is not connected. «Send warehouse changes to Shopify» and «Stock changes made in Shopify» can be changed and saved for preview, but they have no effect in the demo: nothing is sent to Shopify (warehouse changes are marked «Not sent») and there are no stock changes from Shopify.",
+    "settings.warehouse.shopifyPushDemo": "Demo: no effect — Shopify is not connected, nothing is sent.",
+    "settings.warehouse.externalShopifyChangesDemo": "Demo: no effect — Shopify is not connected, there are no stock changes from Shopify.",
     "settings.warehouse.externalShopifyChanges": "Stock changes made in Shopify",
     "settings.warehouse.externalShopifyChanges.review": "Show as a difference (owner decides)",
     "settings.warehouse.externalShopifyChanges.apply": "Accept automatically when the difference is unambiguous",

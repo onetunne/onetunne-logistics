@@ -49,6 +49,10 @@ export async function acceptInTx(
   let movementId: string | null = null;
   const delta = unexplainedDiff(obs);
   if (delta !== 0) {
+    // Стан передачі: зміна прийшла З Shopify, тож shopify_external не надсилається назад (MOVEMENT_RULES.shopifyPushable =
+    // false → defaultShopifySyncState = "none") — рух ніколи не стає pending і не ставить inventory.push, незалежно від
+    // warehouse.shopifyPush і режиму (демо/робочий). Тому movementOptionsFor тут не потрібен (у шляху автоприйняття
+    // звіркою ServiceContext і немає). Перевіряє tests/stage5/demo-push-ledger.test.ts.
     const res = await applyMovements(tx, { id: actor.id, displayName: actor.displayName }, [
       {
         warehouseId: conflict.warehouseId,

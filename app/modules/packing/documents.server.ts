@@ -39,7 +39,7 @@ import {
   type LabelSkipReason,
   type PrintDocument,
 } from "./constants";
-import { loadActivePacking } from "./packing.server";
+import { defaultBoxFor, loadActivePacking } from "./packing.server";
 import { parseOrderIds } from "./queue-filters";
 import { sortOrderIdsLikeQueue } from "./queue.server";
 
@@ -114,7 +114,11 @@ async function loadPackingSlip(ctx: ServiceContext, orderId: string, locale: Loc
     loadActivePacking(ctx.db, orderId),
     findActiveShipment(ctx.db, orderId),
   ]);
-  const materials = await planPackingMaterials(ctx.db, orderId, packing?.boxMaterialId ?? order.parcelBoxMaterialId ?? null);
+  // Коробка — та сама, що на екрані пакування: пакування — його коробка; до початку — та, яку підставить «Почати
+  // пакування» (defaultBoxFor: вибрана для замовлення → з якою створено накладну → точний підбір). Інакше ранковий
+  // лист без коробки розходився б із застосунком, який потім списує коробку накладної.
+  const boxId = packing ? packing.boxMaterialId : await defaultBoxFor(ctx.db, order, shipment);
+  const materials = await planPackingMaterials(ctx.db, orderId, boxId);
   const country = order.shipCountryCode?.trim().toUpperCase() || null;
   const adapter = shipment ? ctx.carriers.get(shipment.carrierCode) : undefined;
   return {

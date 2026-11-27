@@ -23,7 +23,16 @@
  * - повернення покупця (customer_return): Shopify сам поповнює «доступно», коли повернення/відшкодування оформлено з
  *   поверненням на склад (restock). Тому таке надходження за замовчуванням НЕ надсилається (skipped) — інакше в Shopify
  *   +2q. Надіслати можна явним вибором (restockedInShopify: false — повернення оформлено в Shopify без поповнення).
- *   Якщо помилитися з вибором, звірка покаже розбіжність (docs/stage5-design.md §10);
+ *   Якщо помилитися з вибором, звірка покаже розбіжність (docs/stage5-design.md §10).
+ *   Пошкоджені одиниці такого повернення Shopify теж поповнив як доступні, тож для товару вони записуються як
+ *   «повернено й поповнено Shopify, потім позначено браком»: надходження on_hand + (якісні + пошкоджені), skipped, і
+ *   окремий рух defect_mark (ключ manual:<uuid>:return_defect) on_hand − пошкоджені, defective + пошкоджені — його дельта
+ *   надсилається в Shopify як звичайне позначення браку (available − пошкоджені, рівно один раз: ключ руху й
+ *   @idempotent передачі). Облік повернень (inventory-sync/returns.server.ts) рахує on_hand надходжень — тобто всі
+ *   одиниці, які Shopify поповнює сам, — і звірка сходиться без ручного виправлення. Якщо ж у Shopify на склад
+ *   повернули лише якісні одиниці (пошкоджені не відшкодовано або відшкодовано без поповнення) — явний вибір
+ *   damagedRestockedInShopify: false: одне надходження без розділення (on_hand + якісні, defective + пошкоджені), у
+ *   Shopify нічого не знімається (там цих одиниць і не додавали);
  * - дозволи перевіряються тут (сервер): надходження/позначення браку/ремонт — warehouse.receive; інвентаризація,
  *   списання браку, пороги — warehouse.adjust; собівартість надходження — лише finance.view;
  * - примітки — без персональних даних: телефони, email, номери карток/IBAN маскуються (privacy/redact).
@@ -33,7 +42,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { eq, inArray } from "drizzle-orm";
-import type { Tx } from "~/db/client.server";
+import type { DbOrTx, Tx } from "~/db/client.server";
 import { inventoryMovements, orders, stockItems, type ShopifySyncState, type StockItemKind } from "~/db/schema";
 import { ForbiddenError, can, requirePermission, type Permission } from "~/domain/permissions";
 import { DomainError, NotFoundError } from "~/lib/errors";
@@ -106,6 +115,11 @@ export interface OperationResult {
   shopifySyncState: ShopifySyncState;
   /** true — рух чекає передачі в Shopify, завдання inventory.push поставлено в чергу. */
   shopifyPushQueued: boolean;
+  /**
+   * Лише надходження повернення покупця, яке Shopify поповнив сам, з пошкодженими одиницями (товар): окремий рух браку,
+   * що знімає їх з on_hand (і з «доступно» Shopify, якщо передача діє — shopifySyncState pending).
+   */
+  returnDefect?: { movementId: string; quantity: number; shopifySyncState: ShopifySyncState };
 }
 
 interface CommonInput {
@@ -126,11 +140,20 @@ export interface ReceiveStockInput extends CommonInput {
   orderId?: string | null;
   /**
    * Лише для причин SHOPIFY_RESTOCK_REASONS (повернення покупця): true (за замовчуванням) — Shopify поповнює залишок
-   * сам під час оформлення повернення (restock), тож рух у Shopify НЕ надсилається (skipped); false — повернення в
-   * Shopify оформлено без поповнення: якісні одиниці надсилаються дельтою, як звичайне надходження. Для інших причин
-   * ігнорується.
+   * сам під час оформлення повернення (restock) — усі одиниці, також пошкоджені, — тож надходження в Shopify НЕ
+   * надсилається (skipped), а пошкоджені одиниці товару знімаються з «доступно» Shopify окремим рухом браку (див. вгорі
+   * файлу); false — повернення в Shopify оформлено без поповнення: якісні одиниці надсилаються дельтою, як звичайне
+   * надходження, пошкоджені — одразу в брак. Для інших причин ігнорується.
    */
   restockedInShopify?: boolean;
+  /**
+   * Лише разом із restockedInShopify (не false): чи Shopify поповнив також пошкоджені одиниці. true (за замовчуванням) —
+   * усе повернення поповнено, пошкоджені знімаються з «доступно» Shopify окремим рухом браку; false — у Shopify на склад
+   * повернули лише якісні одиниці (пошкоджені не відшкодовано або відшкодовано без поповнення): одне надходження без
+   * розділення, пошкоджені — одразу в брак, у Shopify нічого не надсилається. Повтор форми з іншим вибором — повтор
+   * (записано, як у першому надсиланні).
+   */
+  damagedRestockedInShopify?: boolean;
   /** Собівартість одиниці ("12.50") — лише з finance.view; разом із costCurrency. */
   unitCost?: string | null;
   costCurrency?: string | null;
@@ -317,7 +340,7 @@ type ExistingMovement = Pick<
   | "shopifySyncState"
 >;
 
-async function findMovementsByKeys(tx: Tx, keys: readonly string[]): Promise<Map<string, ExistingMovement>> {
+async function findMovementsByKeys(tx: DbOrTx, keys: readonly string[]): Promise<Map<string, ExistingMovement>> {
   if (keys.length === 0) return new Map();
   const rows = await tx
     .select({
@@ -340,6 +363,49 @@ function operationReused(): DomainError {
   return new DomainError("warehouse.error.operationReused", 409);
 }
 
+/** Суфікс ключа руху браку для пошкоджених одиниць повернення, яке Shopify поповнив сам (manual:<uuid>:return_defect). */
+export const RETURN_DEFECT_KEY_SUFFIX = "return_defect";
+
+/**
+ * Записані рухи надходження з uuid форми — та сама операція (якісні/пошкоджені одиниці тієї самої позиції)? Приймаються
+ * обидва записи: без розділення (надходження on_hand + якісні, defective + пошкоджені; також записані до розділення) і з
+ * розділенням (надходження on_hand + якісні + пошкоджені і рух браку on_hand − пошкоджені, defective + пошкоджені).
+ */
+function isSameReceipt(
+  receipt: ExistingMovement | undefined,
+  defect: ExistingMovement | undefined,
+  stockItemId: string,
+  good: number,
+  damaged: number,
+): boolean {
+  if (!receipt || receipt.stockItemId !== stockItemId || receipt.type !== "receipt_manual") return false;
+  if (receipt.reservedDelta !== 0 || receipt.inProductionDelta !== 0) return false;
+  const split = defect ? defect.defectiveDelta : 0;
+  if (
+    defect &&
+    (defect.stockItemId !== stockItemId || defect.type !== "defect_mark" || split <= 0 || defect.onHandDelta !== -split)
+  ) {
+    return false;
+  }
+  return receipt.onHandDelta - split === good && receipt.defectiveDelta + split === damaged;
+}
+
+/**
+ * Чи вже записано надходження з цим uuid (для попереднього перегляду команд, commands.server.ts): none — ні;
+ * same — так, та сама операція (повтор нічого не змінить); other — uuid уже використано для іншої операції.
+ */
+export async function recordedReceiptState(
+  db: DbOrTx,
+  input: { operationId: string; stockItemId: string; quantity: number; defectiveQuantity?: number },
+): Promise<"none" | "same" | "other"> {
+  const key = manualKey(input.operationId);
+  const defectKey = manualKey(input.operationId, RETURN_DEFECT_KEY_SUFFIX);
+  const existing = await findMovementsByKeys(db, [key, defectKey]);
+  if (existing.size === 0) return "none";
+  const same = isSameReceipt(existing.get(key), existing.get(defectKey), input.stockItemId.toLowerCase(), input.quantity, input.defectiveQuantity ?? 0);
+  return same ? "same" : "other";
+}
+
 
 // ---------------------------------------------------------------------------
 // Операції з дельтою (надходження, брак)
@@ -360,57 +426,107 @@ interface DeltaSpec {
   costCurrency?: string | null;
   /** true — Shopify уже врахував цю зміну сам (повернення з поповненням): рух товару не надсилається (skipped). */
   shopifyAlreadyApplied?: boolean;
+  /**
+   * Лише надходження з shopifyAlreadyApplied: скільки з defectiveDelta — пошкоджені одиниці, які Shopify поповнив як
+   * доступні. Для товару вони записуються в on_hand надходження і окремим рухом браку (ключ manual:<uuid>:return_defect)
+   * переходять у брак — його −дельта on_hand надсилається в Shopify (див. вгорі файлу). Для матеріалу — без розділення.
+   */
+  restockedDefective?: number;
 }
 
 async function applyDeltaOperation(ctx: ServiceContext, spec: DeltaSpec): Promise<OperationResult> {
   requirePermission(ctx.actor, spec.permission);
   const key = manualKey(spec.operationId);
+  const defectKey = manualKey(spec.operationId, RETURN_DEFECT_KEY_SUFFIX);
   const stockItemId = assertUuid(spec.stockItemId, "stockItem");
   const orderId = spec.orderId ? assertUuid(spec.orderId, "order") : null;
   const note = cleanNote(spec.note);
+  const isReceipt = spec.type === "receipt_manual";
+  /** Записані рухи з цим uuid — та сама операція (повтор)? */
+  const sameAs = (existing: Map<string, ExistingMovement>): boolean => {
+    if (isReceipt) return isSameReceipt(existing.get(key), existing.get(defectKey), stockItemId, spec.onHandDelta, spec.defectiveDelta);
+    const m = existing.get(key);
+    return Boolean(
+      m && m.stockItemId === stockItemId && m.type === spec.type && m.onHandDelta === spec.onHandDelta && m.defectiveDelta === spec.defectiveDelta,
+    );
+  };
+  const replayOf = (existing: Map<string, ExistingMovement>, balance: BalanceState): OperationResult => {
+    const m = existing.get(key)!;
+    const defect = isReceipt ? existing.get(defectKey) : undefined;
+    return {
+      replay: true,
+      movementId: m.id,
+      stockItemId,
+      type: spec.type,
+      balance,
+      openedAlerts: [],
+      shopifySyncState: m.shopifySyncState,
+      shopifyPushQueued: false,
+      ...(defect ? { returnDefect: { movementId: defect.id, quantity: defect.defectiveDelta, shopifySyncState: defect.shopifySyncState } } : {}),
+    };
+  };
   return ctx.db.transaction(async (tx): Promise<OperationResult> => {
     const kind = await loadStockItemKind(tx, stockItemId);
     if (orderId) await assertOrderExists(tx, orderId);
     const warehouse = await getDefaultWarehouse(tx);
+    // Пошкоджені одиниці повернення, яке Shopify поповнив сам: у надходження (як у Shopify), потім — у брак окремим рухом.
+    const split =
+      isReceipt && spec.shopifyAlreadyApplied === true && kind === "product"
+        ? Math.min(Math.max(0, spec.restockedDefective ?? 0), spec.defectiveDelta)
+        : 0;
+    const onHandDelta = spec.onHandDelta + split;
+    const defectiveDelta = spec.defectiveDelta - split;
     // Перевизначення лише там, де рух узагалі міг би піти в Shopify (товар, зміна on_hand); інакше — правило ядра (none).
-    const skipPush = spec.shopifyAlreadyApplied === true && kind === "product" && spec.onHandDelta !== 0;
-    const input: MovementInput = {
-      warehouseId: warehouse.id,
-      stockItemId,
-      type: spec.type,
-      idempotencyKey: key,
-      onHandDelta: spec.onHandDelta,
-      defectiveDelta: spec.defectiveDelta,
-      reason: spec.reason,
-      note,
-      orderId,
-      unitCost: spec.unitCost ?? null,
-      costCurrency: spec.unitCost ? (spec.costCurrency ?? null) : null,
-      ...(skipPush ? { shopifySyncState: "skipped" as const } : {}),
-    };
-    const res = await applyMovements(tx, ctx.actor, [input], movementOptionsFor(ctx));
-    const balance = res.balances.find((b) => b.stockItemId === stockItemId)!;
-    const applied = res.applied[0];
-    if (!applied) {
-      const existing = (await findMovementsByKeys(tx, [key])).get(key);
-      const same =
-        existing &&
-        existing.stockItemId === stockItemId &&
-        existing.type === spec.type &&
-        existing.onHandDelta === spec.onHandDelta &&
-        existing.defectiveDelta === spec.defectiveDelta;
-      if (!same) throw operationReused();
-      return {
-        replay: true,
-        movementId: existing.id,
+    const skipPush = spec.shopifyAlreadyApplied === true && kind === "product" && onHandDelta !== 0;
+    const inputs: MovementInput[] = [
+      {
+        warehouseId: warehouse.id,
         stockItemId,
         type: spec.type,
-        balance,
-        openedAlerts: [],
-        shopifySyncState: existing.shopifySyncState,
-        shopifyPushQueued: false,
-      };
+        idempotencyKey: key,
+        onHandDelta,
+        defectiveDelta,
+        reason: spec.reason,
+        note,
+        orderId,
+        unitCost: spec.unitCost ?? null,
+        costCurrency: spec.unitCost ? (spec.costCurrency ?? null) : null,
+        ...(skipPush ? { shopifySyncState: "skipped" as const } : {}),
+      },
+    ];
+    if (split > 0) {
+      // Стан передачі — за правилом ядра: pending (передача діє, товар відкрито) → Shopify available − пошкоджені.
+      inputs.push({
+        warehouseId: warehouse.id,
+        stockItemId,
+        type: "defect_mark",
+        idempotencyKey: defectKey,
+        onHandDelta: -split,
+        defectiveDelta: split,
+        reason: spec.reason,
+        note,
+        orderId,
+      });
+      // Повтор перевіряється ДО запису, під блокуванням балансу (повтори тієї самої позиції серіалізовані): інакше
+      // повтор форми, записаної без розділення (до цієї зміни), дописав би рух браку другим надсиланням.
+      const locked = await lockBalances(tx, [{ warehouseId: warehouse.id, stockItemId }]);
+      const existing = await findMovementsByKeys(tx, [key, defectKey]);
+      if (existing.size > 0) {
+        if (!sameAs(existing)) throw operationReused();
+        return replayOf(existing, [...locked.values()][0]!);
+      }
     }
+    const res = await applyMovements(tx, ctx.actor, inputs, movementOptionsFor(ctx));
+    const balance = res.balances.find((b) => b.stockItemId === stockItemId)!;
+    if (res.applied.length === 0) {
+      const existing = await findMovementsByKeys(tx, isReceipt ? [key, defectKey] : [key]);
+      if (!sameAs(existing)) throw operationReused();
+      return replayOf(existing, balance);
+    }
+    // Частковий запис (ключ одного з рухів уже використано іншою операцією) — відкат усієї операції.
+    if (res.applied.length !== inputs.length) throw operationReused();
+    const applied = res.applied.find((a) => a.idempotencyKey === key)!;
+    const defect = res.applied.find((a) => a.idempotencyKey === defectKey);
     await writeAudit(
       tx,
       ctx.actor,
@@ -426,6 +542,7 @@ async function applyDeltaOperation(ctx: ServiceContext, spec: DeltaSpec): Promis
         withCost: Boolean(spec.unitCost),
         shopifySyncState: applied.shopifySyncState,
         ...(skipPush ? { shopifyAlreadyApplied: true } : {}),
+        ...(defect ? { returnDefect: { movementId: defect.id, quantity: split, shopifySyncState: defect.shopifySyncState } } : {}),
       },
     );
     // Останнім кроком транзакції (після цього — лише фіксація): очікування на рядок черги не тримає інших блокувань довше.
@@ -439,6 +556,7 @@ async function applyDeltaOperation(ctx: ServiceContext, spec: DeltaSpec): Promis
       openedAlerts: res.openedAlerts,
       shopifySyncState: applied.shopifySyncState,
       shopifyPushQueued: pushQueued,
+      ...(defect ? { returnDefect: { movementId: defect.id, quantity: split, shopifySyncState: defect.shopifySyncState } } : {}),
     };
   });
 }
@@ -446,7 +564,8 @@ async function applyDeltaOperation(ctx: ServiceContext, spec: DeltaSpec): Promis
 /**
  * Надходження без партії (повернення покупця, закупівля, знахідка): on_hand + якісні, defective + пошкоджені.
  * Дозвіл warehouse.receive; собівартість — лише finance.view (інакше ForbiddenError).
- * Повернення покупця за замовчуванням не надсилається в Shopify (Shopify поповнює сам) — див. restockedInShopify.
+ * Повернення покупця за замовчуванням не надсилається в Shopify (Shopify поповнює сам) — див. restockedInShopify;
+ * його пошкоджені одиниці товару — надходження + рух браку (returnDefect у результаті), див. вгорі файлу.
  */
 export async function receiveStock(ctx: ServiceContext, input: ReceiveStockInput): Promise<OperationResult> {
   requirePermission(ctx.actor, OPERATION_PERMISSIONS.receiveStock);
@@ -461,6 +580,7 @@ export async function receiveStock(ctx: ServiceContext, input: ReceiveStockInput
     if (!can(ctx.actor, "finance.view")) throw new ForbiddenError("finance.view");
     cost = normalizeUnitCost(input.unitCost, input.costCurrency);
   }
+  const restocked = isShopifyRestockReason(reason) && input.restockedInShopify !== false;
   return applyDeltaOperation(ctx, {
     permission: OPERATION_PERMISSIONS.receiveStock,
     audit: "inventory.received",
@@ -474,7 +594,10 @@ export async function receiveStock(ctx: ServiceContext, input: ReceiveStockInput
     orderId: input.orderId,
     unitCost: cost?.unitCost ?? null,
     costCurrency: cost?.costCurrency ?? null,
-    shopifyAlreadyApplied: isShopifyRestockReason(reason) && input.restockedInShopify !== false,
+    shopifyAlreadyApplied: restocked,
+    // Shopify поповнив і пошкоджені одиниці: для товару — надходження + окремий рух браку (див. вгорі файлу); якщо
+    // лише якісні (damagedRestockedInShopify: false) — без розділення, у Shopify пошкоджених і не додавали.
+    restockedDefective: restocked && input.damagedRestockedInShopify !== false ? damaged : 0,
   });
 }
 

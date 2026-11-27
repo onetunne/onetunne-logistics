@@ -175,5 +175,8 @@ describe("settings → warehouse", () => {
     expect(html).toContain(uk["settings.warehouse.title"]!);
     expect(html).toContain('name="shopifyPush"');
     expect(html).toContain('name="allowNegativeOnHand"');
+    // Демо: Shopify-опції не діють — сторінка це каже (e2e-5; докладно — tests/stage5/demo-push-settings.test.ts).
+    expect(html).toContain(uk["settings.warehouse.demoBanner"]!.replace(/'/g, "&#x27;"));
+    expect(html).not.toContain(uk["settings.warehouse.pushOnBanner"]!);
   });
 });

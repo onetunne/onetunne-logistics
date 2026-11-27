@@ -71,6 +71,12 @@ export const MAX_LABEL_PNG_PIXELS = 25_000_000;
 export const LABEL_BATCH_DEADLINE_MS = 45_000;
 /** Список передачі перевізнику — посилок за раз. */
 export const MAX_HANDOVER_ORDERS = 200;
+/** Зведений лист комплектації (pick list) — замовлень за раз. */
+export const MAX_PICK_LIST_ORDERS = 100;
+
+/** Чому вибране замовлення не включено до листа комплектації. */
+export const PICK_LIST_SKIP_REASONS = ["packed", "not_in_queue", "fulfilled_in_shopify"] as const;
+export type PickListSkipReason = (typeof PICK_LIST_SKIP_REASONS)[number];
 
 /**
  * Типи подій пакування в історії замовлення (shipment_events активної накладної; без неї — останньої).

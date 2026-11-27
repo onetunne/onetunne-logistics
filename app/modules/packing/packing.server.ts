@@ -10,9 +10,17 @@
  *   замовлення): паралельні «Почати пакування» → одне пакування.
  * - Порядок блокувань: замовлення (FOR NO KEY UPDATE) → пакування (FOR NO KEY UPDATE) → баланси (списання
  *   матеріалів у consumeMaterialsForPacking). Ніколи навпаки.
- * - Матеріали списуються ЛИШЕ при підтвердженні «Запаковано», ідемпотентно (ключ material:<packing>:<material>;
- *   повторне підтвердження того самого пакування після розпакування нічого не списує вдруге). Розпакування
- *   матеріалів автоматично НЕ повертає (фізично їх могли використати) — коригування вручну на сторінці матеріалів.
+ * - Матеріали списуються ЛИШЕ при підтвердженні «Запаковано», ідемпотентно: кожен матеріал — не більше одного разу
+ *   на пакування (ключ material:<packing>:<material>). Повторне «Запаковано» після розпакування не списує вдруге вже
+ *   списане, але списує НОВУ коробку, якщо посилку переклали в іншу (consumption.server.ts). Розпакування матеріалів
+ *   автоматично НЕ повертає (фізично їх могли використати) — коригування вручну на сторінці матеріалів.
+ * - Списується те, що бачив пакувальник: сторінка надсилає відбиток плану матеріалів (materialsPlanKey); якщо план
+ *   на сервері інший (шаблон комплектації змінили, поки екран був відкритий) — packing.error.materialsChanged і
+ *   повторне підтвердження зі свіжим переліком.
+ * - Дозволи: packing.perform — черга, комплектація, «Запаковано», а також ФІЗИЧНІ параметри посилки (коробка, вага,
+ *   габарити: orders.parcel_* з історією order_changes і журналом) — їх вимірює пакувальник, вони не містять даних
+ *   покупця й не змінюють позицій/цін. Решта даних замовлення (пріоритет тощо) — orders.edit. Дані отримувача (ім'я,
+ *   місто) на екрані пакування — лише з orders.view (view.server.ts).
  * - Створення накладної ≠ пакування ≠ відправлення: «Передано перевізнику» тут не встановлюється.
  * - Журнал (audit_log) — лише ідентифікатори й коди; вільний текст (причина рішення власника) — лише в історії
  *   замовлення (shipment_events.message, з маскуванням телефонів/email).
@@ -39,7 +47,7 @@ import { redact } from "~/lib/logger.server";
 import { writeAudit } from "~/modules/audit/audit.server";
 import { loadLineItems, loadOrderRow, type LineItemWithVariant, type OrderRow, type ShipmentRow } from "~/modules/orders/repository.server";
 import { BOX_KINDS } from "~/modules/packaging/box-selection";
-import { consumeMaterialsForPacking, type ConsumeMaterialsResult } from "~/modules/packaging/consumption.server";
+import { consumeMaterialsForPacking, materialsPlanKey, planPackingMaterials, type ConsumeMaterialsResult } from "~/modules/packaging/consumption.server";
 import { selectBoxForOrder } from "~/modules/packaging/parcel.server";
 import { ACTIVE_SHIPMENT_STATUSES, findActiveShipment } from "~/modules/shipments/waybill.server";
 import { enqueueOrderResync, shopifyLinesPending, type ResyncQueueResult } from "~/modules/shopify-sync/pending-lines.server";
@@ -155,7 +163,11 @@ async function loadBox(db: DbOrTx, materialId: string): Promise<typeof packaging
  * з типовою упаковкою, а підібрана за вагою коробка лише рекомендація на екрані пакування (★). Інакше її
  * габарити одразу давали б хибне «Посилка відрізняється від накладної» і списання коробки, якої ніхто не вибирав.
  */
-async function defaultBoxFor(tx: DbOrTx, order: OrderRow, shipment: ShipmentRow | null): Promise<string | null> {
+export async function defaultBoxFor(
+  tx: DbOrTx,
+  order: Pick<OrderRow, "id" | "parcelBoxMaterialId">,
+  shipment: Pick<ShipmentRow, "requestSnapshot"> | null,
+): Promise<string | null> {
   const snapshot = shipment?.requestSnapshot && typeof shipment.requestSnapshot === "object" ? (shipment.requestSnapshot as Record<string, unknown>) : null;
   const fromWaybill = typeof snapshot?.parcelBoxMaterialId === "string" ? snapshot.parcelBoxMaterialId : null;
   for (const id of [order.parcelBoxMaterialId, fromWaybill]) {
@@ -351,7 +363,19 @@ export interface ScanLineInfo {
 export type ScanResult =
   | { kind: "matched"; line: ScanLineInfo; progress: ChecklistProgress; version: number }
   | { kind: "over_quantity"; line: ScanLineInfo }
-  | { kind: "ambiguous"; code: string }
+  /**
+   * Код однозначно не визначає товар: scope "order" — кілька різних позицій замовлення; "catalog" — у каталозі
+   * кілька варіантів із цим штрихкодом/SKU (зокрема поза замовленням: напр. скопійований штрихкод іншого кольору).
+   * Чекліст не змінюється — пакувальник звіряє модель і колір і позначає товар вручну (+1 з причиною).
+   */
+  | {
+      kind: "ambiguous";
+      code: string;
+      scope: "order" | "catalog";
+      /** Різних варіантів із цим кодом (у переліку variants — не більше AMBIGUOUS_VARIANTS_SHOWN). */
+      count: number;
+      variants: Array<{ productTitle: string; variantTitle: string | null }>;
+    }
   /** Товар із каталогу, якого немає в цьому замовленні. */
   | { kind: "wrong_item"; code: string; productTitle: string; variantTitle: string | null }
   /** Код не знайдено ні в замовленні, ні в каталозі. */
@@ -378,23 +402,55 @@ function assertPackingOpen(order: OrderRow, packing: PackingRow | null): asserts
   }
 }
 
+/** Умова «штрихкод варіанта = код» з тією самою нормалізацією, що й codeKey (цифровий — без провідних нулів). */
+function barcodeEquals(key: string) {
+  return /^\d+$/.test(key)
+    ? sql`ltrim(upper(replace(coalesce(${productVariants.barcode}, ''), ' ', '')), '0') = ${key}`
+    : sql`upper(replace(coalesce(${productVariants.barcode}, ''), ' ', '')) = ${key}`;
+}
+function skuEquals(key: string) {
+  return sql`upper(replace(coalesce(${productVariants.sku}, ''), ' ', '')) = ${key}`;
+}
+
 async function findCatalogVariant(db: DbOrTx, code: string): Promise<{ productTitle: string; variantTitle: string | null } | null> {
   const key = codeKey(code);
   if (!key) return null;
-  const digits = /^\d+$/.test(key);
   const [row] = await db
     .select({ productTitle: products.title, variantTitle: productVariants.title })
     .from(productVariants)
     .innerJoin(products, eq(products.id, productVariants.productId))
-    .where(
-      digits
-        ? sql`ltrim(upper(replace(coalesce(${productVariants.barcode}, ''), ' ', '')), '0') = ${key}
-            or upper(replace(coalesce(${productVariants.sku}, ''), ' ', '')) = ${key}`
-        : sql`upper(replace(coalesce(${productVariants.barcode}, ''), ' ', '')) = ${key}
-            or upper(replace(coalesce(${productVariants.sku}, ''), ' ', '')) = ${key}`,
-    )
+    .where(sql`(${barcodeEquals(key)}) or (${skuEquals(key)})`)
     .limit(1);
   return row ?? null;
+}
+
+/** Скільки варіантів каталогу показати в повідомленні про неоднозначний код. */
+const AMBIGUOUS_VARIANTS_SHOWN = 5;
+
+/**
+ * Перевірка коду на рівні КАТАЛОГУ для збігу з позицією замовлення: штрихкод — чи немає іншого варіанта з тим самим
+ * штрихкодом; SKU — чи немає іншого варіанта з тим самим SKU або з таким ШТРИХКОДОМ (код — штрихкод іншого товару).
+ * Повертає варіанти (разом із варіантом позиції), якщо їх більше одного; інакше null.
+ */
+async function catalogAmbiguity(
+  db: DbOrTx,
+  code: string,
+  by: "barcode" | "sku",
+  lineVariantId: string | null,
+): Promise<{ count: number; variants: Array<{ productTitle: string; variantTitle: string | null }> } | null> {
+  const key = codeKey(code);
+  if (!key) return null;
+  const byCode = by === "barcode" ? barcodeEquals(key) : sql`(${skuEquals(key)}) or (${barcodeEquals(key)})`;
+  // Варіант самої позиції — завжди в переліку (SKU позиції може бути з рядка замовлення, а не з варіанта).
+  const rows = await db
+    .select({ id: productVariants.id, productTitle: products.title, variantTitle: productVariants.title })
+    .from(productVariants)
+    .innerJoin(products, eq(products.id, productVariants.productId))
+    .where(lineVariantId ? sql`(${byCode}) or ${productVariants.id} = ${lineVariantId}` : byCode)
+    .orderBy(products.title, productVariants.title, productVariants.id)
+    .limit(50);
+  if (rows.length <= 1) return null;
+  return { count: rows.length, variants: rows.slice(0, AMBIGUOUS_VARIANTS_SHOWN).map((r) => ({ productTitle: r.productTitle, variantTitle: r.variantTitle })) };
 }
 
 /** Сканування штрихкоду/SKU: +1 одиниця відповідної позиції (або зрозуміла помилка, чекліст не змінюється). */
@@ -411,6 +467,10 @@ export async function recordScan(ctx: ServiceContext, orderId: string, rawCode: 
     const { match, checklist } = applyScan(lines, packing.checklist ?? {}, code);
     switch (match.kind) {
       case "matched": {
+        // Штрихкод/SKU, спільний з іншим варіантом каталогу (напр. інший колір поза замовленням), — не «вдалий збіг»:
+        // пакувальник міг узяти не той товар. Чекліст не змінюється — звірити модель/колір і позначити вручну.
+        const shared = await catalogAmbiguity(tx, code, match.by, lines.find((l) => l.id === match.lineId)?.variantId ?? null);
+        if (shared) return { kind: "ambiguous", code, scope: "catalog", ...shared };
         const [row] = await tx
           .update(orderPacking)
           .set({ checklist, version: sql`${orderPacking.version} + 1`, updatedAt: ctx.now() })
@@ -426,7 +486,16 @@ export async function recordScan(ctx: ServiceContext, orderId: string, rawCode: 
       case "over_quantity":
         return { kind: "over_quantity", line: lineInfo(items, match.lineId, match.packed, match.required) };
       case "ambiguous":
-        return { kind: "ambiguous", code };
+        return {
+          kind: "ambiguous",
+          code,
+          scope: "order",
+          count: new Set(match.lineIds.map((lineId) => lines.find((l) => l.id === lineId)?.variantId ?? lineId)).size,
+          variants: match.lineIds.map((lineId) => {
+            const info = lineInfo(items, lineId, 0, 0);
+            return { productTitle: info.title, variantTitle: info.variantTitle };
+          }),
+        };
       case "empty":
         return { kind: "empty" };
       case "not_found": {
@@ -538,6 +607,61 @@ const PARCEL_FIELDS = [
   ["heightMm", "parcelHeightMm"],
 ] as const;
 
+type ParsedParcelInput = z.infer<typeof parcelInputSchema>;
+
+/**
+ * Ручне коригування посилки на рівні замовлення (orders.parcel_*: коробка, вага, габарити) з історією order_changes
+ * (поля parcel.*, джерело manual) і журналом order.parcel_updated. Викликати під блокуванням рядка замовлення.
+ * currentBoxId — уже вибрана коробка (її можна лишити навіть неактивною); нова — лише активна box | mailer.
+ */
+async function applyOrderParcel(
+  tx: Tx,
+  ctx: ServiceContext,
+  order: OrderRow,
+  v: ParsedParcelInput,
+  meta: { packingId: string | null; currentBoxId: string | null; stage: "packing" | "before_waybill" },
+): Promise<{ changes: string[]; patch: Partial<OrderRow>; version: number }> {
+  let boxCode: string | null = null;
+  if (v.boxMaterialId) {
+    const box = await loadBox(tx, v.boxMaterialId);
+    // Нова коробка — лише активна; уже вибрана (навіть неактивна) — без змін.
+    if (!box || (!box.active && v.boxMaterialId !== meta.currentBoxId)) throw new DomainError("packing.error.invalidBox", 400);
+    boxCode = box.code;
+  }
+  const changes: Array<{ field: string; oldValue: string | null; newValue: string | null }> = [];
+  const patch: Partial<OrderRow> = {};
+  for (const [key, column] of PARCEL_FIELDS) {
+    const next = v[key];
+    if (order[column] !== next) {
+      changes.push({ field: `parcel.${key}`, oldValue: order[column] === null ? null : String(order[column]), newValue: next === null ? null : String(next) });
+      patch[column] = next;
+    }
+  }
+  if (order.parcelBoxMaterialId !== v.boxMaterialId) {
+    const oldCode = order.parcelBoxMaterialId ? ((await loadBox(tx, order.parcelBoxMaterialId))?.code ?? null) : null;
+    changes.push({ field: "parcel.box", oldValue: oldCode, newValue: boxCode });
+    patch.parcelBoxMaterialId = v.boxMaterialId;
+  }
+  let version = order.version;
+  if (changes.length > 0) {
+    const [row] = await tx
+      .update(orders)
+      .set({ ...patch, version: sql`${orders.version} + 1`, updatedAt: ctx.now() })
+      .where(eq(orders.id, order.id))
+      .returning({ version: orders.version });
+    version = row!.version;
+    await tx.insert(orderChanges).values(
+      changes.map((c) => ({ orderId: order.id, field: c.field, oldValue: c.oldValue, newValue: c.newValue, source: "manual" as const, reason: null, actorId: ctx.actor.id })),
+    );
+    await writeAudit(tx, ctx.actor, "order.parcel_updated", { type: "order", id: order.id }, {
+      packingId: meta.packingId,
+      fields: changes.map((c) => c.field),
+      stage: meta.stage,
+    });
+  }
+  return { changes: changes.map((c) => c.field), patch, version };
+}
+
 /**
  * Зберігає коробку, вагу й габарити посилки: у пакуванні й як ручне коригування замовлення (orders.parcel_*),
  * яке використовує створення/переоформлення накладної. Історія — order_changes (поля parcel.*).
@@ -554,38 +678,8 @@ export async function savePackingParcel(ctx: ServiceContext, orderId: string, in
     if (packing.version !== v.expectedVersion) throw new ConflictError();
     const packed = packing.status === "packed";
     if (packed && v.boxMaterialId !== packing.boxMaterialId) throw new DomainError("packing.error.boxLocked", 409);
-    let boxCode: string | null = null;
-    if (v.boxMaterialId) {
-      const box = await loadBox(tx, v.boxMaterialId);
-      // Нова коробка — лише активна; уже вибрана (навіть неактивна) — без змін.
-      if (!box || (!box.active && v.boxMaterialId !== packing.boxMaterialId)) throw new DomainError("packing.error.invalidBox", 400);
-      boxCode = box.code;
-    }
-    const changes: Array<{ field: string; oldValue: string | null; newValue: string | null }> = [];
-    const patch: Partial<OrderRow> = {};
-    for (const [key, column] of PARCEL_FIELDS) {
-      const next = v[key];
-      if (order[column] !== next) {
-        changes.push({ field: `parcel.${key}`, oldValue: order[column] === null ? null : String(order[column]), newValue: next === null ? null : String(next) });
-        patch[column] = next;
-      }
-    }
-    if (order.parcelBoxMaterialId !== v.boxMaterialId) {
-      const oldCode = order.parcelBoxMaterialId ? ((await loadBox(tx, order.parcelBoxMaterialId))?.code ?? null) : null;
-      changes.push({ field: "parcel.box", oldValue: oldCode, newValue: boxCode });
-      patch.parcelBoxMaterialId = v.boxMaterialId;
-    }
+    const { changes, patch } = await applyOrderParcel(tx, ctx, order, v, { packingId: packing.id, currentBoxId: packing.boxMaterialId, stage: "packing" });
     const now = ctx.now();
-    if (changes.length > 0) {
-      await tx
-        .update(orders)
-        .set({ ...patch, version: sql`${orders.version} + 1`, updatedAt: now })
-        .where(eq(orders.id, id));
-      await tx.insert(orderChanges).values(
-        changes.map((c) => ({ orderId: id, field: c.field, oldValue: c.oldValue, newValue: c.newValue, source: "manual" as const, reason: null, actorId: ctx.actor.id })),
-      );
-      await writeAudit(tx, ctx.actor, "order.parcel_updated", { type: "order", id }, { packingId: packing.id, fields: changes.map((c) => c.field) });
-    }
     const [updated] = await tx
       .update(orderPacking)
       .set({
@@ -601,7 +695,40 @@ export async function savePackingParcel(ctx: ServiceContext, orderId: string, in
       .returning();
     const fresh = { ...order, ...patch };
     const mismatch = await parcelMismatchFor(tx, fresh, updated!, await findActiveShipment(tx, id));
-    return { changed: changes.map((c) => c.field), version: updated!.version, mismatch };
+    return { changed: changes, version: updated!.version, mismatch };
+  });
+}
+
+/** Статуси, у яких посилку можна виміряти й зважити ДО створення накладної (накладної ще немає). */
+export const PRE_WAYBILL_PARCEL_STATUSES = ["paid", "awaiting_review", "needs_correction"] as const satisfies readonly OrderStatus[];
+
+export interface SaveOrderParcelResult {
+  changed: string[];
+  /** Нова версія замовлення (orders.version) — для наступного збереження форми. */
+  version: number;
+}
+
+/**
+ * Коробка, вага й габарити посилки ДО створення накладної («спершу запакувати й зважити, потім накладна»): ручне
+ * коригування замовлення (orders.parcel_*) з історією; його бере наступна накладна (planParcelBox / buildShipmentRequest;
+ * застаріле після зміни позицій скидає resetStaleParcelOverride). Пакування ще немає, тож expectedVersion — версія
+ * замовлення (orders.version). З активною накладною або розпочатим пакуванням — savePackingParcel (там є порівняння з
+ * накладною). Дозвіл — packing.perform (фізичні параметри посилки, див. заголовок файлу).
+ */
+export async function saveOrderParcel(ctx: ServiceContext, orderId: string, input: ParcelInput): Promise<SaveOrderParcelResult> {
+  requirePermission(ctx.actor, "packing.perform");
+  const id = normalizeId(orderId, "order");
+  const v = parcelInputSchema.parse(input);
+  return ctx.db.transaction(async (tx) => {
+    const { order, packing } = await lockForPacking(tx, id, { withShipment: true });
+    if (!(PRE_WAYBILL_PARCEL_STATUSES as readonly OrderStatus[]).includes(order.status)) {
+      throw new DomainError("packing.error.status", 409, { status: order.status });
+    }
+    if (packing) throw new DomainError("packing.error.parcelUsePacking", 409);
+    if (await findActiveShipment(tx, id)) throw new DomainError("packing.error.parcelHasWaybill", 409);
+    if (order.version !== v.expectedVersion) throw new ConflictError();
+    const r = await applyOrderParcel(tx, ctx, order, v, { packingId: null, currentBoxId: order.parcelBoxMaterialId, stage: "before_waybill" });
+    return { changed: r.changes, version: r.version };
   });
 }
 
@@ -612,6 +739,12 @@ export async function savePackingParcel(ctx: ServiceContext, orderId: string, in
 export interface ConfirmPackedOptions {
   /** Рішення власника: підтвердити без повного комплекту (причина — у історії замовлення). */
   override?: { reason: string };
+  /**
+   * Відбиток плану матеріалів, який бачив пакувальник (materialsPlanKey з екрана пакування). Інший план на сервері →
+   * packing.error.materialsChanged (нічого не змінено): сторінка оновлює перелік, пакувальник підтверджує ще раз.
+   * Не передано (внутрішні виклики, тести) — без перевірки.
+   */
+  expectedMaterials?: string | null;
 }
 
 export type ConfirmPackedResult =
@@ -664,9 +797,18 @@ export async function confirmPacked(
     const items = await loadLineItems(tx, id);
     const lines = toChecklistLines(items);
     const progress = checklistProgress(lines, packing.checklist ?? {});
-    const override = !progress.complete || linesPending;
+    // Нічого перевіряти (усі позиції повернено/видалено або жодна не є товаром каталогу) — не «повний комплект»:
+    // порожню посилку підтверджує лише власник із причиною.
+    const nothingToPack = progress.requiredUnits === 0;
+    const override = !progress.complete || nothingToPack || linesPending;
+    if (nothingToPack && !overrideReason) throw new DomainError("packing.error.nothingToPack", 409);
     if (!progress.complete && !overrideReason) {
       throw new DomainError("packing.error.checklistIncomplete", 409, { packed: progress.packedUnits, required: progress.requiredUnits, over: progress.overUnits });
+    }
+    // Списується саме той перелік, який бачив пакувальник (шаблони комплектації могли змінитися, поки екран відкритий).
+    if (opts.expectedMaterials !== undefined && opts.expectedMaterials !== null) {
+      const plan = await planPackingMaterials(tx, id, packing.boxMaterialId);
+      if (materialsPlanKey(plan) !== opts.expectedMaterials) throw new DomainError("packing.error.materialsChanged", 409);
     }
 
     // Матеріали: коробка + комплектація. Фізичне пакування вже відбулося — нестача не блокує (allowShortage),
@@ -694,7 +836,13 @@ export async function confirmPacked(
       tx,
       id,
       type,
-      { packingId: packing.id, packed: progress.packedUnits, required: progress.requiredUnits, ...(linesPending ? { shopifyLinesPending: true } : {}) },
+      {
+        packingId: packing.id,
+        packed: progress.packedUnits,
+        required: progress.requiredUnits,
+        ...(linesPending ? { shopifyLinesPending: true } : {}),
+        ...(nothingToPack ? { nothingToPack: true } : {}),
+      },
       message,
     );
     await writeAudit(tx, ctx.actor, override ? "packing.confirmed_override" : "packing.confirmed", { type: "order", id }, {
@@ -705,6 +853,7 @@ export async function confirmPacked(
       materialsAlreadyConsumed: consumed.alreadyConsumed,
       materialShortage: consumed.totalShortage,
       ...(linesPending ? { shopifyLinesPendingAcknowledged: true } : {}),
+      ...(nothingToPack ? { nothingToPack: true } : {}),
     });
     return {
       kind: "packed",

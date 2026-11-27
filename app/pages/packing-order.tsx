@@ -3,6 +3,7 @@ import {
   Form,
   useActionData,
   useFetcher,
+  useFetchers,
   useLoaderData,
   useNavigation,
   type ActionFunctionArgs,
@@ -35,6 +36,7 @@ import {
   confirmCancelledPackingReturned,
   confirmPacked,
   recordScan,
+  saveOrderParcel,
   savePackingParcel,
   setOrderPriority,
   startPacking,
@@ -42,6 +44,8 @@ import {
   type ConfirmPackedResult,
   type ScanResult,
 } from "~/modules/packing/packing.server";
+import { CameraScanGate, type CameraFrameResult } from "~/modules/packing/camera-gate";
+import { INITIAL_SCAN_FEEDBACK, scanFeedbackReducer } from "~/modules/packing/scan-feedback";
 import {
   NO_BOX,
   initialParcelForm,
@@ -80,10 +84,13 @@ import {
 /**
  * Екран пакування замовлення (picking/:orderId), спершу для телефона:
  * позиції з фото (модель/колір/SKU/кількість) → чекліст через сканування (сканер-клавіатура, ручне введення або
- * камера, якщо браузер підтримує BarcodeDetector) і ручні ± з причиною → коробка (рекомендована / вибір) і
- * параметри посилки (вага/габарити — ручне коригування замовлення) → «Запаковано» (лише з повним комплектом;
- * власник — з причиною) → за потреби «Розпакувати». Розбіжність посилки з накладною — попередження й шлях
- * до «Переоформити» на сторінці замовлення. Дозволи — сервер (packing.perform; пріоритет — orders.edit).
+ * камера, якщо браузер підтримує BarcodeDetector: одна одиниця = одне свідоме зчитування, camera-gate.ts) і ручні ±
+ * з причиною (−1 — і для зайвих одиниць) → коробка (★ узгоджена з накладною / вибір) і параметри посилки
+ * (вага/габарити — ручне коригування замовлення; до накладної — теж, target=order) → «Запаковано» (лише з повним
+ * комплектом і непорожнім чеклістом; власник — з причиною; списується перелік матеріалів, який бачив пакувальник —
+ * materialsKey) → за потреби «Розпакувати». Розбіжність посилки з накладною — попередження й шлях до «Переоформити»
+ * на сторінці замовлення. Дозволи — сервер (packing.perform; пріоритет — orders.edit; ім'я й місто отримувача —
+ * лише з orders.view).
  */
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -135,7 +142,15 @@ function scanResult(r: ScanResult): PackingActionResult {
     case "over_quantity":
       return { ok: false, error: "packing.scan.overQuantity", params: { item: itemName(r.line), required: r.line.required }, feedback: "scan", sound: "error" };
     case "ambiguous":
-      return { ok: false, error: "packing.scan.ambiguous", params: { code: r.code }, feedback: "scan", sound: "error" };
+      return r.scope === "catalog"
+        ? {
+            ok: false,
+            error: "packing.scan.ambiguousCatalog",
+            params: { code: r.code, count: r.count, list: r.variants.map((v) => itemName({ title: v.productTitle, variantTitle: v.variantTitle })).join("; ") },
+            feedback: "scan",
+            sound: "error",
+          }
+        : { ok: false, error: "packing.scan.ambiguous", params: { code: r.code }, feedback: "scan", sound: "error" };
     case "wrong_item":
       return { ok: false, error: "packing.scan.wrongItem", params: { item: itemName({ title: r.productTitle, variantTitle: r.variantTitle }), code: r.code }, feedback: "scan", sound: "error" };
     case "unknown_code":
@@ -149,7 +164,9 @@ function confirmResult(r: ConfirmPackedResult): PackingActionResult {
   if (r.kind === "already_packed") return { ok: true, message: "packing.confirm.already", tone: "info" };
   const extra: string[] = [];
   const consumed = r.materials.lines.reduce((s, l) => s + l.consumed, 0);
+  const repeated = r.materials.lines.some((l) => l.consumed === 0 && l.shortage === 0) && consumed > 0;
   if (r.materials.alreadyConsumed) extra.push("packing.confirm.materialsAlready");
+  else if (repeated) extra.push("packing.confirm.materialsNew");
   else if (consumed > 0) extra.push("packing.confirm.materialsConsumed");
   if (r.materials.totalShortage > 0) extra.push("packing.confirm.materialsShortage");
   if (r.mismatch) extra.push("packing.confirm.mismatch");
@@ -209,11 +226,18 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<P
           weightPrefill: formString(form, "weightPrefill"),
           dimsPrefill: formString(form, "dimsPrefill"),
         });
-        const r = await savePackingParcel(ctx, orderId, {
-          expectedVersion: formString(form, "version"),
-          boxMaterialId: formString(form, "boxMaterialId"),
-          ...values,
-        });
+        const input = { expectedVersion: formString(form, "version"), boxMaterialId: formString(form, "boxMaterialId"), ...values };
+        if (formString(form, "target") === "order") {
+          // До накладної (пакування ще немає): ручне коригування замовлення, яке використає нова накладна.
+          const r = await saveOrderParcel(ctx, orderId, input);
+          return {
+            ok: true,
+            message: r.changed.length > 0 ? "packing.parcel.savedOrder" : "packing.parcel.noChanges",
+            params: { count: r.changed.length },
+            tone: r.changed.length > 0 ? "success" : "info",
+          };
+        }
+        const r = await savePackingParcel(ctx, orderId, input);
         return {
           ok: true,
           message: r.changed.length > 0 ? "packing.parcel.saved" : "packing.parcel.noChanges",
@@ -224,7 +248,9 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<P
       }
       case "confirm": {
         const override = form.has("override") ? { override: { reason: formString(form, "overrideReason").slice(0, MAX_OVERRIDE_REASON_LENGTH) } } : {};
-        return confirmResult(await confirmPacked(ctx, orderId, Number(formString(form, "version")), override));
+        // Відбиток переліку матеріалів, який бачив пакувальник: інший план на сервері → повторне підтвердження.
+        const expectedMaterials = form.has("materialsKey") ? formString(form, "materialsKey") : null;
+        return confirmResult(await confirmPacked(ctx, orderId, Number(formString(form, "version")), { ...override, expectedMaterials }));
       }
       case "unpack": {
         const r = await unpackOrder(ctx, orderId, { resetChecklist: form.has("resetChecklist") });
@@ -384,7 +410,16 @@ function StatusCard({ data }: { data: Data }) {
     {
       key: "recipient",
       label: t("packing.screen.recipient"),
-      value: [order.recipientName, order.city, data.countryLabel].filter(Boolean).join(", ") || "—",
+      value: data.customerDataHidden ? (
+        <Stack as="span" gap={0}>
+          <span>{data.countryLabel ?? "—"}</span>
+          <Text as="span" variant="caption" tone="subdued">
+            {t("packing.screen.customerHidden")}
+          </Text>
+        </Stack>
+      ) : (
+        [order.recipientName, order.city, data.countryLabel].filter(Boolean).join(", ") || "—"
+      ),
     },
     {
       key: "waybill",
@@ -481,7 +516,25 @@ function ScanCard() {
   const inFlight = useRef(false);
   const [pending, setPending] = useState(0);
   const busy = fetcher.state !== "idle";
-  const result = fetcher.data?.feedback === "scan" ? fetcher.data : null;
+  // Результат сканування не «висить» після інших дій і з часом зникає (scan-feedback.ts).
+  const [feedback, dispatchFeedback] = useReducer(scanFeedbackReducer, INITIAL_SCAN_FEEDBACK);
+  const navigation = useNavigation();
+  const fetchers = useFetchers();
+  const otherActivity =
+    (navigation.state === "submitting" && navigation.formData?.get("intent") !== "scan") ||
+    fetchers.some((f) => f.state === "submitting" && f.formData?.get("intent") !== "scan");
+  useEffect(() => {
+    if (fetcher.data?.feedback === "scan") dispatchFeedback({ type: "result", ok: fetcher.data.ok, at: Date.now() });
+  }, [fetcher.data]);
+  useEffect(() => {
+    if (otherActivity) dispatchFeedback({ type: "otherAction", at: Date.now() });
+  }, [otherActivity]);
+  useEffect(() => {
+    if (!feedback.visible) return;
+    const timer = window.setInterval(() => dispatchFeedback({ type: "tick", at: Date.now() }), 1000);
+    return () => window.clearInterval(timer);
+  }, [feedback.visible, feedback.seq]);
+  const result = feedback.visible && fetcher.data?.feedback === "scan" ? fetcher.data : null;
 
   // Автофокус лише на пристроях із мишею/клавіатурою (на телефоні не відкриваємо клавіатуру без потреби).
   useEffect(() => {
@@ -590,9 +643,13 @@ function CameraScanner({ onCode }: { onCode: (code: string) => void }) {
   const [supported, setSupported] = useState<boolean | null>(null);
   const [active, setActive] = useState(false);
   const [error, setError] = useState(false);
+  /** Підказка під відео: той самий код у кадрі / кілька кодів (оновлюється лише при зміні). */
+  const [hint, setHint] = useState<"held" | "multiple" | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const onCodeRef = useRef(onCode);
   onCodeRef.current = onCode;
+  // Одна одиниця = одне свідоме зчитування (camera-gate.ts): код у кадрі не зараховується повторно.
+  const gateRef = useRef(new CameraScanGate());
 
   useEffect(() => {
     setSupported(barcodeDetectorClass() !== null);
@@ -605,7 +662,12 @@ function CameraScanner({ onCode }: { onCode: (code: string) => void }) {
     let stopped = false;
     let stream: MediaStream | null = null;
     let timer: number | undefined;
-    let last = { value: "", at: 0 };
+    const gate = gateRef.current;
+    gate.reset();
+    const showHint = (r: CameraFrameResult) => {
+      const next = r.kind === "held" ? "held" : r.kind === "multiple" ? "multiple" : r.kind === "emit" || r.kind === "none" ? null : undefined;
+      if (next !== undefined) setHint((cur) => (cur === next ? cur : next));
+    };
     void (async () => {
       try {
         const formats = await Detector.getSupportedFormats?.().catch(() => undefined);
@@ -620,13 +682,12 @@ function CameraScanner({ onCode }: { onCode: (code: string) => void }) {
           if (stopped) return;
           try {
             const codes = await detector.detect(video);
-            const value = codes[0]?.rawValue?.trim();
-            const now = Date.now();
-            // Той самий код — не частіше ніж раз на 2 с (щоб одна одиниця не зарахувалася кілька разів).
-            if (value && (value !== last.value || now - last.at > 2000)) {
-              last = { value, at: now };
-              onCodeRef.current(value);
-            }
+            const r = gate.frame(
+              codes.map((c) => c.rawValue),
+              Date.now(),
+            );
+            if (r.kind === "emit") onCodeRef.current(r.code);
+            showHint(r);
           } catch {
             // кадр не розпізнано — пробуємо наступний
           }
@@ -644,6 +705,7 @@ function CameraScanner({ onCode }: { onCode: (code: string) => void }) {
       stopped = true;
       if (timer) window.clearTimeout(timer);
       stream?.getTracks().forEach((track) => track.stop());
+      setHint(null);
     };
   }, [active]);
 
@@ -668,13 +730,36 @@ function CameraScanner({ onCode }: { onCode: (code: string) => void }) {
         </Button>
       </Stack>
       {active ? (
-        <video
-          ref={videoRef}
-          muted
-          playsInline
-          aria-label={t("packing.camera.videoLabel")}
-          style={{ width: "100%", maxWidth: "28rem", borderRadius: "8px", background: "#000" }}
-        />
+        <>
+          <video
+            ref={videoRef}
+            muted
+            playsInline
+            aria-label={t("packing.camera.videoLabel")}
+            style={{ width: "100%", maxWidth: "28rem", borderRadius: "8px", background: "#000" }}
+          />
+          <Text variant="caption" tone="subdued">
+            {t("packing.camera.help")}
+          </Text>
+          <div aria-live="polite">
+            {hint === "held" ? (
+              <Stack direction="horizontal" gap={2} align="center" wrap>
+                <Text variant="body-sm">{t("packing.camera.held")}</Text>
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    gateRef.current.rearm();
+                    setHint(null);
+                  }}
+                >
+                  {t("packing.camera.next")}
+                </Button>
+              </Stack>
+            ) : hint === "multiple" ? (
+              <Text variant="body-sm">{t("packing.camera.multiple")}</Text>
+            ) : null}
+          </div>
+        </>
       ) : null}
       {error ? (
         <Text variant="caption" tone="critical">
@@ -697,7 +782,7 @@ function ChecklistCard({ data, open }: { data: Data; open: boolean }) {
       description={t("packing.checklist.summary", { packed: progress.packedUnits, required: progress.requiredUnits, lines: progress.totalLines })}
     >
       <Stack gap={3}>
-        {open && data.lines.length > 0 ? (
+        {open && (data.lines.length > 0 || data.staleLines.length > 0) ? (
           <Select
             id="packing-adjust-reason"
             name="reason"
@@ -716,7 +801,17 @@ function ChecklistCard({ data, open }: { data: Data; open: boolean }) {
           ))}
         </Stack>
         {data.staleUnits > 0 ? (
-          <Banner tone="warning">{t("packing.checklist.stale", { count: data.staleUnits })}</Banner>
+          <Banner tone="warning">
+            <Stack gap={2}>
+              <p>{t("packing.checklist.stale", { count: data.staleUnits })}</p>
+              {/* −1 для одиниць позицій, яких більше немає в замовленні (інакше чекліст не виправити без власника). */}
+              <Stack as="ul" gap={2}>
+                {data.staleLines.map((line) => (
+                  <StaleLine key={line.id} line={line} open={open} reason={reason} />
+                ))}
+              </Stack>
+            </Stack>
+          </Banner>
         ) : null}
         {progress.over.length > 0 ? <Banner tone="warning">{t("packing.checklist.over", { count: progress.overUnits })}</Banner> : null}
         {data.otherLines.length > 0 ? (
@@ -733,6 +828,37 @@ function ChecklistCard({ data, open }: { data: Data; open: boolean }) {
         ) : null}
       </Stack>
     </Card>
+  );
+}
+
+function StaleLine({ line, open, reason }: { line: Data["staleLines"][number]; open: boolean; reason: string }) {
+  const t = useT();
+  const fetcher = useFetcher<typeof action>();
+  const busy = fetcher.state !== "idle";
+  const error = fetcher.state === "idle" && fetcher.data && !fetcher.data.ok ? fetcher.data : null;
+  const title = line.title ? (line.variantTitle ? `${line.title} — ${line.variantTitle}` : line.title) : t("packing.checklist.staleUnknown");
+  return (
+    <Stack as="li" gap={1}>
+      <Stack direction="horizontal" gap={2} align="center" wrap>
+        <Text variant="body-sm" weight="semibold">
+          {title}
+        </Text>
+        <Badge tone="critical" size="sm">
+          {t("packing.line.qty", { packed: line.packed, required: 0 })}
+        </Badge>
+        {open ? (
+          <fetcher.Form method="post">
+            <input type="hidden" name="intent" value="adjust" />
+            <input type="hidden" name="lineId" value={line.id} />
+            <input type="hidden" name="reason" value={reason} />
+            <Button type="submit" name="delta" value="-1" size="sm" disabled={!reason || busy} aria-label={t("packing.adjust.minus", { item: title })}>
+              −1
+            </Button>
+          </fetcher.Form>
+        ) : null}
+      </Stack>
+      {error ? <ActionBanner data={error} /> : null}
+    </Stack>
   );
 }
 
@@ -857,11 +983,12 @@ function ParcelCard({ data }: { data: Data }) {
   const t = useT();
   const locale = useLocale();
   const { packing, parcel, waybillParcel } = data;
-  // Після «Розпакувати» без накладної («Очікує перевірки») посилку можна задати до створення нової накладної.
-  const editable = Boolean(packing) && ["awaiting_review", "waybill_created", "awaiting_picking", "packed"].includes(data.order.status);
+  // Форма: у пакуванні (зокрема після «Розпакувати» без накладної) або ДО накладної без пакування — ручне
+  // коригування замовлення, яке використає нова накладна (parcelTarget, view.server.ts).
+  const editable = data.parcelTarget !== null;
   // Після збереження (інші збережені значення / коробка) форма з'являється заново з новими значеннями;
   // сканування (нова версія пакування) форму не скидає — введене, але ще не збережене, лишається.
-  const formKey = [packing?.id ?? "", packing?.boxMaterialId ?? "", parcel.savedWeightGrams, parcel.savedDimsMm?.join("x") ?? "", parcel.saved].join("|");
+  const formKey = [packing?.id ?? "", parcel.formBoxId ?? "", parcel.savedWeightGrams, parcel.savedDimsMm?.join("x") ?? "", parcel.saved].join("|");
   return (
     <Card title={t("packing.parcel.title")} description={t("packing.parcel.help")}>
       <Stack gap={3}>
@@ -878,7 +1005,14 @@ function ParcelCard({ data }: { data: Data }) {
             <Text tone="subdued">{t("packing.parcel.startFirst")}</Text>
           )
         ) : (
-          <ParcelForm key={formKey} data={data} />
+          <>
+            {data.parcelTarget === "order" ? (
+              <Text variant="body-sm" tone="subdued">
+                {t("packing.parcel.beforeWaybill")}
+              </Text>
+            ) : null}
+            <ParcelForm key={formKey} data={data} />
+          </>
         )}
       </Stack>
     </Card>
@@ -899,11 +1033,12 @@ function ParcelForm({ data }: { data: Data }) {
   const err = (name: string) => (fieldErrors?.[name] ? t(fieldErrors[name]!) : null);
   const { packing, parcel, suggestion } = data;
   const boxLocked = packing?.status === "packed";
+  const toOrder = data.parcelTarget === "order";
   const env: ParcelFormEnv = { boxes: data.boxes, goodsWeightGrams: parcel.goodsWeightGrams, defaultTareGrams: parcel.defaultTareGrams };
   const [state, dispatch] = useReducer(
     (s: ParcelFormState, a: ParcelFormAction) => reduceParcelForm(env, s, a),
     null,
-    () => initialParcelForm(env, { boxId: packing?.boxMaterialId ?? null, weightGrams: parcel.savedWeightGrams, dimsMm: parcel.savedDimsMm }),
+    () => initialParcelForm(env, { boxId: parcel.formBoxId, weightGrams: parcel.savedWeightGrams, dimsMm: parcel.savedDimsMm }),
   );
   const markers = parcelPrefillMarkers(env, state);
   const prefill = prefillForBox(env, state.boxId);
@@ -921,9 +1056,20 @@ function ParcelForm({ data }: { data: Data }) {
         .join(" · "),
     })),
   ];
-  const suggestionText = suggestion.boxId
-    ? t("packing.parcel.suggested", { name: suggestion.name ?? "", reason: t(`packing.parcel.reason.${suggestion.reason}`) })
-    : t("packing.parcel.noSuggestion", { reason: t(`packing.parcel.reason.${suggestion.reason}`) });
+  // ★ узгоджена з накладною (view.server.ts packingSuggestion): коробка накладної / у межах габаритів накладної.
+  const suggestionText = !suggestion.boxId
+    ? t("packing.parcel.noSuggestion", { reason: t(`packing.parcel.reason.${suggestion.reason}`) })
+    : suggestion.source === "waybill"
+      ? t("packing.parcel.suggestedWaybill", { name: suggestion.name ?? "" })
+      : [
+          t("packing.parcel.suggested", {
+            name: suggestion.name ?? "",
+            reason: suggestion.source === "waybill_fit" ? `${t(`packing.parcel.reason.${suggestion.reason}`)}, ${t("packing.parcel.withinWaybill")}` : t(`packing.parcel.reason.${suggestion.reason}`),
+          }),
+          suggestion.differsFromWaybill ? t("packing.parcel.suggestedDiffers", { dims: dimsText(data.waybillParcel?.dimsMm) ?? "—" }) : null,
+        ]
+          .filter(Boolean)
+          .join(" ");
   const savedWeightShown = parcel.savedWeightGrams !== null && state.weight.trim() === String(parcel.savedWeightGrams);
   const weightHelp = !state.weightManual
     ? prefill.weightGrams
@@ -937,7 +1083,8 @@ function ParcelForm({ data }: { data: Data }) {
   return (
     <Form method="post">
       <input type="hidden" name="intent" value="parcel" />
-      <input type="hidden" name="version" value={packing?.version ?? 0} />
+      {toOrder ? <input type="hidden" name="target" value="order" /> : null}
+      <input type="hidden" name="version" value={toOrder ? data.order.version : (packing?.version ?? 0)} />
       <input type="hidden" name="weightPrefill" value={markers.weightPrefill} />
       <input type="hidden" name="dimsPrefill" value={markers.dimsPrefill} />
       {boxLocked ? <input type="hidden" name="boxMaterialId" value={packing?.boxMaterialId ?? NO_BOX} /> : null}
@@ -1071,7 +1218,14 @@ function MismatchBanner({ data }: { data: Data }) {
       {m.weight ? (
         <p>{t("packing.mismatch.weight", { waybill: formatWeight(m.weight.waybillGrams, locale), packed: formatWeight(m.weight.packedGrams, locale) })}</p>
       ) : null}
-      {m.dims ? <p>{t("packing.mismatch.dims", { waybill: dimsText(m.dims.waybillMm) ?? "—", packed: dimsText(m.dims.packedMm) ?? "—" })}</p> : null}
+      {m.dims ? (
+        <p>
+          {t(m.dims.exceeds ? "packing.mismatch.dimsExceeds" : "packing.mismatch.dims", {
+            waybill: dimsText(m.dims.waybillMm) ?? "—",
+            packed: dimsText(m.dims.packedMm) ?? "—",
+          })}
+        </p>
+      ) : null}
       <p>{t(packed ? "packing.mismatch.packedHint" : "packing.mismatch.hint")}</p>
       {!canReissue ? <p>{t("packing.mismatch.askManager")}</p> : null}
     </Banner>
@@ -1119,9 +1273,15 @@ function ConfirmCard({ data, open, packed }: { data: Data; open: boolean; packed
       </Card>
     );
   }
-  const materialsPreview = data.materials.map((m) => t("packing.confirm.materialLine", { name: m.name, quantity: m.required })).join(", ");
+  // Списується лише те, чого ще не списано для цього пакування (напр. нова коробка після розпакування).
+  const toConsume = data.materials.filter((m) => !data.consumedMaterialIds.includes(m.materialId));
+  const materialsPreview = toConsume.map((m) => t("packing.confirm.materialLine", { name: m.name, quantity: m.required })).join(", ");
   /** Коробку не вибрано (неточний підбір не підставляється) — пакувальник має бачити, що коробка не спишеться. */
   const noBox = !packing.boxMaterialId && data.boxes.length > 0 && !data.materialsConsumed;
+  /** Немає товарів для перевірки — не «повний комплект» (лише власник із причиною). */
+  const nothingToPack = progress.requiredUnits === 0;
+  const otherLinesText = data.otherLines.map((l) => t("packing.checklist.otherLine", { title: l.title, quantity: l.quantity })).join(", ");
+  const previousBoxesText = data.previousBoxes.map((b) => b.name).join(", ");
   return (
     <Card title={t("packing.confirm.title")}>
       <Stack gap={3}>
@@ -1131,10 +1291,16 @@ function ConfirmCard({ data, open, packed }: { data: Data; open: boolean; packed
             {t("packing.confirm.noBox")}
           </Text>
         ) : null}
+        {previousBoxesText ? (
+          <Text variant="body-sm" tone="subdued">
+            {t("packing.confirm.previousBoxes", { list: previousBoxesText })}
+          </Text>
+        ) : null}
         <Form method="post">
           <input type="hidden" name="intent" value="confirm" />
           <input type="hidden" name="version" value={packing.version} />
-          {progress.complete && !data.shopifyLinesPending && !data.fulfilledInShopify ? (
+          <input type="hidden" name="materialsKey" value={data.materialsKey} />
+          {progress.complete && !nothingToPack && !data.shopifyLinesPending && !data.fulfilledInShopify ? (
             <ConfirmSubmitButton
               variant="primary"
               fullWidth
@@ -1146,13 +1312,15 @@ function ConfirmCard({ data, open, packed }: { data: Data; open: boolean; packed
                 <Stack gap={2}>
                   <Text>{t("packing.confirm.dialogBody")}</Text>
                   <Text weight="semibold">
-                    {data.materialsConsumed
-                      ? t("packing.confirm.dialogMaterialsAlready")
-                      : materialsPreview
-                        ? t("packing.confirm.dialogMaterials", { list: materialsPreview })
+                    {materialsPreview
+                      ? t("packing.confirm.dialogMaterials", { list: materialsPreview })
+                      : data.materialsConsumed
+                        ? t("packing.confirm.dialogMaterialsAlready")
                         : t("packing.confirm.dialogNoMaterials")}
                   </Text>
                   {noBox ? <Text>{t("packing.confirm.noBox")}</Text> : null}
+                  {otherLinesText ? <Text>{t("packing.confirm.dialogOtherLines", { list: otherLinesText })}</Text> : null}
+                  {previousBoxesText ? <Text>{t("packing.confirm.previousBoxes", { list: previousBoxesText })}</Text> : null}
                   {data.mismatch ? <Text>{t("packing.confirm.dialogMismatch")}</Text> : null}
                   <Text variant="body-sm" tone="subdued">
                     {t("packing.confirm.notShipped")}
@@ -1173,17 +1341,20 @@ function ConfirmCard({ data, open, packed }: { data: Data; open: boolean; packed
                     ? "packing.confirm.blockedFulfilled"
                     : data.shopifyLinesPending
                       ? "packing.confirm.blockedShopifyLines"
-                      : "packing.confirm.incomplete",
+                      : nothingToPack
+                        ? "packing.confirm.nothingToPack"
+                        : "packing.confirm.incomplete",
                 )}
               </Text>
             </Stack>
           )}
         </Form>
-        {(!progress.complete || data.shopifyLinesPending) && !data.fulfilledInShopify && data.canOverride ? (
+        {(!progress.complete || nothingToPack || data.shopifyLinesPending) && !data.fulfilledInShopify && data.canOverride ? (
           <Disclosure summary={t("packing.override.summary")}>
             <Form method="post">
               <input type="hidden" name="intent" value="confirm" />
               <input type="hidden" name="version" value={packing.version} />
+              <input type="hidden" name="materialsKey" value={data.materialsKey} />
               <input type="hidden" name="override" value="1" />
               <Stack gap={3}>
                 <Text variant="body-sm">{t("packing.override.help")}</Text>

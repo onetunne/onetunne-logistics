@@ -16,7 +16,16 @@ import type { OrderPriority } from "~/db/schema";
 import { requirePermission } from "~/domain/permissions";
 import { hasKey, makeT, useLocale, useT, type TFunction } from "~/i18n";
 import { countryName, formatDateTime } from "~/lib/format";
-import { MAX_BULK_ORDERS, MAX_HANDOVER_ORDERS, MAX_LABEL_ORDERS, MAX_PRINT_ORDERS, PRIORITIES, PRIORITY_KEYS, parsePriority } from "~/modules/packing/constants";
+import {
+  MAX_BULK_ORDERS,
+  MAX_HANDOVER_ORDERS,
+  MAX_LABEL_ORDERS,
+  MAX_PICK_LIST_ORDERS,
+  MAX_PRINT_ORDERS,
+  PRIORITIES,
+  PRIORITY_KEYS,
+  parsePriority,
+} from "~/modules/packing/constants";
 import { setOrdersPriority, startPackingBulk, type BulkStartSummary } from "~/modules/packing/packing.server";
 import {
   QUEUE_TABS,
@@ -57,7 +66,8 @@ import {
 /**
  * Комплектація й пакування (етап 5): черга замовлень з накладною (пріоритет ↓, дата ↑), фільтри (статус, пріоритет,
  * країна, модель, колір, працівник), масові дії (почати пакування, пріоритет, друк пакувальних листів та інвойсів,
- * об'єднаний PDF етикеток перевізника) і вкладка «Потрібна накладна». Пакування замовлення — picking/:orderId.
+ * зведений лист комплектації picking/pick-list, об'єднаний PDF етикеток перевізника) і вкладка «Потрібна накладна»
+ * (звідти — вага й габарити посилки до накладної на екрані пакування). Пакування замовлення — picking/:orderId.
  * Дозволи перевіряє сервер: черга й пакування — packing.perform; пріоритет — orders.edit.
  */
 
@@ -256,6 +266,8 @@ export default function PickingPage() {
     inProgress: selectedRows.filter((r) => r.packing?.status === "in_progress" && r.status === "awaiting_picking").length,
     packed: selectedRows.filter((r) => r.status === "packed").length,
     withLabel: selectedRows.filter((r) => r.waybill?.labelAvailable).length,
+    /** До комплектації (лист комплектації): накладна створена / очікує комплектації. */
+    toPick: selectedRows.filter((r) => r.status === "waybill_created" || r.status === "awaiting_picking").length,
   };
   const notStartable = preview.total - preview.startable - preview.inProgress - preview.packed;
   const idsQuery = (limit: number) => selected.slice(0, limit).map((id) => `ids=${encodeURIComponent(id)}`).join("&");
@@ -365,6 +377,23 @@ export default function PickingPage() {
       hideOnMobile: true,
       render: (r) => <time dateTime={new Date(r.placedAt).toISOString()}>{formatDateTime(r.placedAt, locale)}</time>,
     },
+    // «Потрібна накладна»: посилку можна зважити й виміряти ДО накладної (екран пакування → ручне коригування).
+    ...(needsWaybill
+      ? [
+          {
+            key: "parcel",
+            header: t("packing.col.parcel"),
+            render: (r: Row) =>
+              r.status === "packed" ? (
+                "—"
+              ) : (
+                <Button to={href(`picking/${r.id}`)} size="sm" variant="plain">
+                  {t("packing.queue.setParcel")}
+                </Button>
+              ),
+          } satisfies DataTableColumn<Row>,
+        ]
+      : []),
   ];
 
   const emptyState =
@@ -527,6 +556,12 @@ export default function PickingPage() {
                   </Button>
                   <Button disabled={preview.total === 0 || labelsBusy} loading={labelsBusy} onClick={() => void onLabels()}>
                     {t("packing.bulk.labels", { count: preview.withLabel })}
+                  </Button>
+                  <Button
+                    disabled={preview.toPick === 0}
+                    onClick={() => navigate(`${href("picking/pick-list")}?${idsQuery(MAX_PICK_LIST_ORDERS)}`)}
+                  >
+                    {t("packing.bulk.pickList", { count: preview.toPick })}
                   </Button>
                   <Button
                     disabled={preview.packed === 0}

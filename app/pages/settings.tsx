@@ -2125,6 +2125,20 @@ function WarehouseSection({ data, result, pending, fieldError }: SectionProps) {
   const t = useT();
   const { value, version } = data.warehouse;
   const editable = data.can.manage;
+  // Демо: Shopify не підключено — передача й зміни з Shopify не діють (рухи складу — «Не надсилалося», movementOptionsFor).
+  // Поля лишаються редагованими для перегляду; збережене значення й робочий текст не змінюються.
+  const demo = data.mode === "demo";
+  const shopifyHelp = (help: string, demoNote: string) =>
+    demo ? (
+      <Stack as="span" gap={1}>
+        <Text as="span" variant="caption" weight="semibold">
+          {demoNote}
+        </Text>
+        <span>{help}</span>
+      </Stack>
+    ) : (
+      help
+    );
   const number = (name: "lowStockThreshold" | "productionLeadDays" | "targetCoverDays" | "batchRounding", min: number, max: number, suffix?: string) => (
     <TextField
       label={t(`settings.warehouse.${name}`)}
@@ -2147,7 +2161,11 @@ function WarehouseSection({ data, result, pending, fieldError }: SectionProps) {
         <Hidden intent="saveWarehouse" version={version} />
         <Stack gap={4}>
           <ActionBanner data={result} />
-          {value.shopifyPush === "deltas" ? <Banner tone="info">{t("settings.warehouse.pushOnBanner")}</Banner> : null}
+          {demo ? (
+            <Banner tone="info">{t("settings.warehouse.demoBanner")}</Banner>
+          ) : value.shopifyPush === "deltas" ? (
+            <Banner tone="info">{t("settings.warehouse.pushOnBanner")}</Banner>
+          ) : null}
           {value.externalShopifyChanges === "apply" && value.shopifyPush !== "deltas" ? (
             <Banner tone="warning">{t("settings.warehouse.applyWithoutPushWarning")}</Banner>
           ) : null}
@@ -2161,7 +2179,7 @@ function WarehouseSection({ data, result, pending, fieldError }: SectionProps) {
               name="shopifyPush"
               defaultValue={value.shopifyPush}
               options={WAREHOUSE_SHOPIFY_PUSH_MODES.map((m) => ({ value: m, label: t(`settings.warehouse.shopifyPush.${m}`) }))}
-              helpText={t("settings.warehouse.shopifyPushHelp")}
+              helpText={shopifyHelp(t("settings.warehouse.shopifyPushHelp"), t("settings.warehouse.shopifyPushDemo"))}
               error={fieldError("shopifyPush")}
               disabled={!editable}
             />
@@ -2170,7 +2188,7 @@ function WarehouseSection({ data, result, pending, fieldError }: SectionProps) {
               name="externalShopifyChanges"
               defaultValue={value.externalShopifyChanges}
               options={WAREHOUSE_EXTERNAL_CHANGE_MODES.map((m) => ({ value: m, label: t(`settings.warehouse.externalShopifyChanges.${m}`) }))}
-              helpText={t("settings.warehouse.externalShopifyChangesHelp")}
+              helpText={shopifyHelp(t("settings.warehouse.externalShopifyChangesHelp"), t("settings.warehouse.externalShopifyChangesDemo"))}
               error={fieldError("externalShopifyChanges")}
               disabled={!editable}
             />

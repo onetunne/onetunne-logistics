@@ -135,8 +135,16 @@ describe("receiveStock", () => {
       orderId,
       actorId: STAFF.id,
       actorName: STAFF.displayName,
-      onHandDelta: 5,
+      // Повернення, яке Shopify поповнив сам: усі одиниці надходять у on_hand, пошкоджені — окремим рухом браку.
+      onHandDelta: 6,
+      defectiveDelta: 0,
+    });
+    expect(await movementByKey(inventoryKeys.manual(operationId, "return_defect"))).toMatchObject({
+      type: "defect_mark",
+      onHandDelta: -1,
       defectiveDelta: 1,
+      reason: "customer_return",
+      orderId,
     });
     // Примітка без персональних даних.
     expect(m!.note).not.toMatch(/123 45 67|test@example\.com/);
@@ -677,7 +685,9 @@ describe("customer returns and Shopify restock", () => {
         restockedInShopify: true,
       });
       expect(await syncStateOf(purchase.movementId)).toBe("pending");
-      // Лише пошкоджені одиниці (on_hand не змінюється) і матеріали — none, як і без прапорця.
+      // Лише пошкоджені одиниці повернення, яке Shopify поповнив: надходження skipped (Shopify додав їх сам),
+      // а рух браку знімає їх з «доступно» в Shopify (pending → передача). Матеріали — none, як і без прапорця.
+      await clearPushJobs();
       const damagedOnly = await receiveStock(prodCtx(STAFF), {
         operationId: newOperationId(),
         stockItemId: item,
@@ -685,7 +695,9 @@ describe("customer returns and Shopify restock", () => {
         defectiveQuantity: 1,
         reason: "customer_return",
       });
-      expect(await syncStateOf(damagedOnly.movementId)).toBe("none");
+      expect(await syncStateOf(damagedOnly.movementId)).toBe("skipped");
+      expect(damagedOnly.returnDefect).toMatchObject({ quantity: 1, shopifySyncState: "pending" });
+      expect(damagedOnly.shopifyPushQueued).toBe(true);
       const [material] = await db().select({ id: packagingMaterials.id }).from(packagingMaterials).where(eq(packagingMaterials.code, "box_l"));
       const materialItem = await ensureStockItemForMaterial(db(), material!.id);
       const m = await receiveStock(prodCtx(STAFF), {

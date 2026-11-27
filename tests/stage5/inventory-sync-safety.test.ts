@@ -482,7 +482,7 @@ describe("shopify-5: returns restocked in Shopify before the warehouse receives 
 });
 
 describe("shopify-5: a damaged return restocked in Shopify", () => {
-  it("still blocks auto-apply: Shopify added it as available, the warehouse put it into defective", async () => {
+  it("is taken out of Shopify's available by a pushed defect movement (no auto-apply, no phantom unit)", async () => {
     await upsertOrder(ctx, mapOrder(orderFor(15, 9602, 1, { displayFulfillmentStatus: "FULFILLED" })), "import");
     const o = await orderRow(9602);
     expect(await onHand(15)).toBe(11);
@@ -491,9 +491,22 @@ describe("shopify-5: a damaged return restocked in Shopify", () => {
     fake.setLevel(items[15]!.gid, { available: 12, onHand: 12 });
     await receiveStock(ctx, { operationId: randomUUID(), stockItemId: items[15]!.stockItemId, quantity: 0, defectiveQuantity: 1, reason: "customer_return", orderId: o.id });
     expect(await balance(h.db, items[15]!.stockItemId)).toMatchObject({ onHand: 11, defective: 1 });
-    expect(await withApply(() => reconcileItem(15))).toEqual(["opened"]);
+    // Рух браку ще не передано — звірку відкладено.
+    expect(await reconcileItem(15)).toEqual(["skipped_pending"]);
+    const calls = fake.adjustCalls().length;
+    expect(await push()).toMatchObject({ pushed: 1 });
+    const sent = fake.adjustCalls().slice(calls);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.input).toMatchObject({ name: "available", changes: [expect.objectContaining({ delta: -1 })] });
+    expect(level(15).available).toBe(11);
+    expect(await withApply(() => reconcileItem(15))).toEqual(["match"]);
+    expect(await openConflict(15)).toBeNull();
     expect(await onHand(15)).toBe(11);
-    expect(await observation(15)).toMatchObject({ returnsPending: 1, autoApplyBlockers: ["uncertain"] });
+    const external = await h.db
+      .select({ id: inventoryMovements.id })
+      .from(inventoryMovements)
+      .where(and(eq(inventoryMovements.stockItemId, items[15]!.stockItemId), eq(inventoryMovements.type, "shopify_external")));
+    expect(external).toHaveLength(0);
   });
 });
 

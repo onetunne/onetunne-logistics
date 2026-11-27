@@ -7,12 +7,14 @@ import type { ShellData } from "~/components/shell-types";
 import {
   inventoryMovements,
   jobs,
+  orderLineItems,
   orders,
   packagingMaterials,
   productVariants,
   products,
   stockItems,
   stockReservations,
+  warehouses,
 } from "~/db/schema";
 import { makeActor, type Actor } from "~/domain/permissions";
 import { DICTIONARIES } from "~/i18n";
@@ -745,6 +747,26 @@ describe("movement history", () => {
     expect((await loadHistory("?q=zzz-none")).total).toBe(0);
   });
 
+  it("old demo movements marked «pending» are shown as «not sent» in demo, unchanged in production (e2e-5)", async () => {
+    const item = await stockItemBySku("OT-GR-BLK");
+    const r = await receiveStock(env.ctx(OWNER), { operationId: newOperationId(), stockItemId: item, quantity: 1, reason: "purchase" });
+    const [before] = await env.handle.db.select({ s: inventoryMovements.shopifySyncState }).from(inventoryMovements).where(eq(inventoryMovements.id, r.movementId));
+    // Як у демо-базі, створеній до правила movementOptionsFor.
+    await env.handle.db.update(inventoryMovements).set({ shopifySyncState: "pending" }).where(eq(inventoryMovements.id, r.movementId));
+    try {
+      const inDemo = await loadHistory(`?movement=${r.movementId}`);
+      expect(inDemo.rows.map((x) => x.shopifySyncState)).toEqual(["skipped"]);
+      expect((await loadItem(item)).movements.find((x) => x.id === r.movementId)?.shopifySyncState).toBe("skipped");
+      ctxMode = "production";
+      setContext();
+      expect((await loadHistory(`?movement=${r.movementId}`)).rows.map((x) => x.shopifySyncState)).toEqual(["pending"]);
+    } finally {
+      ctxMode = "demo";
+      setContext();
+      await env.handle.db.update(inventoryMovements).set({ shopifySyncState: before!.s }).where(eq(inventoryMovements.id, r.movementId));
+    }
+  });
+
   it("?movement=<id> (Shopify referenceDocumentUri) shows exactly that movement and keeps the link (ui-6)", async () => {
     const item = await stockItemBySku("OT-LT-STD");
     const ops = [newOperationId(), newOperationId()];
@@ -916,5 +938,286 @@ describe("i18n families used dynamically by warehouse pages", () => {
       ...WAREHOUSE_RELATED_LINKS.map((l) => l.labelKey),
     ];
     expect(keys.filter((k) => !(k in DICTIONARIES.uk) || !(k in DICTIONARIES.en))).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Повернення покупця: пошкоджені одиниці (R1) і підказки замовлення (R2)
+// ---------------------------------------------------------------------------
+
+describe("item card: damaged customer returns and order suggestions", () => {
+  const itemRoute = () => ({ path: "warehouse/items/:stockItemId", loader: itemPage.loader, action: itemPage.action, Component: itemPage.default });
+  const extraOf = (r: unknown) => ((r as { extra?: string[] }).extra ?? []).slice().sort();
+
+  it("R1: a damaged return restocked in Shopify says the damaged units leave Shopify's available — no contradictory «will be sent»", async () => {
+    const id = await stockItemBySku("OT-PH-WHT");
+    await withPushMode("deltas", async () => {
+      setContext(STAFF);
+      let data = await loadItem(id);
+      expect(data.pushesToShopify).toBe(true);
+      const res = await actItem(id, {
+        intent: "receive",
+        operationId: data.operationIds.receive,
+        quantity: "1",
+        defectiveQuantity: "1",
+        reason: "customer_return",
+      });
+      expect(res).toMatchObject({ ok: true, message: "warehouse.op.received", params: { quantity: 1, damaged: 1 } });
+      expect(extraOf(res)).toEqual(["warehouse.op.returnDamagedPushed", "warehouse.op.returnNotPushed"]);
+      expect(await queuedPushJobs()).toBe(1);
+      data = await loadItem(id);
+      const recent = data.movements.slice(0, 2);
+      expect(recent).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: "receipt_manual", onHandDelta: 2, defectiveDelta: 0, shopifySyncState: "skipped" }),
+          expect.objectContaining({ type: "defect_mark", onHandDelta: -1, defectiveDelta: 1, reason: "customer_return", shopifySyncState: "pending" }),
+        ]),
+      );
+      // Лише пошкоджені — те саме.
+      const damagedOnly = await actItem(id, {
+        intent: "receive",
+        operationId: data.operationIds.receive,
+        quantity: "0",
+        defectiveQuantity: "1",
+        reason: "customer_return",
+      });
+      expect(extraOf(damagedOnly)).toEqual(["warehouse.op.returnDamagedPushed", "warehouse.op.returnNotPushed"]);
+      // «Надіслати в Shopify» (без поповнення в Shopify): як раніше — надходження надсилається, брак одразу в брак.
+      data = await loadItem(id);
+      const sent = await actItem(id, {
+        intent: "receive",
+        operationId: data.operationIds.receive,
+        quantity: "1",
+        defectiveQuantity: "1",
+        reason: "customer_return",
+        pushToShopify: "on",
+      });
+      expect(extraOf(sent)).toEqual(["warehouse.op.pushQueued"]);
+    });
+    // Тексти зрозумілі з параметрами дії.
+    expect(uk("warehouse.op.returnDamagedPushed").replace("{damaged}", "1")).toContain("(1)");
+    expect(uk("warehouse.op.receive.pushReturnHelp")).not.toMatch(/не повертайте/);
+    setContext(OWNER);
+  });
+
+  it("R1 demo: no Shopify texts for a damaged return, nothing queued", async () => {
+    const id = await stockItemBySku("OT-PH-WHT");
+    await withPushMode(
+      "deltas",
+      async () => {
+        const data = await loadItem(id);
+        const res = await actItem(id, {
+          intent: "receive",
+          operationId: data.operationIds.receive,
+          quantity: "1",
+          defectiveQuantity: "1",
+          reason: "customer_return",
+        });
+        expect(res).toMatchObject({ ok: true, message: "warehouse.op.received" });
+        expect(extraOf(res)).toEqual([]);
+        expect(await queuedPushJobs()).toBe(0);
+      },
+      { demo: true },
+    );
+  });
+
+  it("R2: suggests recently returned orders not yet received (order number only, links only with orders.view); the number stays optional", async () => {
+    const db = env.handle.db;
+    const id = await stockItemBySku("OT-GR-BLK");
+    const [variant] = await db.select({ variantId: stockItems.variantId }).from(stockItems).where(eq(stockItems.id, id));
+    const [order] = await db.select().from(orders).where(eq(orders.orderNumber, "#0997"));
+    const [line] = await db
+      .select()
+      .from(orderLineItems)
+      .where(and(eq(orderLineItems.orderId, order!.id), eq(orderLineItems.variantId, variant!.variantId!)));
+    expect(line).toBeDefined();
+    const [warehouse] = await db.select({ id: warehouses.id }).from(warehouses).where(eq(warehouses.isDefault, true));
+    const shopifyUpdatedAt = order!.shopifyUpdatedAt;
+    // Передано (списано 2) і повністю повернено/відшкодовано в Shopify (вигадані дані).
+    const existing = await db.select({ id: stockReservations.id }).from(stockReservations).where(eq(stockReservations.orderLineItemId, line!.id));
+    expect(existing).toEqual([]);
+    const [reservation] = await db
+      .insert(stockReservations)
+      .values({ orderLineItemId: line!.id, orderId: order!.id, stockItemId: id, warehouseId: warehouse!.id, reservedQty: 0, consumedQty: line!.quantity, status: "consumed" })
+      .returning({ id: stockReservations.id });
+    await db.update(orderLineItems).set({ currentQuantity: 0 }).where(eq(orderLineItems.id, line!.id));
+    await db.update(orders).set({ shopifyUpdatedAt: new Date() }).where(eq(orders.id, order!.id));
+    const units = line!.quantity;
+    try {
+      setContext(OWNER);
+      let data = await loadItem(id);
+      expect(data.returnSuggestions).toEqual([{ orderNumber: "#0997", units, orderId: order!.id }]);
+      let html = await render(`/demo/warehouse/items/${id}`, itemRoute());
+      expect(html).toContain(esc(uk("warehouse.op.receive.orderHint")));
+      expect(html).toContain(esc(uk("warehouse.op.receive.suggestions")));
+      expect(html).toContain(esc(uk("warehouse.op.receive.suggestion").replace("{order}", "#0997").replace("{count}", String(units))));
+      expect(html).toContain(`aria-label="${esc(uk("warehouse.op.receive.useSuggestion").replace("{order}", "#0997").replace("{count}", String(units)))}"`);
+      expect(html).toContain(`href="/demo/orders/${order!.id}"`);
+      // Без персональних даних покупця.
+      for (const pd of [order!.shipFirstName, order!.shipLastName, order!.email, order!.shipCity]) if (pd) expect(html).not.toContain(esc(pd));
+
+      // Працівник без доступу до замовлень бачить номер, але не посилання.
+      const noOrders = makeActor({ id: "staff-no-orders", displayName: "Склад", role: "staff", overrides: { revoke: ["orders.view"] } });
+      setContext(noOrders);
+      data = await loadItem(id);
+      expect(data.returnSuggestions).toEqual([{ orderNumber: "#0997", units, orderId: null }]);
+      html = await render(`/demo/warehouse/items/${id}`, itemRoute());
+      expect(html).toContain(esc(uk("warehouse.op.receive.suggestion").replace("{order}", "#0997").replace("{count}", String(units))));
+      expect(html).not.toContain(`/demo/orders/${order!.id}`);
+      // Без права оприбутковувати — форми й підказок немає.
+      const viewOnly = makeActor({ id: "staff-view-only", displayName: "Перегляд", role: "staff", overrides: { revoke: ["warehouse.receive"] } });
+      setContext(viewOnly);
+      expect((await loadItem(id)).returnSuggestions).toEqual([]);
+
+      setContext(STAFF);
+      // Номер не обов'язковий: повернення без замовлення приймається й не «закриває» підказку (невідомо, чиє воно).
+      data = await loadItem(id);
+      expect(await actItem(id, { intent: "receive", operationId: data.operationIds.receive, quantity: "1", reason: "customer_return" })).toMatchObject({
+        ok: true,
+        message: "warehouse.op.received",
+      });
+      data = await loadItem(id);
+      expect(data.returnSuggestions).toEqual([{ orderNumber: "#0997", units, orderId: order!.id }]);
+      // Повернення з цим замовленням зменшує, а потім знімає підказку.
+      expect(
+        await actItem(id, { intent: "receive", operationId: data.operationIds.receive, quantity: "1", reason: "customer_return", orderNumber: "#0997" }),
+      ).toMatchObject({ ok: true });
+      data = await loadItem(id);
+      expect(data.returnSuggestions).toEqual(units > 1 ? [{ orderNumber: "#0997", units: units - 1, orderId: order!.id }] : []);
+      if (units > 1) {
+        await actItem(id, {
+          intent: "receive",
+          operationId: data.operationIds.receive,
+          quantity: String(units - 2),
+          defectiveQuantity: "1",
+          reason: "customer_return",
+          orderNumber: "0997",
+        });
+        data = await loadItem(id);
+        expect(data.returnSuggestions).toEqual([]);
+      }
+      html = await render(`/demo/warehouse/items/${id}`, itemRoute());
+      expect(html).toContain(esc(uk("warehouse.op.receive.orderHint")));
+      expect(html).not.toContain(esc(uk("warehouse.op.receive.suggestions")));
+    } finally {
+      setContext(OWNER);
+      await db.delete(stockReservations).where(eq(stockReservations.id, reservation!.id));
+      await db.update(orderLineItems).set({ currentQuantity: line!.currentQuantity }).where(eq(orderLineItems.id, line!.id));
+      await db.update(orders).set({ shopifyUpdatedAt }).where(eq(orders.id, order!.id));
+    }
+  });
+
+  it("R2: a material or an item without Shopify returns gets the hint but no suggestions", async () => {
+    const [box] = await env.handle.db.select({ id: stockItems.id }).from(stockItems).where(eq(stockItems.kind, "material")).limit(1);
+    expect((await loadItem(box!.id)).returnSuggestions).toEqual([]);
+    expect((await loadItem(await stockItemBySku("OT-FK-X"))).returnSuggestions).toEqual([]);
+  });
+
+  it("NI-2: «the damaged units were not restocked in Shopify» records one receipt, sends nothing and says so", async () => {
+    const id = await stockItemBySku("OT-BG-BLK");
+    const movementsByKey = async (operationId: string) =>
+      env.handle.db
+        .select({ type: inventoryMovements.type, onHandDelta: inventoryMovements.onHandDelta, defectiveDelta: inventoryMovements.defectiveDelta, state: inventoryMovements.shopifySyncState })
+        .from(inventoryMovements)
+        .where(sql`${inventoryMovements.idempotencyKey} in (${inventoryKeys.manual(operationId)}, ${inventoryKeys.manual(operationId, "return_defect")})`);
+    await withPushMode("deltas", async () => {
+      setContext(STAFF);
+      let data = await loadItem(id);
+      expect(data.pushesToShopify).toBe(true);
+      let operationId = data.operationIds.receive;
+      const res = await actItem(id, {
+        intent: "receive",
+        operationId,
+        quantity: "1",
+        defectiveQuantity: "1",
+        reason: "customer_return",
+        damagedNotRestocked: "on",
+      });
+      expect(res).toMatchObject({ ok: true, message: "warehouse.op.received", params: { quantity: 1, damaged: 1 } });
+      expect(extraOf(res)).toEqual(["warehouse.op.returnDamagedKept", "warehouse.op.returnNotPushed"]);
+      expect(await queuedPushJobs()).toBe(0);
+      expect(await movementsByKey(operationId)).toEqual([{ type: "receipt_manual", onHandDelta: 1, defectiveDelta: 1, state: "skipped" }]);
+      // Лише пошкоджені: надходження без зміни on_hand — нічого не надсилається й «не надсилається» не потрібне.
+      data = await loadItem(id);
+      operationId = data.operationIds.receive;
+      const damagedOnly = await actItem(id, {
+        intent: "receive",
+        operationId,
+        quantity: "0",
+        defectiveQuantity: "1",
+        reason: "customer_return",
+        damagedNotRestocked: "on",
+      });
+      expect(extraOf(damagedOnly)).toEqual(["warehouse.op.returnDamagedKept"]);
+      expect(await queuedPushJobs()).toBe(0);
+      expect(await movementsByKey(operationId)).toEqual([{ type: "receipt_manual", onHandDelta: 0, defectiveDelta: 1, state: "none" }]);
+      // «Надіслати це повернення в Shopify» має перевагу: якісні надсилаються, пошкоджені — у браку (як раніше).
+      data = await loadItem(id);
+      const sent = await actItem(id, {
+        intent: "receive",
+        operationId: data.operationIds.receive,
+        quantity: "1",
+        defectiveQuantity: "1",
+        reason: "customer_return",
+        pushToShopify: "on",
+        damagedNotRestocked: "on",
+      });
+      expect(extraOf(sent)).toEqual(["warehouse.op.pushQueued"]);
+      // Без позначки — як у R1 (брак знімається з Shopify).
+      data = await loadItem(id);
+      const all = await actItem(id, { intent: "receive", operationId: data.operationIds.receive, quantity: "1", defectiveQuantity: "1", reason: "customer_return" });
+      expect(extraOf(all)).toEqual(["warehouse.op.returnDamagedPushed", "warehouse.op.returnNotPushed"]);
+    });
+    // Тексти: підказка до «надіслати» більше не вимагає поповнювати в Shopify все повернення; новий вибір пояснено.
+    expect(uk("warehouse.op.receive.pushReturnHelp")).not.toMatch(/повертайте на склад усе/);
+    expect(DICTIONARIES.en["warehouse.op.receive.pushReturnHelp"]).not.toMatch(/restock the whole return/);
+    expect(uk("warehouse.op.receive.damagedNotRestockedHelp")).toMatch(/лише якісні/);
+    expect(uk("warehouse.op.returnDamagedKept").replace("{damaged}", "1")).toContain("(1)");
+    setContext(OWNER);
+  });
+
+  it("NI-3: a return with damaged units recorded with «send to Shopify» clears the order suggestion", async () => {
+    const db = env.handle.db;
+    const id = await stockItemBySku("OT-PH-BLK");
+    const [variant] = await db.select({ variantId: stockItems.variantId }).from(stockItems).where(eq(stockItems.id, id));
+    const [order] = await db.select().from(orders).where(eq(orders.orderNumber, "#0996"));
+    const [line] = await db
+      .select()
+      .from(orderLineItems)
+      .where(and(eq(orderLineItems.orderId, order!.id), eq(orderLineItems.variantId, variant!.variantId!)));
+    expect(line).toBeDefined();
+    expect(await db.select({ id: stockReservations.id }).from(stockReservations).where(eq(stockReservations.orderLineItemId, line!.id))).toEqual([]);
+    const [warehouse] = await db.select({ id: warehouses.id }).from(warehouses).where(eq(warehouses.isDefault, true));
+    const shopifyUpdatedAt = order!.shopifyUpdatedAt;
+    // Вигадані дані: позицію списано (передано) і повністю повернено/відшкодовано в Shopify.
+    const [reservation] = await db
+      .insert(stockReservations)
+      .values({ orderLineItemId: line!.id, orderId: order!.id, stockItemId: id, warehouseId: warehouse!.id, reservedQty: 0, consumedQty: line!.quantity, status: "consumed" })
+      .returning({ id: stockReservations.id });
+    await db.update(orderLineItems).set({ currentQuantity: 0 }).where(eq(orderLineItems.id, line!.id));
+    await db.update(orders).set({ shopifyUpdatedAt: new Date() }).where(eq(orders.id, order!.id));
+    try {
+      setContext(STAFF);
+      let data = await loadItem(id);
+      expect(data.returnSuggestions).toEqual([{ orderNumber: "#0996", units: line!.quantity, orderId: order!.id }]);
+      // Усе повернення — пошкоджене, «надіслати в Shopify» (у брак, без розділення): отримано все.
+      const res = await actItem(id, {
+        intent: "receive",
+        operationId: data.operationIds.receive,
+        quantity: "0",
+        defectiveQuantity: String(line!.quantity),
+        reason: "customer_return",
+        orderNumber: "#0996",
+        pushToShopify: "on",
+      });
+      expect(res).toMatchObject({ ok: true, message: "warehouse.op.received" });
+      data = await loadItem(id);
+      expect(data.returnSuggestions).toEqual([]);
+    } finally {
+      setContext(OWNER);
+      await db.delete(stockReservations).where(eq(stockReservations.id, reservation!.id));
+      await db.update(orderLineItems).set({ currentQuantity: line!.currentQuantity }).where(eq(orderLineItems.id, line!.id));
+      await db.update(orders).set({ shopifyUpdatedAt }).where(eq(orders.id, order!.id));
+    }
   });
 });

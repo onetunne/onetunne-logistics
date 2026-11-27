@@ -7,7 +7,8 @@
  *   для цифрових кодів (EAN-13 / UPC-A / GTIN-14) провідні нулі не важливі (04820… = 4820…);
  * - спершу шукається збіг зі штрихкодом варіанта, потім із SKU (варіанта або позиції);
  * - кілька позицій того самого варіанта → перша, де ще бракує одиниць;
- * - код відповідає різним варіантам (однаковий SKU/штрихкод у каталозі) → «неоднозначно» (ручне +);
+ * - код відповідає різним варіантам (однаковий SKU/штрихкод у позиціях замовлення — тут; у КАТАЛОЗІ, зокрема варіанти
+ *   поза замовленням, — recordScan у packing.server.ts) → «неоднозначно» (ручне +, звірити модель і колір);
  * - усі одиниці позиції вже запаковано → «більше, ніж замовлено» (чекліст не змінюється);
  * - код не відповідає жодній позиції → «не з цього замовлення».
  * Кожне вдале сканування — +1 одиниця.
@@ -95,7 +96,11 @@ export type AdjustResult =
   | { kind: "below_zero" }
   | { kind: "unknown_line" };
 
-/** Ручна зміна на ±1 (сканер не читає код тощо): межі 0…потрібно. */
+/**
+ * Ручна зміна на ±1 (сканер не читає код тощо): +1 — не більше потрібного; −1 — не менше 0. −1 завжди дозволено для
+ * зайвих одиниць (більше потрібного — напр. кількість зменшили в Shopify після сканування): так пакувальник сам
+ * виправляє чекліст до потрібного, без рішення власника.
+ */
 export function adjustChecklist(lines: readonly ChecklistLine[], checklist: Checklist, lineId: string, delta: 1 | -1): AdjustResult {
   const line = lines.find((l) => l.id === lineId && l.required > 0);
   if (!line) {
@@ -112,7 +117,7 @@ export function adjustChecklist(lines: readonly ChecklistLine[], checklist: Chec
   const current = packedQty(checklist, line.id);
   const packed = current + delta;
   if (packed < 0) return { kind: "below_zero" };
-  if (packed > line.required) return { kind: "over_quantity", packed: current, required: line.required };
+  if (delta === 1 && packed > line.required) return { kind: "over_quantity", packed: current, required: line.required };
   const next = sanitizeChecklist(lines, checklist, { keepStale: true });
   if (packed === 0) delete next[line.id];
   else next[line.id] = packed;

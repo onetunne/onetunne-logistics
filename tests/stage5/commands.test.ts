@@ -315,6 +315,28 @@ describe("write commands", () => {
     expect(r).toMatchObject({ result: "received", sku: "OT-GR-GRY", balance: { available: before.available, defective: before.defective + 2 } });
   });
 
+  it("receive_stock: a confirmed damaged customer return (receipt + return_defect movement) re-previews as already applied", async () => {
+    const operationId = randomUUID();
+    const input = { sku: "OT-GR-BLK", quantity: 1, defectiveQuantity: 1, reason: "customer_return", operationId };
+    expect(ok<StockChangeResult>(await run(STAFF, "receive_stock", input, { confirmed: true })).result).toBe("received");
+    const before = await itemBySku("OT-GR-BLK");
+    const again = await run(STAFF, "receive_stock", input);
+    expect(again).toMatchObject({
+      status: "confirmation_required",
+      preview: {
+        alreadyApplied: true,
+        current: { onHand: before.onHand, defective: before.defective },
+        after: { onHand: before.onHand, defective: before.defective },
+      },
+    });
+    expect(await run(STAFF, "receive_stock", { ...input, defectiveQuantity: 2 })).toMatchObject({
+      status: "error",
+      code: "warehouse.error.operationReused",
+    });
+    expect(ok<StockChangeResult>(await run(STAFF, "receive_stock", input, { confirmed: true })).result).toBe("replay");
+    expect(await itemBySku("OT-GR-BLK")).toMatchObject({ onHand: before.onHand, defective: before.defective });
+  });
+
   it("mark_defective: preview flags insufficient stock; confirmed write moves units to defective", async () => {
     const before = await itemBySku("OT-BG-BLK");
     const tooMany = { sku: "OT-BG-BLK", quantity: before.onHand + 1, reason: "damaged_in_warehouse", operationId: randomUUID() };

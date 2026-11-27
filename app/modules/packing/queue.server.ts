@@ -11,6 +11,7 @@ import { and, asc, count, desc, eq, ilike, inArray, isNotNull, isNull, ne, or, s
 import type { DbOrTx } from "~/db/client.server";
 import { orderLineItems, orderPacking, orders, productVariants, products, shipments, type OrderPriority } from "~/db/schema";
 import type { OrderStatus } from "~/domain/order-status";
+import { can } from "~/domain/permissions";
 import { effectiveLineQuantity } from "~/modules/inventory/quantities";
 import { availableDocumentKinds } from "~/modules/shipments/documents.server";
 import { ACTIVE_SHIPMENT_STATUSES } from "~/modules/shipments/waybill.server";
@@ -135,8 +136,13 @@ export interface QueueResult {
   options: QueueOptions;
 }
 
-export async function listPackingQueue(ctx: Pick<ServiceContext, "db" | "carriers">, filters: QueueFilters, opts: { pageSize?: number } = {}): Promise<QueueResult> {
+/**
+ * Черга пакування. Місто отримувача — лише з orders.view (як і на екрані пакування): packing.perform сам по собі
+ * не відкриває персональних даних; країна лишається (групування посилок, митні документи).
+ */
+export async function listPackingQueue(ctx: Pick<ServiceContext, "db" | "carriers" | "actor">, filters: QueueFilters, opts: { pageSize?: number } = {}): Promise<QueueResult> {
   const db = ctx.db;
+  const showCity = can(ctx.actor, "orders.view");
   const pageSize = Math.min(Math.max(opts.pageSize ?? QUEUE_PAGE_SIZE, 1), 200);
   const base = baseConditions(filters);
   const where = and(...base, tabCondition(filters.tab));
@@ -281,7 +287,7 @@ export async function listPackingQueue(ctx: Pick<ServiceContext, "db" | "carrier
         priority: r.priority as OrderPriority,
         placedAt: r.placedAt,
         countryCode: r.countryCode?.trim().toUpperCase() || null,
-        city: r.city,
+        city: showCity ? r.city : null,
         source: r.source,
         units: lines.reduce((s, l) => s + l.quantity, 0),
         lines,

@@ -52,6 +52,15 @@ const messages: MessageModule = {
     "inventorySync.overview.queue": "У черзі",
     "inventorySync.overview.queuedPush": "передача",
     "inventorySync.overview.queuedReconcile": "звірок: {count}",
+    // Демо: Shopify не підключено — стан передачі/звірки не діє (налаштування показуються лише як обрані).
+    "inventorySync.overview.demo.push": "Демо: Shopify не підключено — нічого не надсилається",
+    "inventorySync.overview.demo.external": "Демо: Shopify не підключено — змін залишку з Shopify немає, нічого не приймається",
+    "inventorySync.overview.demo.setting": "Обрано в налаштуваннях: «{value}». Діятиме лише в робочому застосунку з підключеним Shopify.",
+    "inventorySync.overview.demo.nextReconcile": "Демо: Shopify не підключено — планова звірка не виконується",
+    "inventorySync.overview.demo.pending": "Зміни з позначкою «Очікує надсилання»",
+    "inventorySync.overview.demo.pendingHint":
+      "Не будуть надіслані: у демо Shopify не підключено. Позначка лишилася з демо-даних, створених раніше; її прибирає «Скинути демо-дані» (Налаштування → Демо-дані).",
+    "inventorySync.overview.demo.queue": "У демо завдання синхронізації з Shopify не виконуються.",
 
     "inventorySync.action.reconcileAll": "Звірити все",
     "inventorySync.action.reconcileAll.title": "Звірити всі товари з Shopify?",
@@ -301,6 +310,14 @@ const messages: MessageModule = {
     "inventorySync.overview.queue": "Queued",
     "inventorySync.overview.queuedPush": "sending",
     "inventorySync.overview.queuedReconcile": "reconciliations: {count}",
+    "inventorySync.overview.demo.push": "Demo: Shopify is not connected — nothing is sent",
+    "inventorySync.overview.demo.external": "Demo: Shopify is not connected — there are no stock changes from Shopify, nothing is accepted",
+    "inventorySync.overview.demo.setting": "Selected in the settings: «{value}». It takes effect only in the live app with Shopify connected.",
+    "inventorySync.overview.demo.nextReconcile": "Demo: Shopify is not connected — no scheduled reconciliation runs",
+    "inventorySync.overview.demo.pending": "Changes marked «Waiting to send»",
+    "inventorySync.overview.demo.pendingHint":
+      "They will not be sent: Shopify is not connected in the demo. The mark is left over from demo data created earlier; «Reset demo data» (Settings → Demo data) removes it.",
+    "inventorySync.overview.demo.queue": "In the demo, Shopify sync jobs do not run.",
 
     "inventorySync.action.reconcileAll": "Reconcile all",
     "inventorySync.action.reconcileAll.title": "Reconcile all products with Shopify?",
