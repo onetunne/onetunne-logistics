@@ -181,7 +181,7 @@ describe("validateOrder — issues", () => {
   it("every validator issue code is reachable", () => {
     const seen = new Set<IssueCode>();
     const collect = (input: OrderValidationInput, rules = RULES) => {
-      for (const i of validateOrder(input, rules).issues) seen.add(i.code);
+      for (const i of validateOrder(input, rules, { originCountry: "UA" }).issues) seen.add(i.code);
     };
 
     collect(order({ contactPhone: null, email: "not-an-email", shipping: { phone: null, firstName: null, lastName: " ", address1: null, city: "" } }));
@@ -194,6 +194,14 @@ describe("validateOrder — issues", () => {
     collect(order({ shipping: { postalCode: "1011" } }));
     collect(order({ shipping: { countryCode: "US", postalCode: "10001", province: null, phone: "+1 202 555 0123" } }));
     collect(order({ items: [] }));
+    // Етап 4: якість адреси/телефону/контактів.
+    collect(order({ shipping: { firstName: null, address1: null, address2: "Musterstraße 1" } }));
+    collect(order({ email: null, shipping: { address1: "Musterstraße", phone: "+49 30 12345678" } }), RULES);
+    collect(order({ shipping: { city: "x".repeat(101), address2: "Musterstraße 1" } }));
+    collect(order({ shipping: { city: "10115 Berlin", address1: "10115 Berlin" } }));
+    collect(order({ shipping: { phone: "+380 67 123 4567" } }));
+    collect(order({ shipping: { countryCode: "US", postalCode: "10001", province: "New Jersey", phone: "+1 202 555 0123" } }));
+    collect(order({ shipping: { countryCode: "US", postalCode: "10001", province: "NJ", phone: "+1 202 555 0123" } }));
     collect(
       order({
         items: [

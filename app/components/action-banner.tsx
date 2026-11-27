@@ -1,4 +1,4 @@
-import { useT } from "~/i18n";
+import { useLocale, useT } from "~/i18n";
 import { localizeParams } from "~/i18n/localize";
 import { Banner } from "~/ui";
 
@@ -10,8 +10,9 @@ export type ActionResult =
 /** Показує результат останньої дії (успіх/помилка) зрозумілою мовою. */
 export function ActionBanner({ data }: { data: ActionResult | undefined | null }) {
   const t = useT();
+  const locale = useLocale();
   if (!data) return null;
-  const params = localizeParams(data.params, t);
+  const params = localizeParams(data.params, t, locale);
   if (data.ok) {
     return (
       <Banner tone={data.tone ?? "success"}>

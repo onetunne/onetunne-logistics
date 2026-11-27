@@ -150,6 +150,24 @@ export const countryRules = pgTable("country_rules", {
   updatedAt: updatedAt(),
 });
 
+/**
+ * Історія версій правил країн (етап 4). value — повний знімок правила цієї версії.
+ * source: initial — стан до першої зміни в застосунку; add — нова країна; update — зміна; reset — повернення до типового.
+ */
+export const countryRulesHistory = pgTable(
+  "country_rules_history",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    countryCode: char("country_code", { length: 2 }).notNull(),
+    version: integer("version").notNull(),
+    source: text("source").notNull().default("update"),
+    value: jsonb("value").notNull(),
+    changedBy: text("changed_by").notNull(),
+    changedAt: timestamp("changed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("country_rules_history_code_version_uq").on(t.countryCode, t.version)],
+);
+
 // ---------------------------------------------------------------------------
 // Товари (робоча копія з Shopify)
 // ---------------------------------------------------------------------------

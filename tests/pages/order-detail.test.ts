@@ -5,7 +5,7 @@ import { Outlet, StaticRouterProvider, createStaticHandler, createStaticRouter }
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ActionResult } from "~/components/action-banner";
 import type { ShellData } from "~/components/shell-types";
-import { orderLineItems, orders, shipments } from "~/db/schema";
+import { issues, orderLineItems, orders, shipments } from "~/db/schema";
 import { PERMISSIONS, makeActor } from "~/domain/permissions";
 import { TEST_CARRIER_CODE, createCarrierRegistry } from "~/integrations/carriers";
 import type {
@@ -19,6 +19,7 @@ import type {
   TrackingSnapshot,
 } from "~/integrations/carriers/types";
 import { DemoShopifyGateway } from "~/integrations/shopify/types";
+import { makeT } from "~/i18n";
 import { resetEnvCache } from "~/lib/env.server";
 import { DEFAULT_SETTINGS } from "~/modules/settings/schema";
 import { updateSetting } from "~/modules/settings/settings.server";
@@ -387,7 +388,9 @@ describe("order detail rendering (E2E contracts)", () => {
     expect(data.shipments.find((s) => s.active)).toMatchObject({ status: "created", waybillNumber: "ABC-123456" });
     const linkedHtml = await render(id);
     expect(linkedHtml).toContain("Номер накладної прив’язано вручну.");
-    expect(linkedHtml).toContain("Скасувати накладну");
+    expect(linkedHtml).toContain("Скасувати й виправити дані");
+    // Ручна прив'язка: переоформлення знімає прив'язку локально й створює нову накладну через API.
+    expect(linkedHtml).toContain("Переоформити накладну");
   });
 
   it("offers suggestion buttons for an ambiguous phone and renders history orders", async () => {
@@ -591,7 +594,8 @@ describe("order detail: tracking and handover (stage 3)", () => {
     expect(html).toContain("Посилку передано перевізнику");
     expect(html).toContain("підтвердив менеджер");
     expect(html).not.toContain("Посилку фізично передано перевізнику?");
-    expect(html).not.toContain("Скасувати накладну");
+    expect(html).not.toContain("Скасувати й виправити дані");
+    expect(html).not.toContain("Переоформити накладну");
     // Передачу вже зафіксовано — підказки про ручну кнопку немає.
     expect(html).toContain("Перевізник не підтримує відстеження через API.");
     expect(html).not.toContain("позначте це вручну");
@@ -687,7 +691,8 @@ describe("order detail: tracking and handover (stage 3)", () => {
       expect(html).toContain("Скасовано у перевізника");
       expect(html).not.toContain("Посилку фізично передано перевізнику?");
       // Вихід — скасувати накладну й створити нову.
-      expect(html).toContain("Скасувати накладну");
+      expect(html).toContain("Скасувати й виправити дані");
+      expect(html).toContain("Переоформити накладну");
       expect((await waybillRows()).find((r) => r.id === shipmentId)).toMatchObject({ status: "created", trackingStatus: "cancelled" });
 
       expect(await act(id, { intent: "cancelWaybill", shipmentId })).toMatchObject({ ok: true, message: "result.waybill.cancelled" });
@@ -782,5 +787,185 @@ describe("order detail: tracking and handover (stage 3)", () => {
     });
     // Тестовий перевізник демо — без змін.
     expect(await render(id)).toContain("Створити тестову накладну");
+  });
+});
+
+describe("order detail: long suggestion candidates", () => {
+  it("accepts a stored candidate longer than 64 characters (address line 2 → line 1)", async () => {
+    const line2 = "Musterstraße 12, Hinterhaus, Aufgang B, 3. Etage links, bei Familie Beispiel";
+    expect(line2.length).toBeGreaterThan(64);
+    const id = await cleanOrder({ shipAddress1: null, shipAddress2: line2 });
+    await act(id, { intent: "validate" });
+    const issue = (await load(id)).openIssues.find((i) => i.code === "ADDRESS_LINE1_EMPTY_LINE2_FILLED");
+    expect(issue?.suggestion?.candidates).toEqual([line2]);
+    expect(await act(id, { intent: "acceptSuggestion", issueId: issue!.id, candidate: line2 })).toMatchObject({
+      ok: true,
+      message: "result.suggestion.accepted",
+    });
+    expect(await act(id, { intent: "acceptSuggestion", issueId: issue!.id, candidate: "x".repeat(201) })).toMatchObject({ ok: false });
+  });
+});
+
+describe("order detail: re-issue and Shopify re-sync (stage 4)", () => {
+  it("a created waybill shows the waybill view with «Переоформити» and «Скасувати й виправити дані» instead of create", async () => {
+    const { id, shipmentId, number } = await withWaybill();
+    const data = await load(id);
+    expect(data.shipments[0]).toMatchObject({ id: shipmentId, reissuable: true });
+    const html = await render(id);
+    expect(html).not.toContain("Створити тестову накладну");
+    expect(html).toContain("Змінити накладну");
+    expect(html).toContain("Переоформити накладну");
+    expect(html).toContain("Скасувати й виправити дані");
+    // Діалоги пояснюють наслідки (тестова накладна — у реального перевізника нічого не скасовується).
+    expect(html).toContain(`Переоформити накладну ${number}?`);
+    expect(html).toContain(`Тестову накладну ${number} буде скасовано`);
+    expect(html).toContain("стара накладна все одно залишиться скасованою");
+    expect(html).toContain("Нову накладну НЕ буде створено автоматично");
+    // Кнопки в стеку з перенесенням рядків (мобільний екран без горизонтальної прокрутки).
+    expect(html).toMatch(/ot-stack--horizontal[^"]*ot-stack--wrap[^>]*>(?:(?!<\/div>).)*reissueWaybill/s);
+
+    // Працівник (без waybills.manage): кнопок немає, сервер відмовляє.
+    const staffHtml = await render(id, { role: "staff" });
+    expect(staffHtml).not.toContain("Переоформити накладну");
+    expect(staffHtml).not.toContain("Скасувати й виправити дані");
+    expect(await act(id, { intent: "reissueWaybill", shipmentId }, "staff")).toEqual({ ok: false, error: "error.forbidden" });
+    expect(await act(id, { intent: "reissueWaybill", shipmentId: "00000000-0000-4000-8000-000000000000" })).toEqual({
+      ok: false,
+      error: "error.notFound",
+    });
+  });
+
+  it("re-issue: old waybill cancelled, new generation created, no duplicates; the waybills list marks the generation", async () => {
+    const { id, shipmentId, number } = await withWaybill();
+    const r = await act(id, { intent: "reissueWaybill", shipmentId });
+    expect(r).toMatchObject({ ok: true, message: "order.reissue.result.reissued", tone: "success", extra: ["order.result.notShipped"] });
+    const params = r.ok ? r.params : undefined;
+    expect(params?.old).toBe(number);
+    expect(String(params?.number)).toMatch(/^TEST\d{10}$/);
+    expect(params?.number).not.toBe(number);
+
+    const data = await load(id);
+    expect(data.order.status).toBe("waybill_created");
+    expect(data.shipments.filter((s) => s.active)).toHaveLength(1);
+    expect(data.shipments.find((s) => s.active)).toMatchObject({ generation: 2, waybillNumber: params?.number, reissuable: true });
+    expect(data.shipments.find((s) => s.id === shipmentId)).toMatchObject({ status: "cancelled", active: false });
+    expect(data.history.events.map((e) => e.type)).toEqual(expect.arrayContaining(["cancelled", "reissued", "created"]));
+
+    // Повтор форми для старої (уже скасованої) накладної — відмова, дубліката немає.
+    expect(await act(id, { intent: "reissueWaybill", shipmentId })).toEqual({ ok: false, error: "waybill.notCancellable", params: {} });
+    expect((await load(id)).shipments).toHaveLength(2);
+
+    const rows = (await waybillRows()).filter((row) => row.orderId === id);
+    expect(rows.map((row) => row.generation).sort()).toEqual([1, 2]);
+    const html = await render(id);
+    expect(html).toContain("Накладну переоформлено — створено нове покоління");
+  });
+
+  it("re-issue blocked by the dry-run data check: nothing is cancelled, the banner names the problems and the way out", async () => {
+    const { id, shipmentId } = await withWaybill();
+    const { handle } = await getDemoRuntime();
+    await handle.db.update(orders).set({ shipCity: null }).where(eq(orders.id, id));
+    const r = await act(id, { intent: "reissueWaybill", shipmentId });
+    expect(r).toMatchObject({
+      ok: true,
+      message: "order.reissue.result.notStarted",
+      extra: ["result.waybill.blocked.validation", "order.reissue.result.validationIssues", "order.reissue.result.correctInstead"],
+      tone: "warning",
+    });
+    expect(r.ok && String(r.params?.issues)).toContain("Немає міста");
+    const data = await load(id);
+    expect(data.shipments.filter((s) => s.active)).toHaveLength(1);
+    expect(data.order).toMatchObject({ status: "waybill_created" });
+    const html = await render(id, { method: "POST", fields: { intent: "reissueWaybill", shipmentId } });
+    expect(html).toContain("стару накладну не скасовано");
+    expect(html).toContain("Проблеми з даними: Немає міста");
+    expect(html).toContain("«Скасувати й виправити дані»");
+  });
+
+  it("re-issue blocked after the cancellation: the banner says the old waybill IS cancelled and shows the real status", async () => {
+    const { id, shipmentId, number } = await withWaybill();
+    const { handle } = await getDemoRuntime();
+    const sim = DEFAULT_SETTINGS.testCarrier;
+    const owner = makeActor({ id: "demo-owner", displayName: "Owner", role: "owner" });
+    await updateSetting(handle.db, owner, "testCarrier", { ...sim, simulation: "reject" });
+    try {
+      const r = await act(id, { intent: "reissueWaybill", shipmentId });
+      expect(r).toMatchObject({
+        ok: true,
+        message: "order.reissue.result.cancelledOnly",
+        extra: ["result.waybill.rejected", "order.reissue.result.fixAndCreate"],
+        tone: "critical",
+      });
+      expect(r.ok && r.params?.old).toBe(number);
+      expect(r.ok && r.params?.orderStatus).toBe("Потребує виправлення");
+    } finally {
+      await updateSetting(handle.db, owner, "testCarrier", sim);
+    }
+    const data = await load(id);
+    expect(data.shipments.filter((s) => s.active)).toHaveLength(0);
+    expect(data.order).toMatchObject({ status: "needs_correction", editable: true });
+    expect(makeT("uk")("order.reissue.result.fixAndCreate", { orderStatus: "Потребує виправлення" })).toContain(
+      "Статус замовлення зараз — «Потребує виправлення»",
+    );
+  });
+
+  it("«Скасувати й виправити дані» cancels only and explains the next step", async () => {
+    const { id, shipmentId } = await withWaybill();
+    expect(await act(id, { intent: "cancelWaybill", shipmentId, purpose: "correction" })).toEqual({
+      ok: true,
+      message: "result.waybill.cancelled",
+      extra: ["order.correct.result"],
+    });
+    // Банер не повторює «Накладну скасовано.» двічі.
+    for (const locale of ["uk", "en"] as const) {
+      const t = makeT(locale);
+      const first = t("result.waybill.cancelled").replace(/\.$/, "");
+      expect(t("order.correct.result"), locale).not.toContain(first);
+    }
+    const data = await load(id);
+    expect(data.shipments.filter((s) => s.active)).toHaveLength(0);
+    expect(data.order).toMatchObject({ status: "awaiting_review", editable: true });
+    expect(await render(id)).toContain("Створити тестову накладну");
+  });
+
+  it("data changed in Shopify after the waybill: a hint explains that re-issue is the way to apply it", async () => {
+    const { id } = await withWaybill();
+    const { handle } = await getDemoRuntime();
+    await handle.db.insert(issues).values({
+      orderId: id,
+      code: "SHOPIFY_ORDER_CHANGED",
+      severity: "warning",
+      params: { fields: "shipping.city, email" },
+      fingerprint: `${id}:SHOPIFY_ORDER_CHANGED:`,
+    });
+    const html = await render(id);
+    expect(html).toContain("Дані змінено в Shopify після створення накладної");
+    expect(html).toContain("У Shopify змінено: Місто, Email");
+    expect(html).toContain("накладну потрібно переоформити");
+    expect(html).toContain('value="shopify_changed"');
+  });
+
+  it("Shopify sync state for confirmed corrections in the demo, and «Повторно надіслати в Shopify» explains nothing is sent", async () => {
+    const id = await cleanOrder();
+    expect(await act(id, { intent: "validate" })).toMatchObject({ ok: true });
+    let data = await load(id);
+    expect(data.shopifyPush).toEqual({ state: "demo", hasChanges: false });
+    expect(await render(id)).not.toContain("Повторно надіслати в Shopify");
+
+    expect(await act(id, addressForm(data, { "shipping.address2": "Hinterhaus" }))).toMatchObject({ ok: true, message: "result.order.updated" });
+    data = await load(id);
+    expect(data.shopifyPush).toEqual({ state: "demo", hasChanges: true });
+    const html = await render(id);
+    expect(html).toContain("Виправлені контакти й адреса в Shopify");
+    expect(html).toContain("Демо: у Shopify нічого не надсилається.");
+    expect(html).toContain("Повторно надіслати в Shopify");
+
+    const sendSpy = vi.spyOn(DemoShopifyGateway.prototype, "updateOrderShippingAddress");
+    try {
+      expect(await act(id, { intent: "resendShopify" }, "staff")).toEqual({ ok: true, message: "order.shopifySync.result.demo", tone: "info" });
+      expect(sendSpy).not.toHaveBeenCalled();
+    } finally {
+      sendSpy.mockRestore();
+    }
   });
 });

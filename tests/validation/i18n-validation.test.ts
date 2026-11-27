@@ -38,7 +38,7 @@ describe("validation i18n messages", () => {
   });
 
   it("help texts use only params that validators provide", () => {
-    const allowed = new Set(["country", "example", "title", "sku"]);
+    const allowed = new Set(["country", "example", "title", "sku", "max", "phoneCountry", "prefix", "province", "expected"]);
     for (const locale of ["uk", "en"] as const) {
       for (const [key, value] of Object.entries(messages[locale])) {
         // Проблеми синхронізації Shopify створює сервіс синхронізації з власними параметрами.
@@ -46,7 +46,9 @@ describe("validation i18n messages", () => {
           ? ["fields", "message", "reason", "shipsTo"]
           : key.startsWith("issue.DELIVERY_PROBLEM") || key.startsWith("issue.CARRIER_SHIPMENT_DELETED")
             ? ["carrier", "code", "status", "waybill"] // створюються сервісом відстеження, не валідатором
-            : [];
+            : key.startsWith("issue.CARRIER_CANCEL_")
+              ? ["carrier", "waybill"] // створюються сервісом накладних під час скасування
+              : [];
         for (const p of placeholders(value)) expect(allowed.has(p ?? "") || extra.includes(p ?? ""), `${locale}:${key} {${p}}`).toBe(true);
       }
     }

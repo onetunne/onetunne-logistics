@@ -209,6 +209,9 @@ export default function OrderInvoicePage() {
           <Party heading="Buyer / Consignee" party={invoice.buyer} country={buyerCountry} showTaxId={false} />
         </div>
 
+        <p className="ot-invoice__scroll-hint" aria-hidden="true">
+          {t("tracking.invoice.scrollHint")}
+        </p>
         <div className="ot-invoice__table-wrap">
           <table className="ot-invoice__table">
             <thead>

@@ -37,6 +37,28 @@ export function Tabs({ items, selected, ariaLabel, preventScrollReset = true, cl
     }
   }, [selected]);
 
+  // Підказка прокрутки: м'яке згасання краю, за яким є ще вкладки (data-fade = start | end | both).
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const update = () => {
+      const max = list.scrollWidth - list.clientWidth;
+      const start = list.scrollLeft > 1;
+      const end = max > 1 && list.scrollLeft < max - 1;
+      const fade = start && end ? "both" : start ? "start" : end ? "end" : null;
+      if (fade) list.dataset.fade = fade;
+      else delete list.dataset.fade;
+    };
+    update();
+    list.addEventListener("scroll", update, { passive: true });
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(update);
+    observer?.observe(list);
+    return () => {
+      list.removeEventListener("scroll", update);
+      observer?.disconnect();
+    };
+  }, [items.length]);
+
   return (
     <nav className={cx("ot-tabs", className)} aria-label={ariaLabel}>
       <ul className="ot-tabs__list" ref={listRef}>

@@ -16,6 +16,7 @@ const messages: MessageModule = {
     "orders.filters.status": "Статус",
     "orders.filters.allStatuses": "Усі статуси",
     "orders.filters.problemsOnly": "Лише з проблемами",
+    "orders.filters.titleActive": "Фільтри · активних: {count}",
 
     "orders.table.caption": "Список замовлень",
     "orders.col.order": "Замовлення",
@@ -91,6 +92,7 @@ const messages: MessageModule = {
     "orders.filters.status": "Status",
     "orders.filters.allStatuses": "All statuses",
     "orders.filters.problemsOnly": "Only with problems",
+    "orders.filters.titleActive": "Filters · active: {count}",
 
     "orders.table.caption": "Order list",
     "orders.col.order": "Order",

@@ -124,6 +124,7 @@ const messages: MessageModule = {
     "tracking.invoice.title": "Комерційний інвойс {number}",
     "tracking.invoice.subtitle": "Замовлення {order} · формат A4",
     "tracking.invoice.print": "Друкувати",
+    "tracking.invoice.scrollHint": "Таблиця ширша за екран — прокрутіть →",
     "tracking.invoice.back": "До замовлення",
     "tracking.invoice.note":
       "Підписи полів у документі — англійською: інвойс читає митниця країни призначення. Друкується лише сам документ.",
@@ -244,6 +245,7 @@ const messages: MessageModule = {
     "tracking.invoice.title": "Commercial invoice {number}",
     "tracking.invoice.subtitle": "Order {order} · A4 format",
     "tracking.invoice.print": "Print",
+    "tracking.invoice.scrollHint": "The table is wider than the screen — scroll →",
     "tracking.invoice.back": "Back to order",
     "tracking.invoice.note":
       "Field labels in the document are in English because customs in the destination country read the invoice. Only the document itself is printed.",

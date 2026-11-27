@@ -80,6 +80,22 @@ describe("orders loader", () => {
   });
 });
 
+describe("orders filters (compact filter block)", () => {
+  it("combines status, country, search and problems filters and keeps them across pages", async () => {
+    const all = await load();
+    const first = all.rows.find((r) => r.countryCode)!;
+    const combined = await load(`?status=${first.status}&country=${first.countryCode}&q=${encodeURIComponent(first.orderNumber)}`);
+    expect(combined.isFiltered).toBe(true);
+    expect(combined.filters).toMatchObject({ status: first.status, country: first.countryCode, q: first.orderNumber, problems: false });
+    expect(combined.rows.map((r) => r.id)).toContain(first.id);
+    expect(combined.rows.every((r) => r.status === first.status && r.countryCode === first.countryCode)).toBe(true);
+
+    const withProblems = await load("?problems=1");
+    expect(withProblems.isFiltered).toBe(true);
+    expect(withProblems.rows.every((r) => r.openIssueCount > 0)).toBe(true);
+  });
+});
+
 describe("orders bulk actions", () => {
   it("rejects empty or malformed selections and unknown intents", async () => {
     expect(await act("bulkValidate", ["not-a-uuid", "1' or 1=1"])).toEqual({ ok: false, error: "orders.bulk.noneSelected" });

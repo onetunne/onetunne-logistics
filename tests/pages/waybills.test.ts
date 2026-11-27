@@ -59,3 +59,11 @@ describe("waybills loader", () => {
     expect(available).not.toContain("documents");
   });
 });
+
+describe("waybills loader: re-issued generations (stage 4)", () => {
+  it("exposes the generation of each waybill (1 for the demo seed)", async () => {
+    const data = await load();
+    for (const s of data.shipments) expect(s.generation).toBeGreaterThanOrEqual(1);
+    expect(data.shipments.some((s) => s.generation === 1)).toBe(true);
+  });
+});

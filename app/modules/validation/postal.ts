@@ -45,16 +45,37 @@ const REFORMATTERS: Readonly<Record<string, Reformatter>> = {
 };
 
 const patternCache = new Map<string, RegExp | null>();
+const PATTERN_CACHE_LIMIT = 500;
+/** Індекси коротші; довші значення не перевіряються регулярним виразом (захист від надмірного часу перевірки). */
+export const MAX_POSTAL_LENGTH = 20;
 
-/** Компілює шаблон країни для ПОВНОГО збігу. Некоректний шаблон → null (перевірка неможлива). */
+/**
+ * Безпечний підмножина регулярних виразів для індексів (шаблони вносить власник — захист від «зависання»
+ * сервера, ReDoS): без необмежених повторів (+, *, {n,}), без зворотних посилань і lookaround.
+ * Індекси мають фіксовану довжину, тож {n} / {n,m} і ? достатньо.
+ */
+export function isSafePostalPattern(pattern: string): boolean {
+  if (/\\[1-9]|\\k<|\(\?<?[=!]/.test(pattern)) return false;
+  // Необмежені повтори: + або * (не всередині [...]) та {n,}.
+  const withoutClasses = pattern.replace(/\[(?:\\.|[^\]\\])*\]/g, "C").replace(/\\./g, "E");
+  if (/[+*]/.test(withoutClasses)) return false;
+  if (/\{\d+,\}/.test(withoutClasses)) return false;
+  // Повтор групи ({n}/{n,m} після «)») — навіть обмежений повтор альтернатив, що перекриваються, дає
+  // експоненційний час. Групу можна лише зробити необов'язковою («?»).
+  if (/\)\{/.test(withoutClasses)) return false;
+  return true;
+}
+
+/** Компілює шаблон країни для ПОВНОГО збігу. Некоректний або небезпечний шаблон → null (перевірка неможлива). */
 export function compilePostalPattern(pattern: string): RegExp | null {
   if (patternCache.has(pattern)) return patternCache.get(pattern) ?? null;
   let re: RegExp | null;
   try {
-    re = new RegExp(`^(?:${pattern})$`);
+    re = isSafePostalPattern(pattern) ? new RegExp(`^(?:${pattern})$`) : null;
   } catch {
     re = null;
   }
+  if (patternCache.size >= PATTERN_CACHE_LIMIT) patternCache.clear();
   patternCache.set(pattern, re);
   return re;
 }
@@ -73,7 +94,7 @@ export function normalizePostalCode(raw: string, rule: CountryRule | undefined):
 
   const pattern = rule?.postalCodePattern ? compilePostalPattern(rule.postalCodePattern) : null;
   const reformat = rule ? REFORMATTERS[rule.countryCode.trim().toUpperCase()] : undefined;
-  if (pattern && reformat && !pattern.test(base)) {
+  if (pattern && reformat && base.length <= MAX_POSTAL_LENGTH && !pattern.test(base)) {
     const candidate = reformat(skeleton(base));
     // Застосовуємо лише якщо результат повністю відповідає шаблону і символи індексу ті самі.
     if (candidate !== null && pattern.test(candidate) && isFormatOnlyPostalChange(base, candidate)) {
@@ -88,5 +109,7 @@ export function normalizePostalCode(raw: string, rule: CountryRule | undefined):
 export function matchesPostalPattern(value: string, rule: CountryRule | undefined): boolean | null {
   if (!rule?.postalCodePattern) return null;
   const re = compilePostalPattern(rule.postalCodePattern);
-  return re ? re.test(value) : null;
+  if (!re) return null;
+  if (value.length > MAX_POSTAL_LENGTH) return false;
+  return re.test(value);
 }

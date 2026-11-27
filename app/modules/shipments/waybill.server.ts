@@ -11,7 +11,7 @@
  * 4. Повторне натискання/повторний запит повертає наявну накладну без звернення до перевізника.
  */
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, inArray, like } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, like } from "drizzle-orm";
 import type { DbOrTx, Tx } from "~/db/client.server";
 import { issues, orders, shipmentEvents, shipments } from "~/db/schema";
 import { assertTransition, isShipped } from "~/domain/order-status";
@@ -53,7 +53,8 @@ export const ACTIVE_SHIPMENT_STATUSES = ["creating", "created", "unknown"] as co
 export const STALE_CREATING_MS = 2 * 60 * 1000;
 export const CARRIER_TIMEOUT_MS = 15_000;
 
-export type WaybillSource = "manual" | "bulk" | "automation";
+/** Джерело запиту створення: reissue — нове покоління після скасування в «Переоформити накладну». */
+export type WaybillSource = "manual" | "bulk" | "automation" | "reissue";
 
 export type BlockedReason =
   | "validation"
@@ -103,7 +104,7 @@ async function openCarrierIssue(
   tx: DbOrTx,
   orderId: string,
   shipmentId: string | null,
-  code: "CARRIER_REJECTED" | "CARRIER_RESULT_UNKNOWN" | "CARRIER_UNAVAILABLE",
+  code: "CARRIER_REJECTED" | "CARRIER_RESULT_UNKNOWN" | "CARRIER_UNAVAILABLE" | "CARRIER_CANCEL_UNKNOWN" | "CARRIER_CANCEL_CONFLICT",
   params: Record<string, string | number>,
 ) {
   const fingerprint = `${orderId}:${code}:`;
@@ -696,31 +697,93 @@ export async function confirmNotCreated(ctx: ServiceContext, shipmentId: string)
   });
 }
 
+/** Мета скасування (для історії й журналу): виправлення даних, переоформлення або скасування замовлення. */
+export type CancelPurpose = "correction" | "reissue" | "order_cancelled";
+
+export interface CancelWaybillOutcome {
+  /** true — саме цей запит перевів накладну у «скасовано»; false — її вже скасував паралельний запит. */
+  transitioned: boolean;
+  shipment: ShipmentRow;
+  manual: boolean;
+}
+
 /**
- * Скасування накладної до передачі перевізнику (переоформлення створить нове покоління).
- * Відмова перевізника скасувати → накладна залишається активною.
+ * Скасування накладної до фактичної передачі перевізнику (переоформлення створить нове покоління).
+ * - Відмова перевізника скасувати → накладна залишається активною (помилка waybill.cancelRefused).
+ * - Ручне прив'язування скасовується лише локально (у перевізника нічого не скасовується).
+ * - Перехід created → cancelled — compare-and-set; паралельний запит отримує transitioned=false.
  */
-export async function cancelWaybill(ctx: ServiceContext, shipmentId: string): Promise<void> {
+export async function cancelWaybillDetailed(
+  ctx: ServiceContext,
+  shipmentId: string,
+  opts: { purpose?: CancelPurpose } = {},
+): Promise<CancelWaybillOutcome> {
   requirePermission(ctx.actor, "waybills.manage");
+  const purpose = opts.purpose ?? "correction";
   const shipment = await currentShipment(ctx.db, shipmentId);
   if (shipment.status !== "created" || !shipment.waybillNumber) throw new DomainError("waybill.notCancellable", 409);
   const order = await loadOrderRow(ctx.db, shipment.orderId);
-  if (isShipped(order.status)) throw new DomainError("waybill.alreadyHandedOver", 409);
+  if (isShipped(order.status) || shipment.handedOverAt) throw new DomainError("waybill.alreadyHandedOver", 409);
   const adapter = ctx.carriers.get(shipment.carrierCode);
   const manual = isManualLink(shipment);
   if (!manual) {
     if (!adapter?.capabilities.cancelShipment) throw new DomainError("waybill.cancelNotSupported", 409);
-    const res = await adapter.cancelShipment(shipment.waybillNumber, { signal: AbortSignal.timeout(CARRIER_TIMEOUT_MS) });
-    if (!res.cancelled) throw new DomainError("waybill.cancelRefused", 409);
+    let cancelled = false;
+    let failure: unknown = null;
+    try {
+      cancelled = (await adapter.cancelShipment(shipment.waybillNumber, { signal: AbortSignal.timeout(CARRIER_TIMEOUT_MS) })).cancelled;
+    } catch (e) {
+      failure = e;
+    }
+    if (!cancelled) {
+      // Накладна лишається активною; фіксуємо спробу в історії (без персональних даних).
+      await addEvent(ctx.db, shipmentId, "cancel_refused", failure ? safeMessage(failure) : null, { purpose });
+      await writeAudit(ctx.db, ctx.actor, "waybill.cancel_refused", { type: "shipment", id: shipmentId }, {
+        orderId: shipment.orderId,
+        purpose,
+        kind: failure instanceof CarrierError ? failure.kind : failure ? "error" : "refused",
+      });
+      // Явна відмова перевізника — «відмовив»; збій/тайм-аут — «не вдалося» (накладна так само лишається активною,
+      // результат у перевізника перевіряє менеджер або відстеження).
+      const refused = !failure || (failure instanceof CarrierError && failure.kind === "rejected");
+      if (!refused) {
+        // Відповіді немає: перевізник міг і скасувати накладну — менеджер перевіряє в кабінеті перевізника.
+        await openCarrierIssue(ctx.db, shipment.orderId, shipmentId, "CARRIER_CANCEL_UNKNOWN", {
+          carrier: adapter.displayName,
+          waybill: shipment.waybillNumber,
+        });
+      }
+      throw refused ? new DomainError("waybill.cancelRefused", 409) : new DomainError("waybill.cancelFailed", 409);
+    }
   }
-  await ctx.db.transaction(async (tx) => {
+  const outcome = await ctx.db.transaction(async (tx): Promise<CancelWaybillOutcome | { conflict: true }> => {
     const [row] = await tx
       .update(shipments)
       .set({ status: "cancelled", updatedAt: ctx.now() })
-      .where(and(eq(shipments.id, shipmentId), eq(shipments.status, "created")))
+      .where(and(eq(shipments.id, shipmentId), eq(shipments.status, "created"), isNull(shipments.handedOverAt)))
       .returning();
-    if (!row) return; // уже скасовано паралельним запитом
-    await addEvent(tx, shipmentId, "cancelled", manual ? "manual_link_removed" : null);
+    if (!row) {
+      const latest = await currentShipment(tx, shipmentId);
+      if (latest.status === "created" && latest.handedOverAt) {
+        // Передачу перевізнику зафіксовано під час запиту скасування — потрібна перевірка менеджером.
+        // Подію/журнал/проблему фіксуємо (транзакцію НЕ відкочуємо), помилку повертаємо після неї.
+        await addEvent(tx, shipmentId, "cancel_conflict_handed_over", null, { purpose, carrierCancelled: !manual });
+        await writeAudit(tx, ctx.actor, "waybill.cancel_conflict", { type: "shipment", id: shipmentId }, {
+          orderId: shipment.orderId,
+          carrierCancelled: !manual,
+        });
+        if (!manual) {
+          await openCarrierIssue(tx, shipment.orderId, shipmentId, "CARRIER_CANCEL_CONFLICT", {
+            carrier: adapter?.displayName ?? shipment.carrierCode,
+            waybill: shipment.waybillNumber ?? "",
+          });
+        }
+        return { conflict: true };
+      }
+      return { transitioned: false, shipment: latest, manual }; // уже скасовано паралельним запитом
+    }
+    await addEvent(tx, shipmentId, "cancelled", manual ? "manual_link_removed" : null, { purpose });
+    await resolveCarrierIssues(tx, shipment.orderId, ctx.actor.id, "cancelled", ["CARRIER_CANCEL_UNKNOWN"]);
     const fresh = await loadOrderRow(tx, shipment.orderId, { forUpdate: true });
     const stillActive = await findActiveShipment(tx, shipment.orderId);
     if (!stillActive && (fresh.status === "waybill_created" || fresh.status === "awaiting_picking")) {
@@ -729,8 +792,22 @@ export async function cancelWaybill(ctx: ServiceContext, shipmentId: string): Pr
     await writeAudit(tx, ctx.actor, "waybill.cancelled", { type: "shipment", id: shipmentId }, {
       orderId: shipment.orderId,
       manual,
+      purpose,
     });
+    return { transitioned: true, shipment: row, manual };
   });
+  if ("conflict" in outcome) {
+    // Ручна прив'язка: у перевізника нічого не скасовано — звичайна відмова «вже передано».
+    throw new DomainError(manual ? "waybill.alreadyHandedOver" : "waybill.cancelledButHandedOver", 409, {
+      number: shipment.waybillNumber,
+    });
+  }
+  return outcome;
+}
+
+/** Скасування накладної (див. cancelWaybillDetailed). */
+export async function cancelWaybill(ctx: ServiceContext, shipmentId: string, opts: { purpose?: CancelPurpose } = {}): Promise<void> {
+  await cancelWaybillDetailed(ctx, shipmentId, opts);
 }
 
 /** Скасування замовлення до відправлення (з автоматичним скасуванням тестової накладної). */
@@ -741,7 +818,7 @@ export async function cancelOrder(ctx: ServiceContext, orderId: string): Promise
   if (isShipped(order.status)) throw new DomainError("order.alreadyShipped", 409);
   const active = await findActiveShipment(ctx.db, orderId);
   if (active && active.status !== "created") throw new DomainError("waybill.resolveFirst", 409);
-  if (active?.status === "created") await cancelWaybill(ctx, active.id);
+  if (active?.status === "created") await cancelWaybill(ctx, active.id, { purpose: "order_cancelled" });
   await ctx.db.transaction(async (tx) => {
     const fresh = await loadOrderRow(tx, orderId, { forUpdate: true });
     await setOrderStatus(tx, fresh, "cancelled", { cancelledAt: ctx.now() });

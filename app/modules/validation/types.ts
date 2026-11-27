@@ -13,17 +13,28 @@ export const ISSUE_CODES = [
   "PHONE_MISSING",
   "PHONE_INVALID",
   "PHONE_AMBIGUOUS",
+  "PHONE_NOT_MOBILE",
+  "PHONE_COUNTRY_MISMATCH",
   "EMAIL_INVALID",
+  "EMAIL_MISSING",
   // Адреса
   "NAME_MISSING",
+  "NAME_INCOMPLETE",
   "ADDRESS_MISSING",
+  "ADDRESS_LINE1_EMPTY_LINE2_FILLED",
+  "ADDRESS_NO_HOUSE_NUMBER",
+  "ADDRESS_FIELD_TOO_LONG",
+  "ADDRESS_DUPLICATED_FIELDS",
+  "CITY_CONTAINS_POSTAL_CODE",
   "CITY_MISSING",
   "COUNTRY_MISSING",
   "COUNTRY_UNSUPPORTED",
   "COUNTRY_SHIPPING_DISABLED",
   "POSTAL_CODE_MISSING",
   "POSTAL_CODE_INVALID",
+  "POSTAL_CODE_REGION_MISMATCH",
   "PROVINCE_MISSING",
+  "PROVINCE_INVALID",
   // Товари / митниця
   "ORDER_NO_ITEMS",
   "PRODUCT_NOT_LINKED",
@@ -37,6 +48,10 @@ export const ISSUE_CODES = [
   "CARRIER_REJECTED",
   "CARRIER_RESULT_UNKNOWN",
   "CARRIER_UNAVAILABLE",
+  /** Скасування накладної: відповіді перевізника немає (тайм-аут/збій) — чи скасовано, невідомо. */
+  "CARRIER_CANCEL_UNKNOWN",
+  /** Перевізник СКАСУВАВ накладну, але передачу посилки зафіксовано під час скасування. */
+  "CARRIER_CANCEL_CONFLICT",
   // Синхронізація з Shopify (створюються сервісом синхронізації)
   "SHOPIFY_ORDER_CHANGED",
   "SHOPIFY_SYNC_FAILED",
@@ -123,6 +138,13 @@ export interface CountryRule {
 
 export type CountryRules = ReadonlyMap<string, CountryRule>;
 
+/**
+ * Найбільша довжина кандидата пропозиції, яку приймає форма «Застосувати» (сторінка замовлення й «Проблеми»).
+ * Сервер однаково приймає лише кандидат, збережений у проблемі (acceptSuggestion); обмеження — лише захист форми.
+ * Кандидати бувають довгими (перенесення address2 у address1, місто без індексу), тож запас — до 200 символів.
+ */
+export const MAX_CANDIDATE_LENGTH = 200;
+
 export interface Suggestion {
   field: FieldPath;
   /** 1 кандидат — запропоноване виправлення (потребує підтвердження); >1 — вибір менеджера. */
@@ -141,6 +163,7 @@ export interface ValidationIssue {
 export const AUTO_FIX_RULES = [
   "text.trim_whitespace",
   "country.uppercase",
+  "province.uppercase",
   "phone.normalize_format",
   "phone.international_prefix_00",
   "phone.add_plus",

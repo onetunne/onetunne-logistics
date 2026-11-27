@@ -88,6 +88,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
       waybillNumber: s.waybillNumber,
       reference: s.carrierReference,
       attempts: s.attempts,
+      /** Покоління накладної: > 1 — замовлення переоформлювали (попередні накладні скасовано). */
+      generation: s.generation,
       chargeableWeightGrams: s.chargeableWeightGrams,
       declaredValue: s.declaredValue,
       currency: s.currency,
@@ -140,6 +142,11 @@ export default function WaybillsPage() {
             </Text>
           )}
           {r.mode === "test" ? <TestBadge /> : null}
+          {r.generation > 1 ? (
+            <Badge tone="outline" size="sm" title={t("waybills.reissued.hint")}>
+              {t("waybills.reissued", { generation: r.generation })}
+            </Badge>
+          ) : null}
         </Stack>
       ),
     },

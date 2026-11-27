@@ -27,6 +27,7 @@ import { createWaybills, type BulkWaybillSummary } from "~/modules/shipments/way
 import { getRequestContext } from "~/server/context.server";
 import { formString, toActionError } from "~/server/http.server";
 import {
+  Disclosure,
   Badge,
   Button,
   Card,
@@ -406,6 +407,7 @@ export default function OrdersPage() {
   );
 
   const bulkBusy = busyIntent === "bulkValidate" || busyIntent === "bulkWaybills";
+  const activeFilters = [filters.q, filters.country, filters.status, filters.problems].filter(Boolean).length;
 
   return (
     <Page title={t("nav.orders")} subtitle={t("orders.subtitle")}>
@@ -414,55 +416,60 @@ export default function OrdersPage() {
 
         <Tabs items={tabs} selected={selectedTab} ariaLabel={t("orders.tabs.label")} />
 
-        <Card title={t("common.filters")}>
-          <Form key={listKey} method="get" role="search">
-            <Stack gap={4}>
-              <Grid columns={{ xs: 1, md: 2, lg: 3 }} gap={3}>
-                <TextField
-                  id="orders-filter-q"
-                  type="search"
-                  name="q"
-                  label={t("common.search")}
-                  placeholder={t("orders.filters.searchPlaceholder")}
-                  defaultValue={filters.q}
-                  maxLength={MAX_QUERY_LENGTH}
-                  autoComplete="off"
-                  spellCheck={false}
+        <Card>
+          <Disclosure
+            collapsedOnMobile
+            summary={activeFilters > 0 ? t("orders.filters.titleActive", { count: activeFilters }) : t("common.filters")}
+          >
+            <Form key={listKey} method="get" role="search">
+              <Stack gap={4}>
+                <Grid columns={{ xs: 1, md: 2, lg: 3 }} gap={3}>
+                  <TextField
+                    id="orders-filter-q"
+                    type="search"
+                    name="q"
+                    label={t("common.search")}
+                    placeholder={t("orders.filters.searchPlaceholder")}
+                    defaultValue={filters.q}
+                    maxLength={MAX_QUERY_LENGTH}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <Select
+                    id="orders-filter-country"
+                    name="country"
+                    label={t("orders.filters.country")}
+                    placeholder={t("orders.filters.allCountries")}
+                    options={data.countries.map((c) => ({ value: c.code, label: c.name }))}
+                    defaultValue={filters.country ?? ""}
+                  />
+                  <Select
+                    id="orders-filter-status"
+                    name="status"
+                    label={t("orders.filters.status")}
+                    placeholder={t("orders.filters.allStatuses")}
+                    options={ORDER_STATUSES.map((s) => ({ value: s, label: t(`status.${s}`) }))}
+                    defaultValue={filters.status ?? ""}
+                  />
+                </Grid>
+                <Checkbox
+                  id="orders-filter-problems"
+                  name="problems"
+                  value="1"
+                  label={t("orders.filters.problemsOnly")}
+                  defaultChecked={filters.problems}
                 />
-                <Select
-                  id="orders-filter-country"
-                  name="country"
-                  label={t("orders.filters.country")}
-                  placeholder={t("orders.filters.allCountries")}
-                  options={data.countries.map((c) => ({ value: c.code, label: c.name }))}
-                  defaultValue={filters.country ?? ""}
-                />
-                <Select
-                  id="orders-filter-status"
-                  name="status"
-                  label={t("orders.filters.status")}
-                  placeholder={t("orders.filters.allStatuses")}
-                  options={ORDER_STATUSES.map((s) => ({ value: s, label: t(`status.${s}`) }))}
-                  defaultValue={filters.status ?? ""}
-                />
-              </Grid>
-              <Checkbox
-                id="orders-filter-problems"
-                name="problems"
-                value="1"
-                label={t("orders.filters.problemsOnly")}
-                defaultChecked={filters.problems}
-              />
-              <Stack direction="horizontal" gap={2}>
-                <Button type="submit" variant="primary" loading={isFiltering}>
-                  {t("common.apply")}
-                </Button>
-                <Button to={ordersPath} disabled={!data.isFiltered}>
-                  {t("common.reset")}
-                </Button>
+                <Stack direction="horizontal" gap={2}>
+                  <Button type="submit" variant="primary" loading={isFiltering}>
+                    {t("common.apply")}
+                  </Button>
+                  <Button to={ordersPath} disabled={!data.isFiltered}>
+                    {t("common.reset")}
+                  </Button>
+                </Stack>
               </Stack>
-            </Stack>
-          </Form>
+            </Form>
+          </Disclosure>
         </Card>
 
         {canBulk && rows.length > 0 ? (
