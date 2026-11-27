@@ -93,15 +93,6 @@ const messages: MessageModule = {
     "order.items.qtyPrice": "{qty} × {price} = {total}",
     "order.items.weight": "Вага (за одиницю)",
     "order.items.notLinked": "Позицію не пов’язано з варіантом товару — ваги й митних даних немає.",
-    "order.items.customs.edit": "Редагувати митні дані (демо)",
-    "order.items.customs.help":
-      "У демо дані товару змінюються тут (у робочій версії — у Shopify). Замовлення з цим товаром буде перевірено повторно.",
-    "order.items.customs.hsHelp": "6–10 цифр",
-    "order.items.customs.originHelp": "Дволітерний код ISO, напр. UA",
-    "order.items.customs.descriptionHelp": "Коротко англійською, напр. Cotton T-shirt",
-    "order.items.customs.save": "Зберегти митні дані",
-    "order.items.editInShopify":
-      "Вагу, HS-код, країну походження й митний опис редагуйте в картці товару в Shopify (синхронізація — етап 2).",
 
     // --- Накладна ---
     "order.waybill.title": "Накладна",
@@ -336,15 +327,6 @@ const messages: MessageModule = {
     "order.items.qtyPrice": "{qty} × {price} = {total}",
     "order.items.weight": "Weight (per unit)",
     "order.items.notLinked": "The line item is not linked to a product variant — no weight or customs data.",
-    "order.items.customs.edit": "Edit customs data (demo)",
-    "order.items.customs.help":
-      "In the demo, product data is edited here (in production — in Shopify). Orders with this product are re-checked.",
-    "order.items.customs.hsHelp": "6–10 digits",
-    "order.items.customs.originHelp": "Two-letter ISO code, e.g. UA",
-    "order.items.customs.descriptionHelp": "Short, in English, e.g. Cotton T-shirt",
-    "order.items.customs.save": "Save customs data",
-    "order.items.editInShopify":
-      "Edit weight, HS code, country of origin and customs description on the product page in Shopify (sync — stage 2).",
 
     // --- Waybill ---
     "order.waybill.title": "Waybill",

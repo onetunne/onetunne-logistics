@@ -12,6 +12,7 @@ import {
 import { ActionBanner, type ActionResult } from "~/components/action-banner";
 import { CarrierDocumentButtons } from "~/components/carrier-documents";
 import { useCan, useHref } from "~/components/shell";
+import { OverriddenBadge, VariantCustomsForm } from "~/components/variant-customs-form";
 import { OrderStatusBadge, SeverityBadge, ShipmentStatusBadge, TestBadge } from "~/components/status-badge";
 import { TrackingStatusBadge, isTrackingStatus, trackingTimelineTone } from "~/components/tracking-badge";
 import { shipmentTrackingEvents } from "~/db/schema";
@@ -39,6 +40,8 @@ import {
   updateVariantCustomsData,
   validateOrderById,
 } from "~/modules/orders/workflow.server";
+import { OVERRIDE_FIELDS, type OverrideField } from "~/modules/products/customs-overrides";
+import { loadVariantCustomsParts } from "~/modules/products/repository.server";
 import { REQUIRED_SHIPPER_FIELDS } from "~/modules/settings/schema";
 import { getSettings } from "~/modules/settings/settings.server";
 import { availableDocumentKinds } from "~/modules/shipments/documents.server";
@@ -107,8 +110,6 @@ const SHIPPING_MAX_LENGTH: Record<ShippingField, number> = {
   phone: 40,
 };
 
-const CUSTOMS_FIELDS = ["weightGrams", "hsCode", "countryOfOrigin", "customsDescription"] as const;
-
 /** Подій відстеження в картці (найновіші). */
 const TRACKING_EVENTS_LIMIT = 50;
 /** Статуси замовлення, з яких можна вручну підтвердити фактичну передачу перевізнику. */
@@ -169,7 +170,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     if (e instanceof NotFoundError) throw new Response("Not Found", { status: 404 });
     throw e;
   });
-  const [history, ruleRows, settings, trackingEvents] = await Promise.all([
+  const variantIds = [...new Set(agg.items.flatMap((i) => (i.variant ? [i.variant.id] : [])))];
+  const [history, ruleRows, settings, trackingEvents, variantParts] = await Promise.all([
     loadOrderHistory(ctx.db, orderId),
     loadCountryRuleRows(ctx.db),
     getSettings(ctx.db),
@@ -193,6 +195,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
           : Promise.resolve([]),
       ),
     ),
+    // Значення Shopify і збережені в застосунку — для форми митних даних товару.
+    loadVariantCustomsParts(ctx.db, variantIds),
   ]);
   const { order } = agg;
   const now = ctx.now().getTime();
@@ -272,6 +276,15 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
             countryOfOrigin: i.variant.countryOfOrigin?.trim().toUpperCase() || null,
             originName: i.variant.countryOfOrigin ? countryName(i.variant.countryOfOrigin.trim(), ctx.locale) : null,
             customsDescription: i.variant.customsDescription,
+            customsDescriptionLocal: i.variant.customsDescriptionLocal,
+            material: i.variant.material,
+            lengthMm: i.variant.lengthMm,
+            widthMm: i.variant.widthMm,
+            heightMm: i.variant.heightMm,
+            overriddenFields: i.variant.overriddenFields,
+            /** Збережені в застосунку значення (поля форми) і значення з Shopify (підказки). */
+            overrides: variantParts.get(i.variant.id)?.overrides ?? {},
+            shopify: variantParts.get(i.variant.id)?.shopify ?? null,
           }
         : null,
     })),
@@ -537,14 +550,10 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<A
         const variantId = uuidField(form, "variantId");
         const { items } = await aggregate();
         if (!variantId || !items.some((i) => i.variant?.id === variantId)) return { ok: false, error: "error.notFound" };
-        const weightRaw = formString(form, "weightGrams").trim();
         try {
-          const r = await updateVariantCustomsData(ctx, variantId, {
-            weightGrams: weightRaw === "" ? null : Number(weightRaw),
-            hsCode: formString(form, "hsCode"),
-            countryOfOrigin: formString(form, "countryOfOrigin"),
-            customsDescription: formString(form, "customsDescription"),
-          });
+          // Усі поля форми — рядки; порожнє поле = значення з Shopify.
+          const input = Object.fromEntries(OVERRIDE_FIELDS.map((f) => [f, formString(form, f)])) as Record<OverrideField, string>;
+          const r = await updateVariantCustomsData(ctx, variantId, input);
           return { ok: true, message: "result.product.updated", params: { count: r.revalidated } };
         } catch (e) {
           // Помилки полів прив'язуємо до конкретного варіанта (на сторінці кілька форм товарів).
@@ -1229,10 +1238,12 @@ function ItemsCard({ data, fieldErrors }: { data: Data; fieldErrors: FieldErrors
   const t = useT();
   const locale = useLocale();
   const can = useCan();
+  const href = useHref();
   const { items, isDemo } = data;
   const units = items.reduce((sum, i) => sum + i.quantity, 0);
   // Дані товару змінюємо лише поки замовлення можна перевіряти (після накладної — спершу скасувати її).
-  const canEditCustoms = isDemo && can("orders.edit") && data.order.editable;
+  // Демо й робоча версія: зміни зберігаються в застосунку і мають пріоритет над Shopify.
+  const canEditCustoms = can("orders.edit") && data.order.editable;
   const seenVariants = new Set<string>();
 
   return (
@@ -1243,15 +1254,29 @@ function ItemsCard({ data, fieldErrors }: { data: Data; fieldErrors: FieldErrors
             const v = item.variant;
             const firstOfVariant = v ? !seenVariants.has(v.id) : false;
             if (v) seenVariants.add(v.id);
+            const mark = (field: OverrideField) => (v?.overriddenFields.includes(field) ? <OverriddenBadge /> : null);
+            const withMark = (field: OverrideField, value: ReactNode) =>
+              v?.overriddenFields.includes(field) ? (
+                <Stack as="span" direction="horizontal" gap={1} align="center">
+                  {value}
+                  {mark(field)}
+                </Stack>
+              ) : (
+                value
+              );
             const kv: KeyValueItem[] = v
               ? [
                   { key: "sku", label: t("order.items.sku"), value: item.sku ? <InlineCode>{item.sku}</InlineCode> : <Missing /> },
                   {
                     key: "weight",
                     label: t("order.items.weight"),
-                    value: v.weightGrams !== null ? formatWeight(v.weightGrams, locale) : <Missing critical />,
+                    value: v.weightGrams !== null ? withMark("weightGrams", formatWeight(v.weightGrams, locale)) : <Missing critical />,
                   },
-                  { key: "hs", label: t("field.variant.hsCode"), value: v.hsCode ? <InlineCode>{v.hsCode}</InlineCode> : <Missing critical /> },
+                  {
+                    key: "hs",
+                    label: t("field.variant.hsCode"),
+                    value: v.hsCode ? withMark("hsCode", <InlineCode>{v.hsCode}</InlineCode>) : <Missing critical />,
+                  },
                   {
                     key: "origin",
                     label: t("field.variant.countryOfOrigin"),
@@ -1259,6 +1284,7 @@ function ItemsCard({ data, fieldErrors }: { data: Data; fieldErrors: FieldErrors
                       <Stack as="span" direction="horizontal" gap={1} align="center">
                         <InlineCode>{v.countryOfOrigin}</InlineCode>
                         {v.originName ? <span>{v.originName}</span> : null}
+                        {mark("countryOfOrigin")}
                       </Stack>
                     ) : (
                       <Missing critical />
@@ -1267,7 +1293,7 @@ function ItemsCard({ data, fieldErrors }: { data: Data; fieldErrors: FieldErrors
                   {
                     key: "description",
                     label: t("field.variant.customsDescription"),
-                    value: v.customsDescription ? v.customsDescription : <Missing critical />,
+                    value: v.customsDescription ? withMark("customsDescription", v.customsDescription) : <Missing critical />,
                   },
                 ]
               : [];
@@ -1294,113 +1320,52 @@ function ItemsCard({ data, fieldErrors }: { data: Data; fieldErrors: FieldErrors
                 </Stack>
                 {v ? <KeyValueList items={kv} /> : <Banner tone="critical">{t("order.items.notLinked")}</Banner>}
                 {v && firstOfVariant && canEditCustoms ? (
-                  <CustomsEditor variant={v} openIssues={data.openIssues} fieldErrors={fieldErrors} />
+                  <CustomsEditor variant={v} isDemo={isDemo} openIssues={data.openIssues} fieldErrors={fieldErrors} />
                 ) : null}
               </Stack>
             );
           })}
         </Stack>
-        {!isDemo ? (
+        <Stack direction="horizontal" gap={2} align="center">
           <Text variant="body-sm" tone="subdued">
-            {t("order.items.editInShopify")}
+            {t("products.order.allProducts")}
           </Text>
-        ) : null}
+          <Button to={href("products")} variant="plain" size="sm">
+            {t("products.order.openProducts")}
+          </Button>
+        </Stack>
       </Stack>
     </Card>
   );
 }
 
+/** Форма митних даних товару (спільний компонент) з помилками дії та відкритими проблемами цього варіанта. */
 function CustomsEditor({
   variant,
+  isDemo,
   openIssues,
   fieldErrors,
 }: {
   variant: NonNullable<Item["variant"]>;
+  isDemo: boolean;
   openIssues: Issue[];
   fieldErrors: FieldErrors;
 }) {
   const t = useT();
-  const busy = useBusy();
   const prefix = `variant.${variant.id}.`;
-  const hasIssue = openIssues.some((i) => i.field?.startsWith(prefix));
-  const hasFieldError = Object.keys(fieldErrors ?? {}).some((k) => k.startsWith(prefix));
-  const errorFor = (field: (typeof CUSTOMS_FIELDS)[number]): string | null => {
-    if (fieldErrors?.[`${prefix}${field}`]) return t("order.address.fieldInvalid");
+  const issueErrors: Partial<Record<OverrideField, string>> = {};
+  for (const field of OVERRIDE_FIELDS) {
     const titles = openIssues.filter((i) => i.field === `${prefix}${field}`).map((i) => t(`issue.${i.code}.title`));
-    return titles.length > 0 ? titles.join("; ") : null;
-  };
-  const id = (field: string) => `variant-${variant.id}-${field}`;
-  // Нова версія даних товару → поля створюються заново зі збереженими значеннями.
-  const formKey = [variant.weightGrams, variant.hsCode, variant.countryOfOrigin, variant.customsDescription].join("|");
-
+    if (titles.length > 0) issueErrors[field] = titles.join("; ");
+  }
   return (
-    <details open={hasIssue || hasFieldError || undefined}>
-      <summary>
-        <Text as="span" variant="body-sm" weight="semibold">
-          {t("order.items.customs.edit")}
-        </Text>
-      </summary>
-      <Form method="post" key={formKey}>
-        <Hidden intent="updateVariant" fields={{ variantId: variant.id }} />
-        <Stack gap={3}>
-          <Text variant="body-sm" tone="subdued">
-            {t("order.items.customs.help")}
-          </Text>
-          <FormLayout columns={2}>
-            <TextField
-              id={id("weightGrams")}
-              name="weightGrams"
-              type="number"
-              min={1}
-              max={30000}
-              step={1}
-              inputMode="numeric"
-              label={t("field.variant.weightGrams")}
-              defaultValue={variant.weightGrams ?? ""}
-              error={errorFor("weightGrams")}
-            />
-            <TextField
-              id={id("hsCode")}
-              name="hsCode"
-              label={t("field.variant.hsCode")}
-              helpText={t("order.items.customs.hsHelp")}
-              defaultValue={variant.hsCode ?? ""}
-              error={errorFor("hsCode")}
-              maxLength={20}
-              spellCheck={false}
-              autoComplete="off"
-            />
-            <TextField
-              id={id("countryOfOrigin")}
-              name="countryOfOrigin"
-              label={t("field.variant.countryOfOrigin")}
-              helpText={t("order.items.customs.originHelp")}
-              defaultValue={variant.countryOfOrigin ?? ""}
-              error={errorFor("countryOfOrigin")}
-              maxLength={2}
-              autoCapitalize="characters"
-              spellCheck={false}
-              autoComplete="off"
-            />
-            <TextField
-              id={id("customsDescription")}
-              name="customsDescription"
-              label={t("field.variant.customsDescription")}
-              helpText={t("order.items.customs.descriptionHelp")}
-              defaultValue={variant.customsDescription ?? ""}
-              error={errorFor("customsDescription")}
-              maxLength={200}
-              autoComplete="off"
-            />
-          </FormLayout>
-          <Stack direction="horizontal" gap={2}>
-            <Button type="submit" loading={busy("updateVariant", ["variantId", variant.id])}>
-              {t("order.items.customs.save")}
-            </Button>
-          </Stack>
-        </Stack>
-      </Form>
-    </details>
+    <VariantCustomsForm
+      variant={{ id: variant.id, overrides: variant.overrides, shopify: variant.shopify }}
+      isDemo={isDemo}
+      fieldErrors={fieldErrors}
+      issueErrors={issueErrors}
+      open={openIssues.some((i) => i.field?.startsWith(prefix))}
+    />
   );
 }
 

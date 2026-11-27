@@ -13,6 +13,7 @@ const pages = (prefix: "demo" | "app") => [
   route("orders/:orderId/shipments/:shipmentId/documents/:kind", "pages/order-document.tsx", {
     id: `${prefix}-order-document`,
   }),
+  route("products", "pages/products.tsx", { id: `${prefix}-products` }),
   route("problems", "pages/problems.tsx", { id: `${prefix}-problems` }),
   route("waybills", "pages/waybills.tsx", { id: `${prefix}-waybills` }),
   route("country-rules", "pages/country-rules.tsx", { id: `${prefix}-country-rules` }),
