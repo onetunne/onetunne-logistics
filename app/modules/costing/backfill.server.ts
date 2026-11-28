@@ -25,7 +25,7 @@ import { SYSTEM_ACTOR } from "~/domain/permissions";
 import { DomainError } from "~/lib/errors";
 import { logger, redact } from "~/lib/logger.server";
 import type { EnsureValuationBackfill, RebuildValuationForDemo } from "~/modules/finance/core/contracts";
-import { lockValuation } from "~/modules/finance/core/locks.server";
+import { lockValuation, lockFinanceOrders } from "~/modules/finance/core/locks.server";
 import { updateFinanceState } from "~/modules/finance/core/store.server";
 import { lockBalances } from "~/modules/inventory/ledger.server";
 import { syncOrderFinance } from "~/modules/order-finance/sync.server";
@@ -98,5 +98,8 @@ export const rebuildValuationForDemo: RebuildValuationForDemo = async (tx: Tx, c
     .selectDistinct({ orderId: inventoryValuations.orderId })
     .from(inventoryValuations)
     .where(isNotNull(inventoryValuations.orderId));
-  for (const o of orderRows.map((r) => r.orderId!).sort()) await syncOrderFinance(tx, SYSTEM_ACTOR, o);
+  // FINO усіх замовлень одним упорядкованим набором до першої синхронізації (як WP4 syncOrderFinanceMany, §17.8).
+  const financeOrderIds = orderRows.map((r) => r.orderId!).sort();
+  await lockFinanceOrders(tx, financeOrderIds);
+  for (const o of financeOrderIds) await syncOrderFinance(tx, SYSTEM_ACTOR, o);
 };

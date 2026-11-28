@@ -31,6 +31,7 @@ import type { PostingActor } from "~/modules/finance/core/contracts";
 import { repostEntries, reverseEntries, type EntryInput } from "~/modules/finance/core/entries.server";
 import { financeKeys } from "~/modules/finance/core/keys";
 import { lockFinanceOrders } from "~/modules/finance/core/locks.server";
+import { syncOrderFinanceAt } from "~/modules/order-finance/sync.server";
 import { dailyShares, entryAmountMinor, orderExpenseRecognizedOn, type OrderRecognitionState } from "./rules";
 
 const reversals = alias(financeEntries, "fe_exp_rev");
@@ -295,7 +296,14 @@ export async function syncExpenseEntries(tx: Tx, actor: PostingActor, expenseId:
   const desired = desiredExpenseEntries(row, allocations, orders);
   const active = await activeExpenseEntries(tx, row.id);
   const r = await applyDiff(tx, actor, desired, active, opts.now);
-  return { ...r, awaiting: countAwaiting(row, allocations, orders) };
+  const awaiting = countAwaiting(row, allocations, orders);
+  // Фінанси КОЖНОГО замовлення витрати (витрата замовлення, частки суми періоду поточної версії, замовлення діючих і
+  // щойно сторнованих записів) — у тій самій транзакції, у порядку id, під уже взятими FINO (нових блокувань немає,
+  // §17.8): факт витрати / частка замінює прогноз складника (basis allocated, I16), анулювання чи переподіл повертає
+  // прогноз / «немає даних». Без цього order_finance лишався б «≈ Прогноз» поруч із фактом (подвійний облік) або
+  // «очікує перерахунку» після перерахунку — до наступної синхронізації замовлення (WP4).
+  for (const id of [...orderIds].sort()) await syncOrderFinanceAt(tx, actor, id, { now: opts.now });
+  return { ...r, awaiting };
 }
 
 /**

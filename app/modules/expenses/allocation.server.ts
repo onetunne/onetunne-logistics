@@ -228,9 +228,15 @@ export async function computeAllocation(
     .select({ orderId: orderFinanceForecasts.orderId, currency: orderFinanceForecasts.currency, amount: orderFinanceForecasts.amount })
     .from(orderFinanceForecasts)
     .where(and(inArray(orderFinanceForecasts.orderId, candidates.map((c) => c.id)), eq(orderFinanceForecasts.component, component)));
+  // Прогнози order_finance_forecasts — зі знаком впливу на прибуток (витрата «−», WP4/WP7, модель WP12a): вага —
+  // величина прогнозу витрати (|сума|), інакше кожен справжній прогноз комісії / доставки / упаковки відкидався б (> 0) і
+  // розподіл завжди падав би на виручку (§10.3 «пропорційно їхнім прогнозам», G13).
   const fWeights = await commonWeights(
     db,
-    forecasts.map((f) => ({ orderId: f.orderId, currency: f.currency.trim(), minor: toMinorForCurrency(f.amount, f.currency.trim()), date: dateOf.get(f.orderId)! })),
+    forecasts.map((f) => {
+      const minor = toMinorForCurrency(f.amount, f.currency.trim());
+      return { orderId: f.orderId, currency: f.currency.trim(), minor: minor < 0n ? -minor : minor, date: dateOf.get(f.orderId)! };
+    }),
     opts.mode,
   );
   const total = toMinorForCurrency(row.amount, row.currency);

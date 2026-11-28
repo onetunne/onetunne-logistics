@@ -971,3 +971,55 @@ describe("order detail: re-issue and Shopify re-sync (stage 4)", () => {
     }
   });
 });
+
+describe("order detail: «Фінанси замовлення» (stage 6, WP4)", () => {
+  const FINANCE_KEYS = /"(profit|netRevenue|cogs|reportingCurrency|partnerOptions|operationIds|reconciliation|disputes)"/;
+
+  it("staff: the loader field `finance` is exactly null (never an empty object) and the JSON carries no finance data", async () => {
+    const id = await orderIdOf("#1001");
+    const data = await load(id, "staff");
+    expect(data).toHaveProperty("finance");
+    expect(data.finance).toBeNull();
+    expect(JSON.stringify(data)).not.toMatch(FINANCE_KEYS);
+  });
+
+  it("staff: every finance.* action is refused by the service (403), nothing is written", async () => {
+    const { handle } = await getDemoRuntime();
+    const { financeEntries, orderFinance } = await import("~/db/schema");
+    const id = await orderIdOf("#1002");
+    const before = (await handle.db.select().from(orderFinance).where(eq(orderFinance.orderId, id))).map((r) => r.version);
+    const entriesBefore = (await handle.db.select().from(financeEntries).where(eq(financeEntries.orderId, id))).length;
+    const forms: Array<Record<string, string>> = [
+      { intent: "finance.recalculate" },
+      { intent: "finance.flag", flag: "recipient_pays", active: "1", reason: "x" },
+      { intent: "finance.externalWaybill", number: "20450000009999" },
+      { intent: "finance.resyncShopify" },
+    ];
+    for (const fields of forms) {
+      expect(await act(id, fields, "staff")).toMatchObject({ ok: false, error: "error.forbidden" });
+    }
+    expect((await handle.db.select().from(orderFinance).where(eq(orderFinance.orderId, id))).map((r) => r.version)).toEqual(before);
+    expect((await handle.db.select().from(financeEntries).where(eq(financeEntries.orderId, id))).length).toBe(entriesBefore);
+  });
+
+  it("owner: the panel is present (manage, operation ids); «Перерахувати» creates the order's finances; the block renders", async () => {
+    const id = await orderIdOf("#1002");
+    expect(await act(id, { intent: "finance.recalculate" }, "owner")).toEqual({ ok: true, message: "financeOrders.result.recalculated" });
+    const data = await load(id, "owner");
+    expect(data.finance).not.toBeNull();
+    expect(data.finance!.canManage).toBe(true);
+    expect(data.finance!.operationIds.chargeback).toMatch(/^[0-9a-f-]{36}$/);
+    expect(data.finance!.card).toMatchObject({ orderId: id, state: expect.any(String), currency: expect.any(String) });
+    // Невизнане замовлення — прибуток не показано (не 0).
+    if (data.finance!.card!.state !== "recognized") expect(data.finance!.card!.profit.value).toBeNull();
+    const html = await render(id, { role: "owner" });
+    expect(html).toContain("Фінанси замовлення");
+    expect(await render(id, { role: "staff" })).not.toContain("Фінанси замовлення");
+  });
+
+  it("owner: an unknown finance.* intent is a generic error; a non-UUID chargeback operation is refused", async () => {
+    const id = await orderIdOf("#1002");
+    expect(await act(id, { intent: "finance.nope" }, "owner")).toEqual({ ok: false, error: "error.generic" });
+    expect(await act(id, { intent: "finance.chargeback", operationId: "x", currency: "EUR" }, "owner")).toMatchObject({ ok: false, error: "financeOrders.error.operationInvalid" });
+  });
+});

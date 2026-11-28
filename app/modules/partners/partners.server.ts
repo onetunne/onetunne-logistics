@@ -41,7 +41,7 @@ import { writeAudit } from "~/modules/audit/audit.server";
 import { requireFinance } from "~/modules/finance/core/access.server";
 import { writeFinanceChange, type FinanceChangeRow } from "~/modules/finance/core/change-log.server";
 import { resolveDiscrepancy } from "~/modules/finance/core/discrepancies.server";
-import { lockFinanceOperation, lockFinanceOrder } from "~/modules/finance/core/locks.server";
+import { lockFinanceOperation, lockFinanceOrder, lockFinanceOrders } from "~/modules/finance/core/locks.server";
 import { loadFinanceSettings } from "~/modules/finance/core/settings.server";
 import { syncOrderFinance } from "~/modules/order-finance/sync.server";
 import { maskFreeTextNote } from "~/modules/privacy/notes";
@@ -158,7 +158,8 @@ async function assertCodeFree(tx: Tx, source: PartnerCodeSource, norm: string, c
  */
 async function resyncOrder(tx: Tx, ctx: Ctx, orderId: string): Promise<void> {
   await lockFinanceOrder(tx, orderId);
-  const { synced } = await watchPartnerSyncs(() => syncOrderFinance(tx, ctx.actor, orderId));
+  // Годинник сервісу (ctx.now) — і для WP4: коригування, спричинене рішенням власника, датується рішенням.
+  const { synced } = await watchPartnerSyncs(() => syncOrderFinance(tx, ctx.actor, orderId, { now: ctx.now() }));
   if (!synced.has(orderId)) await syncPartnerCommission(tx, ctx.actor, orderId, { now: ctx.now() });
 }
 
@@ -168,6 +169,9 @@ async function resyncOrder(tx: Tx, ctx: Ctx, orderId: string): Promise<void> {
  */
 async function resyncOrders(tx: Tx, ctx: Ctx, orderIds: readonly string[], partnerId?: string): Promise<number> {
   const ids = [...new Set(orderIds)].sort();
+  // FINO усіх замовлень одним упорядкованим набором до першої синхронізації (WP4 syncOrderFinanceMany, §17.8):
+  // синхронізація WP4 останнім записом утримує завдання перерахунку розподілу (рядок jobs до фіксації).
+  await lockFinanceOrders(tx, ids);
   for (const orderId of ids) await resyncOrder(tx, ctx, orderId);
   if (!partnerId || ids.length === 0) return 0;
   const [row] = await tx

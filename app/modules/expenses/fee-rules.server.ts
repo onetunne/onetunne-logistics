@@ -20,7 +20,7 @@ import { writeAudit } from "~/modules/audit/audit.server";
 import { requireFinance } from "~/modules/finance/core/access.server";
 import { writeFinanceChange } from "~/modules/finance/core/change-log.server";
 import { assertMonthOpen } from "~/modules/finance/core/closed-month.server";
-import { lockFinanceOperation } from "~/modules/finance/core/locks.server";
+import { lockFinanceOperation, lockFinanceOrders } from "~/modules/finance/core/locks.server";
 import { loadFinanceSettings } from "~/modules/finance/core/settings.server";
 import { DEFAULT_STORE_ID } from "~/modules/finance/core/store.server";
 import { createRateResolver, rateWindowOf } from "~/modules/fx/rate-for.server";
@@ -111,6 +111,8 @@ async function resyncGatewayOrders(tx: Tx, actor: Ctx["actor"], gateway: string,
     )
     .orderBy(asc(orders.id))
     .limit(FEE_RULE_RESYNC_LIMIT);
+  // FINO усіх замовлень одним упорядкованим набором до першої синхронізації (як WP4 syncOrderFinanceMany, §17.8).
+  await lockFinanceOrders(tx, rows.map((r) => r.id));
   for (const r of rows) await syncOrderFinance(tx, actor, r.id);
   return rows.length;
 }

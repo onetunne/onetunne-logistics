@@ -38,7 +38,7 @@ import { writeAudit } from "~/modules/audit/audit.server";
 import { requireFinance } from "~/modules/finance/core/access.server";
 import { listFinanceChanges, writeFinanceChange, type FinanceChangeRow } from "~/modules/finance/core/change-log.server";
 import type { BuildReportData, ReportData } from "~/modules/finance/core/contracts";
-import { lockFinanceOperation, lockFinancePeriodExclusive } from "~/modules/finance/core/locks.server";
+import { lockFinanceOperation, lockFinancePeriodExclusive, lockFinanceOrders } from "~/modules/finance/core/locks.server";
 import { loadFinanceSettings } from "~/modules/finance/core/settings.server";
 import { saveReportSnapshot } from "~/modules/finance/core/snapshots.server";
 import { DEFAULT_STORE_ID } from "~/modules/finance/core/store.server";
@@ -486,7 +486,10 @@ export async function confirmMonthItems(ctx: Ctx, input: ConfirmInput): Promise<
     });
     let resynced = 0;
     if (changed.includes("packaging_total_accounted")) {
-      for (const id of await ordersRecognizedIn(tx, month)) {
+      // FINO усіх замовлень місяця одним упорядкованим набором до першої синхронізації (як WP4 syncOrderFinanceMany, §17.8).
+      const ids = await ordersRecognizedIn(tx, month);
+      await lockFinanceOrders(tx, ids);
+      for (const id of ids) {
         await syncOrderFinance(tx, ctx.actor, id);
         resynced++;
       }

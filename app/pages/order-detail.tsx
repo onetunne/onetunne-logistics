@@ -71,6 +71,11 @@ import { isReissuable, reissueWaybill, type ReissueResult } from "~/modules/ship
 import { requestShopifyResync, shopifyLinesPending } from "~/modules/shopify-sync/pending-lines.server";
 import { loadShopifyPushState, resendOrderToShopify } from "~/modules/shopify-sync/sync.server";
 import { markHandedOver, refreshShipmentTracking } from "~/modules/tracking/tracking.server";
+// Етап 6 (WP4): блок «Фінанси замовлення» — лише власник (поле loader `finance = null` для працівника), один диспетчер дій.
+import { OrderFinanceCard } from "~/components/order-finance/finance-card";
+import { financeFieldOrNull } from "~/modules/finance/core/access.server";
+import { loadOrderFinancePanel } from "~/modules/order-finance/card.server";
+import { handleOrderFinanceAction, isOrderFinanceIntent } from "~/modules/order-finance/form-actions.server";
 import { MAX_CANDIDATE_LENGTH, SHIPPING_FIELDS, type ShippingField } from "~/modules/validation/types";
 import { getRequestContext } from "~/server/context.server";
 import { formString, toActionError } from "~/server/http.server";
@@ -230,6 +235,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     loadPackingSummary(ctx.db, orderId),
   ]);
   const { order } = agg;
+  // Етап 6: фінанси замовлення — лише власник (finance.view + роль owner); працівнику — null (не порожнє, §14.2).
+  const finance = await financeFieldOrNull(ctx, () => loadOrderFinancePanel(ctx, orderId, { currency: new URL(request.url).searchParams.get("currency") }));
   const now = ctx.now().getTime();
   const carrier = ctx.carriers.getDefault();
   const packageNames = new Map(settings.packaging.packages.map((p) => [p.code, p.name]));
@@ -457,6 +464,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     packing: packingSummary,
     /** Лише назви незаповнених полів відправника — без значень. */
     missingShipperFields: REQUIRED_SHIPPER_FIELDS.filter((f) => !String(settings.shipper[f] ?? "").trim()),
+    /** Етап 6: «Фінанси замовлення» — лише власнику; працівнику null. */
+    finance,
   };
 }
 
@@ -605,6 +614,9 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<A
       const { openIssues } = await aggregate();
       return openIssues.some((i) => i.id === id) ? id : null;
     };
+
+    // Етап 6: ОДИН диспетчер фінансових дій (finance.manage перевіряє сервіс).
+    if (isOrderFinanceIntent(intent)) return await handleOrderFinanceAction(ctx, orderId, form);
 
     switch (intent) {
       case "validate": {
@@ -1013,6 +1025,7 @@ export default function OrderDetailPage() {
           <Stack gap={4}>
             <WaybillCard data={data} />
             <PackingCard data={data} />
+            {data.finance ? <OrderFinanceCard data={data.finance} /> : null}
             <SummaryCard order={order} />
             <HistoryCard data={data} />
           </Stack>

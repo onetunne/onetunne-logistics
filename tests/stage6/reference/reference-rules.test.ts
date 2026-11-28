@@ -29,20 +29,26 @@ import {
   type RefOrderFacts,
   type RefRate,
 } from "./model";
-import { G1_ORDER, G1_ORDER_NO_RETURN, G1_RATES, G2_ORDER } from "./golden";
+import { G1B_ORDER, G1_ORDER, G1_ORDER_NO_RETURN, G1_RATES, G2_ORDER } from "./golden";
 
 const AT = "2026-11-30T00:00:00Z";
 const ctx = { rates: G1_RATES };
 const base: RefOrderFacts = { ...G1_ORDER_NO_RETURN, id: "ord-rules" };
 
 describe("визнання й виключення (§2.5, §3.2)", () => {
-  it("тестове замовлення: стан excluded, жодного запису виручки; вихід складу — inventory_loss test_order", () => {
+  it("тестове замовлення: стан excluded, жодного запису виручки; вихід складу — inventory_loss test_order; справжні витрати (упаковка, рахунок) — R5 з order_id", () => {
     const p = postOrder({ ...base, test: true }, AT);
     expect(p.order.state).toBe("excluded");
-    expect(p.entries.map((e) => [e.category, e.details?.kind])).toEqual([
-      ["inventory_loss", "test_order"],
-      ["inventory_loss", "test_order"],
+    expect(p.entries.map((e) => [e.category, e.details?.kind ?? null, e.amount, e.recognizedOn, e.fxOn])).toEqual([
+      ["inventory_loss", "test_order", "-800.00", "2026-10-05", "2026-10-05"],
+      ["inventory_loss", "test_order", "-250.00", "2026-10-05", "2026-10-05"],
+      // §2.5 «вартість не зникає між складом і P&L»: використана упаковка й оплачена доставка тестового відправлення —
+      // витрати (R5: дата події / послуги), у P&L — «Витрати періоду» (замовлення excluded).
+      ["packaging", null, "-21.00", "2026-10-05", "2026-10-05"],
+      ["shipping_cost", null, "-540.00", "2026-10-05", "2026-10-05"],
     ]);
+    expect(p.entries.every((e) => e.orderId === base.id)).toBe(true);
+    expect(p.entries.some((e) => e.category.startsWith("sales_") || e.category === "payment_fees")).toBe(false);
     const included = postOrder({ ...base, test: true }, AT, { includeTestOrders: true });
     expect(included.order.state).toBe(postOrder(base, AT).order.state);
     expect(included.entries.length).toBe(postOrder(base, AT).entries.length);
@@ -446,5 +452,70 @@ describe("імпорт рахунків перевізника (§7.2, §7.3, §
       ["300.00", "2026-11-07", "2026-10-30", true, true],
       ["-300.00", "2026-11-07", "2026-10-30", true, false],
     ]);
+  });
+});
+
+describe("DDP: мито — окремий складник duties_paid (§2.6, §7.2)", () => {
+  const ddp: RefOrderFacts = {
+    ...base,
+    id: "ord-ddp",
+    ddp: true,
+    invoiceLines: [{ id: "il-ddp-duty", waybillId: "wb-g1", documentId: "inv-duty", chargeType: "customs_duty", amount: "120.00", currency: "UAH", serviceDate: "2026-10-06", importedAt: "2026-10-08T09:00:00Z" }],
+  };
+  it("лише рядок мита: доставка не фактична (прогноз carrier_reported), стан preliminary; мито — R3 складника мита", () => {
+    const p = postOrder(ddp, "2026-10-10T00:00:00Z");
+    expect(p.order.state).toBe("preliminary");
+    expect(p.order.components.shipping_cost).toMatchObject({ state: "forecast", basis: "carrier_reported" });
+    expect(p.forecasts.filter((f) => f.component === "shipping_cost").map((f) => f.amount)).toEqual(["-520.00"]);
+    const duty = p.entries.filter((e) => e.category === "duties_paid");
+    expect(duty.map((e) => [e.amount, e.recognizedOn, e.fxOn, e.isLateCompletion])).toEqual([["-120.00", "2026-10-05", "2026-10-06", true]]);
+  });
+  it("документ мита раніше за першу доставку: перша доставка — R3 (дата визнання, пізнє завершення), не R2", () => {
+    const later: RefOrderFacts = {
+      ...ddp,
+      invoiceLines: [
+        ...ddp.invoiceLines,
+        { id: "il-ddp-del", waybillId: "wb-g1", documentId: "inv-del", chargeType: "delivery", amount: "540.00", currency: "UAH", serviceDate: "2026-11-02", importedAt: "2026-11-10T09:00:00Z" },
+      ],
+    };
+    const p = postOrder(later, AT);
+    const ship = p.entries.filter((e) => e.category === "shipping_cost");
+    expect(ship.map((e) => [e.amount, e.recognizedOn, e.fxOn, e.isLateCompletion])).toEqual([["-540.00", "2026-10-05", "2026-11-02", true]]);
+    expect(p.order.components.shipping_cost).toMatchObject({ state: "actual", basis: "invoice" });
+  });
+});
+
+describe("WP4 огляд 2: перші пізні продажі, курс частки суми періоду, комісії по транзакції (§3.3, §8.1, §10.3)", () => {
+  it("продажі, відомі вперше ПІСЛЯ визнання (виручка була «немає даних»), — R3: дата визнання, позначка пізнього завершення; відомі при визнанні — без позначки", () => {
+    const g1b = G1B_ORDER;
+    const late = postOrder({ ...g1b, sales: g1b.sales.map((s) => ({ ...s, knownAt: "2026-10-10T00:00:00Z" })) }, "2026-10-10T00:00:00Z");
+    expect(late.entries.filter((e) => e.category === "sales_product").map((e) => [e.recognizedOn, e.fxOn, e.isLateCompletion])).toEqual([["2026-10-05", "2026-10-01", true]]);
+    const onTime = postOrder(g1b, "2026-10-10T00:00:00Z");
+    expect(onTime.entries.filter((e) => e.category === "sales_product").map((e) => e.isLateCompletion)).toEqual([false]);
+  });
+
+  it("частка суми періоду: курс — дата документа суми (expenseDate), дата — дата визнання; без дати документа — дата визнання", () => {
+    const order: RefOrderFacts = { ...base, id: "ord-alloc", feeAllocations: [{ expenseId: "e1", amount: "3.50", currency: "EUR", knownAt: "2026-11-28T00:00:00Z", expenseDate: "2026-11-27" }] };
+    const p = postOrder(order, AT);
+    expect(p.entries.filter((e) => e.key.startsWith("alloc:")).map((e) => [e.amount, e.recognizedOn, e.fxOn, e.isLateCompletion])).toEqual([["-3.50", "2026-10-05", "2026-11-27", true]]);
+    const noDate = postOrder({ ...order, feeAllocations: [{ ...order.feeAllocations![0]!, expenseDate: undefined }] }, AT);
+    expect(noDate.entries.filter((e) => e.key.startsWith("alloc:")).map((e) => e.fxOn)).toEqual(["2026-10-05"]);
+  });
+
+  it("оплата з порожнім fees поряд з оплатою, що має комісії, — невідома частина: правило на її суму (partial з прогнозом), без правила — incomplete", () => {
+    const split: RefOrderFacts = {
+      ...base,
+      id: "ord-split",
+      transactions: [
+        { id: "t1", kind: "SALE", status: "SUCCESS", amount: "79.00", processedAt: "2026-10-05T07:00:00Z", gateway: "shopify_payments", fees: [{ id: "f1", amount: "2.50", currency: "EUR" }] },
+        { id: "t2", kind: "SALE", status: "SUCCESS", amount: "50.00", processedAt: "2026-10-05T07:00:00Z", gateway: "paypal", fees: [] },
+      ],
+    };
+    const withRule = postOrder({ ...split, feeRule: { kind: "percent", percentBp: 300 } }, AT);
+    expect(withRule.order.components.fees).toMatchObject({ state: "partial", hasForecast: true, basis: "fee_rule" });
+    expect(withRule.forecasts.filter((f) => f.component === "fees").map((f) => f.amount)).toEqual(["-1.50"]);
+    expect(withRule.order.state).toBe("preliminary");
+    expect(postOrder(split, AT).order.state).toBe("incomplete");
+    expect(postOrder({ ...split, feeRule: { kind: "no_fees" } }, AT).order.components.fees).toMatchObject({ state: "actual", basis: "shopify" });
   });
 });

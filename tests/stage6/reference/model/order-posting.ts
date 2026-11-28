@@ -50,6 +50,8 @@ export interface RefTransactionFact {
   gateway: string;
   fees?: Array<{ id: string; amount: string; currency: string }>;
   knownAt?: string;
+  /** Батьківська транзакція (CAPTURE → AUTHORIZATION): комісії авторизації стосуються її списань (§8.1). */
+  parentId?: string | null;
 }
 
 /** Оцінка руху складу замовлення (або ручна собівартість рядка) у валюті оцінки; `value` — додатна величина. */
@@ -141,8 +143,12 @@ export interface RefOrderFacts {
   /** DDP (умова зі знімка відправлення / налаштування). */
   ddp?: boolean;
   feeRule?: FeeRule | null;
-  /** Частки суми періоду (§10.3, факт `allocated`), додатна величина витрати. */
-  feeAllocations?: Array<{ expenseId: string; amount: string; currency: string; knownAt: string }>;
+  /**
+   * Частки суми періоду (§10.3, факт `allocated`), додатна величина витрати. `expenseDate` — дата документа суми (дата
+   * витрати або кінець періоду послуги): курс частки — за нею (WP6: Σ часток у валюті звітності = сума періоду; R3 —
+   * «власна дата значення»); без неї — дата визнання.
+   */
+  feeAllocations?: Array<{ expenseId: string; amount: string; currency: string; knownAt: string; expenseDate?: string }>;
   partner?: { partnerId: string; rateBp: number; holdDays?: number } | "ambiguous" | null;
   disputes?: RefDisputeFact[];
   packagingForecast?: string | null;
@@ -285,11 +291,24 @@ export function postOrder(o: RefOrderFacts, asOf: string, s: RefPostingSettings 
   const forecasts: RefForecast[] = [];
 
   if (o.test && !s.includeTestOrders) {
-    // Тестове замовлення не враховується (F6/§2.5); фізичний вихід складу — inventory_loss test_order (R6).
+    // Тестове замовлення не враховується (F6/§2.5); фізичний вихід складу — inventory_loss test_order (R6). Справжні
+    // витрати тестового відправлення (використана упаковка, оплачений рахунок перевізника) не зникають (§2.5 «вартість
+    // не зникає між складом і P&L», §6.3): як у скасованого до відвантаження — R5, дата події / послуги, order_id
+    // зберігається (у P&L — «Витрати періоду», бо замовлення excluded).
     result.state = "excluded";
     for (const v of vals.filter((x) => x.kind === "consume" && x.value !== null && cents(x.value) !== 0n)) {
       const d = kyivDate(v.occurredAt);
       entries.push(entry({ key: `val:${v.id}`, orderId: o.id, category: "inventory_loss", amount: str(-cents(v.value!)), currency: v.currency, recognizedOn: d, fxOn: d, details: { kind: "test_order" } }, laterOf(v.knownAt ?? v.occurredAt, v.occurredAt), closures));
+    }
+    for (const v of vals.filter((x) => x.kind === "material" && x.value !== null && cents(x.value) !== 0n)) {
+      const d = kyivDate(v.occurredAt);
+      entries.push(entry({ key: `pkg:${v.id}`, orderId: o.id, category: "packaging", amount: str(-cents(v.value!)), currency: v.currency, recognizedOn: d, fxOn: d }, v.knownAt ?? v.occurredAt, closures));
+    }
+    for (const l of invLines) {
+      const category: RefCategory = l.chargeType === "customs_duty" ? "duties_paid" : l.chargeType === "return_delivery" || l.chargeType === "redirect" ? "return_shipping_cost" : "shipping_cost";
+      const e = entry({ key: invKey(l), orderId: o.id, category, amount: str(-cents(l.amount)), currency: l.currency, recognizedOn: l.serviceDate, fxOn: l.serviceDate }, l.importedAt, closures);
+      entries.push(e);
+      if (lineReversed(l, asOf)) entries.push(reverseEntry(e, laterOf(l.reversedAt!, l.importedAt), closures));
     }
     return { order: result, entries, forecasts };
   }
@@ -327,11 +346,19 @@ export function postOrder(o: RefOrderFacts, asOf: string, s: RefPostingSettings 
   const postAt = (knownAt: string) => laterOf(knownAt, recognizedAt!);
 
   // --- Продажі угод (§2.1, R1/R2) ---
+  // R3 (§3.3): виручка, що на момент визнання була «немає даних» (жоден продаж ще не відомий), — перші відомі продажі
+  // (найраніший момент, коли стали відомими) до визнання проводяться датою визнання з позначкою пізнього завершення.
+  const firstSaleKnownMs = sales.reduce((m, x) => Math.min(m, instantMs(x.knownAt ?? x.happenedAt)), Number.POSITIVE_INFINITY);
   for (const sale of sales) {
     const after = instantMs(sale.happenedAt) > recT;
     const category = saleCategory(sale.agreement, after, sale.lineType);
     const eventOn = kyivDate(sale.happenedAt);
-    const target = after ? { recognizedOn: maxDate(eventOn, recognizedOn), fxOn: eventOn } : { recognizedOn, fxOn: revenueFx };
+    const lateFirst = !after && firstSaleKnownMs > recT && instantMs(sale.knownAt ?? sale.happenedAt) === firstSaleKnownMs;
+    const target: { recognizedOn: string; fxOn: string; isLateCompletion?: boolean } = after
+      ? { recognizedOn: maxDate(eventOn, recognizedOn), fxOn: eventOn }
+      : lateFirst
+        ? { recognizedOn, fxOn: revenueFx, isLateCompletion: true }
+        : { recognizedOn, fxOn: revenueFx };
     const net = cents(sale.totalAmount) - cents(sale.taxAmount);
     const tax = cents(sale.taxAmount);
     const disc = sale.discountAmount ? cents(sale.discountAmount) : 0n;
@@ -348,10 +375,11 @@ export function postOrder(o: RefOrderFacts, asOf: string, s: RefPostingSettings 
   }
 
   // --- Комісії транзакцій (§8.1): SALE/CAPTURE — R1 (пізніше визнання — R3), інші види — R2 ---
-  let feeFacts = 0;
+  let shopifyFeeFacts = 0;
+  let allocFacts = 0;
   for (const t of txs.filter((x) => x.status === "SUCCESS" && !x.test)) {
     for (const f of t.fees ?? []) {
-      feeFacts += 1;
+      shopifyFeeFacts += 1;
       const own = kyivDate(t.processedAt);
       const knownAtFee = t.knownAt ?? t.processedAt;
       let target: { recognizedOn: string; fxOn: string; isLateCompletion?: boolean };
@@ -363,9 +391,9 @@ export function postOrder(o: RefOrderFacts, asOf: string, s: RefPostingSettings 
   }
   for (const a of o.feeAllocations ?? []) {
     if (!known(a.knownAt, a.knownAt, asOf)) continue;
-    feeFacts += 1;
+    allocFacts += 1;
     const late = instantMs(a.knownAt) > recT;
-    entries.push(entry({ key: `alloc:${a.expenseId}:${o.id}:v1`, orderId: o.id, category: "payment_fees", amount: str(-cents(a.amount)), currency: a.currency, recognizedOn, fxOn: recognizedOn, isLateCompletion: late, details: { basis: "allocated" } }, postAt(a.knownAt), closures));
+    entries.push(entry({ key: `alloc:${a.expenseId}:${o.id}:v1`, orderId: o.id, category: "payment_fees", amount: str(-cents(a.amount)), currency: a.currency, recognizedOn, fxOn: a.expenseDate ?? recognizedOn, isLateCompletion: late, details: { basis: "allocated" } }, postAt(a.knownAt), closures));
   }
 
   // --- Собівартість і упаковка з оцінок складу (§6.5): R1; повернення — R2; завершення — R3 ---
@@ -387,12 +415,15 @@ export function postOrder(o: RefOrderFacts, asOf: string, s: RefPostingSettings 
   // на момент визнання його вже немає — ні запису, ні сторно, і першим документом накладної він не є.
   const shipLines = invLines.filter((l) => !(lineReversed(l, asOf) && instantMs(l.reversedAt!) <= recT));
   const orderWaybills = new Set(o.waybills.map((w) => w.id));
+  // Перший документ — окремо для доставки й для мита накладної: мито (DDP) — окремий складник duties_paid (§2.6,
+  // §7.2); документ лише з митом не є першою фактичною доставкою (пізніший перший рядок доставки — R3, не R2).
+  const docKey = (l: RefInvoiceLineFact) => `${l.waybillId}|${l.chargeType === "customs_duty" ? "duty" : "ship"}`;
   const firstDocByWaybill = new Map<string, number>();
   for (const l of shipLines) {
     if (!l.waybillId || !orderWaybills.has(l.waybillId) || isR2Charge(l)) continue;
     const t = instantMs(l.importedAt);
-    const prev = firstDocByWaybill.get(l.waybillId);
-    if (prev === undefined || t < prev) firstDocByWaybill.set(l.waybillId, t);
+    const prev = firstDocByWaybill.get(docKey(l));
+    if (prev === undefined || t < prev) firstDocByWaybill.set(docKey(l), t);
   }
   // Перший документ накладної лишається першим і після заміни (його записи сторновано): нові версії й пізніші
   // документи — R2 (§7.3 «кредити й нові версії — R2»). Фактична доставка накладної — є чинний (не сторнований)
@@ -405,11 +436,12 @@ export function postOrder(o: RefOrderFacts, asOf: string, s: RefPostingSettings 
     const category: RefCategory = l.chargeType === "customs_duty" ? "duties_paid" : l.chargeType === "return_delivery" || l.chargeType === "redirect" ? "return_shipping_cost" : "shipping_cost";
     if (category === "duties_paid" && !reversed) dutyLines += 1;
     let target: { recognizedOn: string; fxOn: string; isLateCompletion?: boolean };
-    const first = l.waybillId ? firstDocByWaybill.get(l.waybillId) : undefined;
+    const first = l.waybillId ? firstDocByWaybill.get(docKey(l)) : undefined;
     if (!isR2Charge(l) && first !== undefined && instantMs(l.importedAt) === first) {
       target = instantMs(l.importedAt) <= recT ? { recognizedOn, fxOn: l.serviceDate } : { recognizedOn, fxOn: l.serviceDate, isLateCompletion: true };
     } else target = { recognizedOn: maxDate(l.serviceDate, recognizedOn), fxOn: l.serviceDate };
-    if (!isR2Charge(l) && !reversed && l.waybillId) actualWaybills.add(l.waybillId);
+    // Фактична ДОСТАВКА накладної — рядок вартості, не мито (мито — складник duties_paid).
+    if (!isR2Charge(l) && !reversed && l.waybillId && category !== "duties_paid") actualWaybills.add(l.waybillId);
     const e = entry({ key: invKey(l), orderId: o.id, category, amount: str(-cents(l.amount)), currency: l.currency, ...target, details: { chargeType: l.chargeType, waybillId: l.waybillId } }, postAt(l.importedAt), closures);
     entries.push(e);
     if (reversed) entries.push(reverseEntry(e, postAt(laterOf(l.reversedAt!, l.importedAt)), closures));
@@ -548,8 +580,22 @@ export function postOrder(o: RefOrderFacts, asOf: string, s: RefPostingSettings 
     }
   }
 
-  if (feeFacts > 0) comps.fees = cv("actual", { basis: o.feeAllocations?.length ? "allocated" : "shopify" });
-  else if (o.feeRule?.kind === "no_fees") comps.fees = cv("zero_confirmed", { basis: "fee_rule" });
+  // §8.1 «Порожній fees = немає даних» — по транзакції: оплата SALE/CAPTURE без жодного рядка комісії поряд з оплатою,
+  // що має комісії, — невідома частина (правило шлюзу на її суму — прогноз; без правила — неповно), НІКОЛИ не 0.
+  const paidTx = txs.filter((t) => t.status === "SUCCESS" && !t.test && (t.kind === "SALE" || t.kind === "CAPTURE") && cents(t.amount) !== 0n);
+  const hasFees = (t: RefTransactionFact | undefined) => (t?.fees ?? []).length > 0;
+  const uncoveredTx = paidTx.filter((t) => !hasFees(t) && !(t.parentId && hasFees(txs.find((p) => p.id === t.parentId && p.status === "SUCCESS" && !p.test))));
+  const feesKnown = paidTx.length > 0 ? uncoveredTx.length < paidTx.length : shopifyFeeFacts > 0;
+  if (allocFacts > 0) comps.fees = cv("actual", { basis: "allocated" });
+  else if (feesKnown && (uncoveredTx.length === 0 || o.feeRule?.kind === "no_fees")) comps.fees = cv("actual", { basis: "shopify" });
+  else if (feesKnown) {
+    if (o.feeRule?.kind === "percent") {
+      const base = uncoveredTx.reduce((a, t) => a + cents(t.amount), 0n);
+      const amount = mulDiv(base, BigInt(o.feeRule.percentBp), 10000n) + (o.feeRule.fixed ? cents(o.feeRule.fixed) : 0n);
+      comps.fees = cv("partial", { reason: "no_fee_data", hasForecast: true, basis: "fee_rule" });
+      forecasts.push({ orderId: o.id, component: "fees", amount: str(-amount), currency: o.currency, fxOn: revenueFx, recognizedOn, basis: "fee_rule" });
+    } else comps.fees = cv("partial", { reason: "no_fee_data", basis: "shopify" });
+  } else if (o.feeRule?.kind === "no_fees") comps.fees = cv("zero_confirmed", { basis: "fee_rule" });
   else if (o.feeRule?.kind === "percent") {
     const paid = txs.filter((t) => t.status === "SUCCESS" && !t.test && (t.kind === "SALE" || t.kind === "CAPTURE")).reduce((a, t) => a + cents(t.amount), 0n);
     const amount = mulDiv(paid, BigInt(o.feeRule.percentBp), 10000n) + (o.feeRule.fixed ? cents(o.feeRule.fixed) : 0n);

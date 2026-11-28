@@ -18,6 +18,7 @@ import { logger } from "~/lib/logger.server";
 import { businessDate } from "~/lib/periods";
 import { autoResolveDiscrepancy, discrepancyKey, openDiscrepancy } from "~/modules/finance/core/discrepancies.server";
 import { postEntries, type EntryInput } from "~/modules/finance/core/entries.server";
+import { lockFinanceOrders } from "~/modules/finance/core/locks.server";
 import { syncOrderFinance } from "~/modules/order-finance/sync.server";
 import { poolOnHand, RETURN_DEFECT_SUFFIX, step, type CostLayer, type PoolState, type StepInputs, type StepMovement, type ValuationEffect } from "./engine";
 import {
@@ -302,6 +303,9 @@ export async function flushValuationResults(tx: Tx, results: readonly ValueItemR
   const orders = new Map<string, string>();
   for (const r of results) for (const [o, a] of r.orders) orders.set(o, a);
   if (orders.size === 0) return;
+  // FINO усіх замовлень — одним упорядкованим набором ДО першої синхронізації (WP4 syncOrderFinanceMany, §17.8):
+  // синхронізація ставить/утримує завдання перерахунку розподілу останнім записом (рядок jobs до фіксації).
+  await lockFinanceOrders(tx, [...orders.keys()]);
   for (const orderId of [...orders.keys()].sort()) await syncOrderFinance(tx, { id: orders.get(orderId)! }, orderId);
 }
 
