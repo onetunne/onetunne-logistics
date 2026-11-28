@@ -36,11 +36,11 @@ import { maskFreeTextNote } from "~/modules/privacy/notes";
 import { businessDayEnd, businessDayStart } from "~/modules/warehouse/dates";
 import type { ServiceContext } from "~/server/types";
 import { carrierReturnCodeList, carrierReturnSignal, SIGNAL_CASE_KIND, SIGNAL_REASON, type CarrierReturnSignal } from "./carrier-codes";
-import { caseInsight, lineOrigins } from "./attribution";
+import { caseInsight, isUncertainCaseLine, lineOrigins } from "./attribution";
 import { CUSTOMER_RETURN_REASON, loadReceiptSources, loadRefundSources, RETURN_DEFECT_SUFFIX } from "./facts.server";
 import { caseInsights } from "./insights.server";
 import { returnSourceKeys } from "./keys";
-import { isUncertainRestock, statusDates, type ReturnKind, type ReturnLineCondition, type ReturnReason, type ReturnStatus } from "./rules";
+import { statusDates, type ReturnKind, type ReturnLineCondition, type ReturnReason, type ReturnStatus } from "./rules";
 import { syncReturnCasesForOrder } from "./sync.server";
 
 type Ctx = Pick<ServiceContext, "db" | "actor" | "now">;
@@ -573,7 +573,7 @@ export async function getReturnCase(ctx: Ctx, id: string): Promise<ReturnCaseDet
       quantity: r.line.quantity,
       condition: r.line.condition,
       restockedQty: r.line.restockedQty,
-      uncertain: o?.kind === "refund" && isUncertainRestock(o.restockType),
+      uncertain: isUncertainCaseLine(o, r.line.quantity),
     };
   });
   const insight = caseInsight(

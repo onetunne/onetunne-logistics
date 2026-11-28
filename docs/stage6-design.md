@@ -273,7 +273,9 @@ PR = Прибуток після врахованих витрат              
 
 **Стан складника** (`ComponentState`): `actual`, `partial` (частина факт, решта прогноз/немає), `forecast`, `missing`
 (з кодом причини: `awaiting_shopify`, `no_cost`, `no_invoice`, `no_waybill`, `no_fee_data`, `no_rate`,
-`ambiguous_partner`, `order_unreadable`), `zero_confirmed`, `not_applicable`; `partial` також має причину
+`ambiguous_partner`, `order_unreadable`, `awaiting_reallocation` — сума періоду покриває складник, але розподіл ще не
+перераховано (I16, §10.3), `dispute_amount_unknown` — спір програно / прийнято без суми втрати (комісія партнера
+невідома, §9.3)), `zero_confirmed`, `not_applicable`; `partial` також має причину
 (`reconciliation_mismatch` — §16.5). Кожен складник має `basis` (джерело: `shopify`, `invoice`, `valuation`,
 `owner_standard`, `allocated`, `carrier_reported`, `country_average`, `owner_table`, `fee_rule`, `kit_plan`,
 `pool_average`, `order_snapshot`, `manual` …), який показується поруч зі значенням.
@@ -480,6 +482,16 @@ byCountry: [{country, amount, currency}]}`, `partners {defaultRateBp: 1000, hold
   кожна зміна → `finance_change_log` з кількістю зачеплених записів (`fx_on` = та дата) і Δ у валюті звітності
   («Змінено курс EUR на 20.11: 14 записів, Δ прибутку +31,20 грн»); дата в закритому місяці — відмова (§3.4).
 - Демо: `source = demo` лише в демо-базі.
+- Історія змін: `finance_change_log` entity `fx_rate`, `entity_id` = `<CUR>:<yyyy-mm-dd>`, дії create / update / void
+  (`after`: `affectedEntries`, `deltaReporting`, `reportingCurrency`, `rateVersion`, `source`); Δ = Σ записів після
+  зміни (за новими курсами) − Σ записів до (за старими), лише рядки P&L, разом із записами, які зміна сама провела чи
+  сторнувала (переоцінка обміну). Розбіжність НБУ — `fx_rate_conflict:nbu:<CUR>:<yyyy-mm-dd>`; блокування дати курсу —
+  FIOP `fx-rate:<CUR>:<yyyy-mm-dd>` (ручний курс, обмін — у порядку кодів), потім FIPE спільно, потім рядки.
+- Режим автоматичного джерела для потоків без режиму запиту (хук оцінки, `syncOrderFinance`, покриття сум періоду) —
+  `resolveRateMode(db)` (`app/modules/finance/core/rate-mode.server.ts`): робочий сервер (не Vitest, `DEMO_MODE`
+  вимкнено) — ЗАВЖДИ `production` з налаштувань сервера, вміст таблиць не читається (демо-рядок у робочій базі не діє);
+  демо-сервер і тести — `demo` за наявністю рядків `source = demo`. Режим не передається через `InsertedMovement`:
+  `applyMovements` викликають ~15 місць етапів 2–5 без режиму запиту.
 
 ### 5.4. Вибір курсу `rateFor(currency, date)` (МАЄ бути єдиним джерелом курсів для фінансів: журнал, оцінка запасів, звіти, експорт, бот, ШІ)
 Тарифи Checkout етапу 3 лишаються на своїй таблиці `settings.checkoutRates.fxRates` (без дат, лише для цін доставки);
@@ -1061,6 +1073,16 @@ min(нетто-частина чистої втрати, база), або до 
 - Ключі: `pc:<orderId>:<partnerId>:<n>` (n — наступний номер під блокуванням замовлення). У P&L — записи
   `partner_commission` (нарахування + коригування). Фіксована оплата блогеру — ручна витрата `partner_fixed_fee`
   з `partner_id` (витрата періоду).
+- **Виключене замовлення** (тестове без `includeTestOrders`, `excluded` / `closed_unrecognized`) — події НЕ
+  скасовуються подією `cancellation`: діючі записи `pc:*` сторнуються за F2 (`reverseEntries`, ключ
+  `pc:<orderId>:<partnerId>:<n>:rev`, дата й `fx_on` оригіналу; у закритому місяці — пізній запис), події стають
+  нечинними (`eventActiveSql`); знову враховане замовлення — повторне проведення тих самих подій новим поколінням
+  ключа (`repostEntries`, `pc:<orderId>:<partnerId>:<n>:g<k>`, `source_id` = id події), потім звичайне «бажана − Σ».
+  Записи `pc:*` сторнує й проводить ЛИШЕ WP7 (`syncPartnerCommission`); WP4 їх не чіпає.
+- Спір програно / прийнято без суми → складник `partner` = `missing` з причиною `dispute_amount_unknown` (подій
+  немає, доки Shopify або власник не дасть суму); інша валюта спору — `no_rate`.
+- Виплата — довідковий запис `partner_payout_memo` зі знаком **+** (сума виплати у її валюті; `pay:<payoutId>`), не
+  в P&L.
 
 ### 9.5. Виплати
 `partner_payouts`: `operation_id` унікальний (uuid форми), `paid_on`, `amount`, `currency`, `covers_amount` +
@@ -1121,6 +1143,28 @@ min(нетто-частина чистої втрати, база), або до 
 витрата окремого запису **не** створює (без подвійного обліку); Σ часток = сума точно. Перерахунок — при збереженні,
 зміні витрати й кнопкою «Перерахувати розподіл» (сторно + нові). Немає відповідних замовлень → один запис періоду.
 На картці: «Комісія: 2,33 EUR — частка підсумку PayPal за листопад (розподілено за прогнозом)».
+
+**Завдання перерахунку (інтеграційний раунд ядра).** Замовлення, оформлене у вимірі й місяці вже збереженої суми
+після її розподілу, має складник `missing` з причиною `awaiting_reallocation` (WP6 `coveringStatusForOrder`; прогноз у
+«≈ Прогноз» не входить, I16). WP4 у `syncOrderFinance` (під FINO(X)) викликає `enqueueExpenseReallocation(tx, orderId)`
+(`app/modules/expenses/reallocation.server.ts`): лише ставить завдання `finance.expense_reallocate {expenseId}` —
+ОДНЕ на суму серед завдань у черзі (dedupe `finance-expense-reallocate:<expenseId>`, відкладення 30 с), без
+блокувань і проведень; у демо (обробника немає) — нічого. Обробник (`expenses/jobs.server.ts`) від SYSTEM_ACTOR у
+ВЛАСНІЙ транзакції виконує ТОЙ САМИЙ перерахунок, що кнопка «Перерахувати розподіл» (`reallocateExpenseInTx`): FIOP
+`expense|<id>` + рядок FOR UPDATE → `assertMonthsOpen` місяців суми (закритий — нічого не змінюється, код
+`month_closed`, без повтору; кнопка так само відмовляє `finance.error.monthClosed`) → нова версія й частки →
+`syncExpenseEntries` (FINO усіх замовлень суми одним упорядкованим набором; частка замовлення, визнаного в закритому
+місяці, — пізній запис `is_late`) → історія змін і журнал дій. Порядок блокувань §17.8: FINO іншого замовлення ніколи
+не береться під FINO(X) (тест PostgreSQL: завдання паралельно із синхронізаціями замовлень — без взаємоблокувань і
+дублів часток). Кнопка лишається.
+Втрата перерахунку виключена: якщо таке завдання вже чекає в черзі, постановка (`enqueueOrHoldReallocation`) не
+пропускає його, а УТРИМУЄ (UPDATE рядка `jobs`, `run_at = least(...)`) до фіксації транзакції синхронізації — обробник
+(`claimJob`, FOR UPDATE SKIP LOCKED) не виконає його без фактів цього замовлення; якщо завдання вже виконується —
+ставиться нове (виконається після нього). Тому WP4 викликає постановку ОСТАННІМ записом своєї транзакції.
+Немає курсу для ваг різних валют (`finance.error.noRate`; кнопка так само відмовляє) — завдання не «мертве»: код
+`no_rate`, повтор через 1 год (`FINANCE_JOB_TIMING.expenseReallocateNoRateRetryMs`, корисне навантаження
+`{expenseId, noRateRetry}`), не більше 168 разів поспіль (≈ 7 діб; далі — кнопка й наступні синхронізації WP4, які
+починають ланцюжок заново); нова синхронізація замовлення наближає запланований повтор до 30 с.
 
 ### 10.4. Обмін валюти (`fx_conversions`; форма «Обмін валюти» — на сторінці «Курси»)
 Дата, продано (сума, валюта), отримано (сума, валюта), примітка, `operation_id` → один запис `fx_difference` за §5.7
@@ -1324,6 +1368,13 @@ min(нетто-частина чистої втрати, база), або до 
   заборонено (тест-сканер). Тести: накладна й передача працівником, пакування (`material_consume`), надходження
   повернення покупця, закриття партії працівником з делегованим `production.manage` — **успішні й створюють
   записи**, а той самий працівник отримує 403 / `null` при читанні.
+- Реєстр F8 (`contracts.ts`): `INTERNAL_POSTING_FUNCTIONS` (назва → точний модуль; також внутрішні читання з сумами
+  без перевірки актора — `loadFeeRules`, `loadOrderEvents`/`loadPartnerEvents` — і логіка завдань у змішаних модулях:
+  `runFxFetchScheduled`/`enqueueFxFetch`/`scheduleFxChain`, `restartFinanceBackfill`, `writeFinanceChange`,
+  `resetStoresForDemo`), `INTERNAL_ONLY_MODULES` (будь-який імпорт заборонено; серед них `finance-sync/schedule.server`,
+  `partners/events.server`, агрегатор `finance/jobs.server`) і `INTERNAL_JOB_MODULES` — модулі завдань пакетів
+  (`fx|costing|finance-sync|finance-reports|expenses/jobs.server`: обробники працюють від SYSTEM_ACTOR без
+  `requireFinance`); тест-сканер вимагає, щоб цей перелік збігався з модулями, які збирає `finance/jobs.server.ts`.
 
 ### 14.2. Перелік перевірок (кожен пункт МАЄ мати тест «працівник → 403 / null»)
 | Поверхня | Перевірка |
@@ -1384,16 +1435,34 @@ confirm), `before jsonb` / `after jsonb` (десяткові рядки, код�
 | Коригування курсу Shopify (довідково) | `fxadj:<adjustmentId>` |
 | Повернення коштів | `order_refunds.shopify_refund_id`; рядки `(refund_id, shopify_line_item_id)` |
 | Спір / chargeback | `order_disputes (store_id, dispute_gid)`; записи `cb:<disputeId>:loss\|tax\|fee:v<n>`; ручні `cb:manual:<uuid>`; ручна комісія vs комісія Shopify за спір → `chargeback_fee_overlap` |
-| Оцінка складу | `inventory_valuations.event_key` (`mv:<movementId>` …), `movement_id` унікальний; запис `val:<valuationId>` / `cogs:<valuationId>` / `valc:<completionId>` |
+| Оцінка складу | `inventory_valuations.event_key`: рух `mv:<movementId>`, завершення шару fx `fx:<layerId>`, переоцінка `adj:<movementId>:v<n>`; `inventory_valuation_completions.event_key`: власник `complete:<operationId>:<stockItemId>`, надходження `mv:<movementId>:<layerId>`; `movement_id` унікальний; записи `val:<valuationId>`, `val:<valuationId>:memo` (довідкові закупівлі), `val:<originValuationId>:fxloss` / `:fxmemo` (надходження лише з браком після курсу), `cogs:<valuationId>`, `valc:<completionId>` |
 | Ручна собівартість рядка | `stdcogs:<lineId>:v<n>` |
-| Коригування партії | `adj:<batchLineId>:v<lineVersion>` |
+| Коригування партії | оцінка `adj:<movementId>:v<n>` (n — порядковий номер переоцінки цього надходження; рух, а не рядок партії: один рядок може мати кілька надходжень); записи `adj:<movementId>:v<n>:sales\|loss\|std` |
 | Рахунок перевізника | файл `sha256`; (перевізник, рахунок, номер, вид документа) серед активних; один документ, що проводить, на номер; схожість ≥ 50 % блокує; рядок `(invoice_id, sheet, row_number)`; запис `inv:<lineId>:m<matchVersion>` |
-| Ручна витрата / розподіл | `operation_id`; записи `exp:<expenseId>:v<version>[:<дата>]`; `alloc:<expenseId>:<orderId>:v<n>` |
-| Партнер | події `pc:<orderId>:<partnerId>:<n>`; виплата `operation_id`; запис `pay:<payoutId>` (довідковий) |
-| Обмін валюти | `operation_id`; запис `fxconv:<conversionId>:v<n>` |
+| Ручна витрата / розподіл | `operation_id`; записи `exp:<expenseId>:v<n>` і `exp:<expenseId>:v<n>:<yyyy-mm-dd>` (кожен день періоду послуги); частки `alloc:<expenseId>:<orderId>:v<n>` (`source_type allocation`, `source_id` = expenseId); n = `finance_expenses.version` — версія проведення (нова версія — сторно + нові записи) |
+| Партнер | події `pc:<orderId>:<partnerId>:<n>`; виключене замовлення — сторно `pc:…:<n>:rev`, повторне проведення — `pc:…:<n>:g<k>` (`source_id` = id події); виплата `operation_id`; запис `pay:<payoutId>` (довідковий, знак +) |
+| Обмін валюти | `operation_id`; запис `fxconv:<conversionId>:v<n>` (переоцінка після зміни курсу — сторно `:rev` + `v<n+1>`) |
+| Повернення (випадки) | `order_returns.source_key`: `ret:refund:<order_refunds.id>`, `ret:receipt:<movementId>`, `ret:carrier:<shipmentId>`, `ret:manual:<uuid>`, `ret:demo:<part>` (WP11); позиції — детерміновані id (sha256 `order_return_line\|<source_key>\|<shopify_line_item_id \| resellable \| damaged>` у форматі UUID) |
 | Сторно | `<ключ оригіналу>:rev`; `reverses_entry_id` унікальний (одне сторно на запис) |
-| Курси | НБУ/демо `(source, currency, quote_currency, effective_date)`; вручну `(…, effective_date, version)` |
-| Webhooks / завдання | наявний `webhook_events.webhook_id`; дедуплікація `finance-order:<gid>` |
+| Покоління (F2) | факт, що знову став чинним: покоління 1 — базовий ключ цієї таблиці, n > 1 — `<базовий>:g<n>`, сторно — `<базовий>:g<n>:rev`; наступне покоління обирає лише `repostEntries` (діє будь-яке покоління — пропуск) |
+| Курси | НБУ/демо `(source, currency, quote_currency, effective_date)`; вручну `(…, effective_date, version)`; історія змін `finance_change_log` entity `fx_rate`, `entity_id` = `<CUR>:<yyyy-mm-dd>` |
+| Webhooks / завдання | наявний `webhook_events.webhook_id`; дедуплікація завдань — нижче |
+
+**Розбіжності** (`finance_discrepancies (store_id, dedupe_key)`, `discrepancyKey(type, …parts)` = частини через `:`):
+`fx_rate_conflict:nbu:<CUR>:<yyyy-mm-dd>` (WP1); `cost_state_out_of_sync:<warehouseId>:<stockItemId>` (WP2);
+`reconciliation_mismatch:<orderId>:<RC1..RC5>:<expected|->:<actual|->:<violations>:<reason|->`,
+`reconciliation_mismatch:<orderId>:sale|fee:<shopifyGid>:<digest16>` (FNV-1a 64 побачених значень полів),
+`order_unreadable:<orderId>` і `order_unreadable:<orderId>:later` (WP3); `partner_attribution_ambiguous:<orderId>` (WP7).
+
+**Дедуплікація завдань** (`jobs.dedupe_key`, `financeJobDedupe`): `fx:<дата Києва>:<слот 0..3>`,
+`finance.fx_fetch_scheduled`, `fx-backfill:<CUR>:<from>:<to>`, `finance-order:<gid>`, `finance-journey:<gid>`,
+`finance.reconcile_scheduled`, `finance.reconcile:<after|start>`, `finance.backfill_orders`,
+`finance.snapshot_scheduled`, `finance-snapshot:<kind>:<from>`, `finance.valuation_pending`,
+`finance-expense-reallocate:<expenseId>` (утримується до фіксації ставника; повтор `no_rate` — той самий ключ, §10.3).
+
+**Ключі блокувань операцій** (FIOP, `lockFinanceOperation`): `operationId` форм; `expense|<expenseId>`;
+`feerule|<storeId>|<gateway>|<kind>`; `period|<storeId>|<month>`; `snapshot|<storeId>|<kind>|<from>|<currency>`;
+`fx-rate:<CUR>:<yyyy-mm-dd>` (ручний курс і обмін — у порядку кодів валют); `partner-name:<ім'я NFC lower>`.
 Плюс бізнес-правила: виробничі витрати — лише довідково (у P&L — через собівартість); закупівля матеріалів — довідково
 (у P&L — використання); виплата партнеру — не P&L (нарахування — так); ручна вартість доставки чи ручне мито +
 рядок рахунку → `manual_cost_exists`; chargeback + повернення коштів → перевірка; сума періоду з `covers_forecast` не
@@ -1588,7 +1657,7 @@ currencyCode } }`. Оцінки нижче **виміряно оцінюваче
 | `order_sales` | `id`, `store_id`, `order_id`, `shopify_sale_id`, `agreement_id`, `agreement_kind` (`order \| order_edit \| refund \| return \| unknown`), `agreement_reason`, `happened_at`, `refund_id null`, `action_type`, `line_type`, `quantity int null`, `line_item_gid null`, `order_line_item_id uuid null`, `total_amount money`, `total_tax money`, `discount_before_tax money null`, `currency`, `p_total_amount money`, `p_total_tax money`, `p_currency`, `source` (`shopify \| demo`), `fetched_at` | унікальний `(store_id, shopify_sale_id)`; індекс `(order_id)`; рядки незмінні |
 | `order_transactions` | `id`, `store_id`, `order_id`, `shopify_transaction_id`, `parent_transaction_id null`, `kind`, `status`, `test`, `gateway`, `manual_gateway`, `amount money`, `currency`, `p_amount`, `p_currency`, `settlement_currency null`, `settlement_rate rate() null`, `fx_adjustment_id null`, `fx_adjustment money null`, `fx_adjustment_currency null`, `processed_at`, `created_at_shopify`, `fetched_at` | унікальний `(store_id, shopify_transaction_id)` |
 | `order_transaction_fees` | `id`, `store_id`, `transaction_id → order_transactions`, `order_id`, `shopify_fee_id`, `type`, `amount money`, `currency`, `flat_fee money`, `flat_fee_currency`, `rate text` (як отримано), `tax_amount money`, `tax_currency`, `created_at_shopify` | унікальний `(store_id, shopify_fee_id)` |
-| `order_refunds` / `order_refund_lines` | `shopify_refund_id`, `order_id`, `processed_at`, `created_at_shopify`, `total money`, `currency`, `p_total`, `p_currency` / `refund_id`, `shopify_line_item_id`, `order_line_item_id null`, `quantity`, `restock_type`, `restocked`, `subtotal money`, `currency` | унікальні `(store_id, shopify_refund_id)`, `(refund_id, shopify_line_item_id)` |
+| `order_refunds` / `order_refund_lines` | `shopify_refund_id`, `order_id`, `processed_at`, `created_at_shopify`, `total money`, `currency`, `p_total`, `p_currency` / `refund_id`, `shopify_line_item_id`, `order_line_item_id null`, `quantity`, `restock_type`, `restocked`, `restock_quantities jsonb null` (міграція 0013: вид повернення на склад → кількість, лише для об'єднаного рядка `MIXED`; ключ `UNKNOWN` — рядок без виду; Σ = `quantity`; CHECK «null або об'єкт»), `subtotal money`, `currency` | унікальні `(store_id, shopify_refund_id)`, `(refund_id, shopify_line_item_id)` |
 | `order_disputes` | `id`, `store_id`, `order_id`, `dispute_gid` (id зі зведення або `manual:<uuid>`), `initiated_as`, `status`, `amount money null` (брутто), `recovered_amount money null`, `vat_reducible bool null`, `full_partner_cancellation bool default false`, `currency null`, `fee money null`, `fee_currency null`, `outcome null`, `decided_on date null`, `source` (`shopify \| manual \| demo`), `first_seen_at`, `status_changed_at`, `updated_by`, `version` | унікальний `(store_id, dispute_gid)` |
 
 ### 17.4. Собівартість
@@ -2235,6 +2304,49 @@ profit|turnover|margin/i`. Телефони 320×568, 375×667, 390×844 × вл
 Машинний перелік тих самих пакетів (для оркестратора) — `work-packages.json` у робочому каталозі архітектора; документ —
 джерело істини.
 
+### 21.5. Відхилення раунду 1 (від цього документа; за остаточними звітами пакетів)
+- **WP1 (курси):** обмін — лише з точним курсом на дату (без запасного); зміна курсу на дату обміну переоцінює обмін
+  (сторно + `v<n+1>`), анулювання ручного курсу, від якого залежить обмін, відхиляється; Δ зміни курсу = записи після −
+  записи до (включно з переоціненими обмінами), лише рядки P&L; причина обов'язкова й у демо; межі: ручні курси до
+  сьогодні + 7, довантаження НБУ від 2000-01-01, ≤ 5 років за запит; переоцінка обмінів — у суто внутрішньому
+  `conversions-internal.server.ts`.
+- **WP2 (собівартість):** повернені неоцінені одиниці продажу з дефіцитом спершу закривають дефіцит цього продажу (лише
+  решта — шар `return_without_cost`, §6.3 (1б)); «до залишку» — за курсом дати збереження й лише якщо новий рядок діє
+  сьогодні, продані — за курсом дати кожного виходу; перерахунок коригує й одиниці, повернені після завершення;
+  надходження лише з браком без пулу при появі курсу — `inventory_loss` без довідкового запису; квант валюти (JPY —
+  цілі одиниці) в усіх розподілах.
+- **WP3 (факти Shopify):** повернення коштів читаються й для угод лише з поверненням на склад і після неповного /
+  пошкодженого читання; продажі — усе або нічого; RC1 / RC4 (кандидати) лише попереджають; ключі розбіжностей містять
+  значення; старіше читання ігнорується (`stale`); недоступні замовлення за §22.1 (є факти — лишаються, + `:later`),
+  повторне читання лише через «Довантажити» власника; > 20 сторінок угод / продажів — помилка без повтору; комісії —
+  лише SUCCESS і лише повністю розібрані; `snapshot.status.fees`; магазин (`stores.shop_*`) пишеться поза транзакцією
+  фактів.
+- **WP6 (витрати, місяці):** сума без виміру (без шлюзу / перевізника) і кредит — звичайна витрата періоду, ніколи не
+  «замінює прогноз»; «складник уже фактичний» враховує й непроведені факти джерела; I16 після збереження —
+  `awaiting_reallocation` для WP4 + завдання перерахунку (§10.3), не автоматичний перерозподіл при збереженні;
+  `fx_on` частки — дата документа суми; підтвердження пунктів місяця перевіряються щоразу (`stale` забороняє «Чистий
+  прибуток»); порівняння комісій — лише замовлення з одним шлюзом.
+- **WP7 (партнери):** одне коригування на (партнер, валюта) за синхронізацію; утримання — на кожну подію окремо;
+  атрибуція вирішується при першій синхронізації й заморожується (див. §22.2); повторно доданий код без дати діє від дня
+  додавання; додавання коду пересинхронізує ≤ 500 замовлень; неоднозначна атрибуція не проводить подій; захист від
+  дубля створення — блокування за ім'ям; виключення — F2-сторно (§9.4); спір без суми — `dispute_amount_unknown`.
+- **WP9 (повернення):** без таблиці зв'язків — детерміновані id позицій; рядок не CANCEL після першої передачі —
+  повернення; `MIXED` з розподілом `restock_quantities` (0013) рахує лише RETURN / після передачі точно, без розподілу —
+  верхня межа «неточно»; частка повернень без `order_unreadable` / `awaiting_shopify`; суми — за джерелом запису
+  (неприв'язані — «За замовленням»); підказки перевізника лише для читання; ручне створення спершу синхронізує;
+  тестові замовлення — позначені й поза статистикою без `includeTestOrders`.
+- **WP0-UI (компоненти):** тексти — модуль `financeUi` (з інтеграційного раунду `app/i18n/messages/finance-ui.ts`, у
+  MESSAGE_MODULES); додаткові пропси (explanation, deltaPreference, deltaLabel, showGranularity, showCompare,
+  granularities, extra, compareLabel, showLabel) і `ChartBucket.axisLabel` — тепер необов'язкові поля контрактів;
+  підписи осі — контейнерні запити CSS; мінімальна висота прогнозної частини — 5 одиниць.
+- **WP12a (еталонна модель):** лише тести (`tests/stage6/reference/**`), відхилень від документа немає.
+- **Ядро (інтеграційний раунд):** `countOpenDiscrepancies(ctx, storeId?, {type?})`; `formatMoney` — без «,00» для
+  валют без дробових одиниць; місяць у `finance.error.monthClosed` — назвою місяця (`localizeParams`); режим курсів
+  внутрішніх потоків — `resolveRateMode` (робочий сервер — завжди production, §5.3); реєстр F8 доповнено модулями
+  пакетів раунду 1, модулями завдань (`INTERNAL_JOB_MODULES`) і внутрішніми помічниками змішаних модулів (§14.1);
+  завдання `finance.expense_reallocate` (утримання завдання в черзі до фіксації ставника, повтор при `no_rate`);
+  WP9 — позиція випадку з рядка `MIXED` точна, лише якщо її кількість збігається з розподілом `restock_quantities`.
+
 ---
 
 ## 22. Ризики, прийняті обмеження, рішення власника
@@ -2268,7 +2380,15 @@ profit|turnover|margin/i`. Телефони 320×568, 375×667, 390×844 × вл
 запис періоду, не прибуток окремих замовлень; ремонт браку повертає вартість за FIFO шарів браку (одиниці не
 розрізняються); терміни доставки, частка доставлених і затримки на митниці — лише для відправлень застосунку;
 вартість доставки замовлень поза застосунком — лише за трек-номерами Shopify або вручну; бюджети й «перевищення
-витрат» — етап 8; демо-курси, тарифи й формат рахунку вигадані; **нічого не перевірено на
+витрат» — етап 8; атрибуція партнера вирішується при першій синхронізації замовлення й заморожується, а придатність
+коду перевіряється за його ПОТОЧНИМ станом (історії станів кодів і партнерів — `deactivated_at` — немає): замовлення,
+оформлене до паузи партнера чи вимкнення коду, але вперше синхронізоване під час паузи, лишається без партнера —
+власник призначає його вручну на картці замовлення; повернення коштів, прочитані до міграції 0013, з об'єднаним рядком
+`MIXED` не мають розподілу за видами (кількість — верхня межа «неточно»); після повторного читання (WP3 дописує
+`restock_quantities`) нові випадки — точні, а позиція випадку, створена раніше з верхньої межі (разом з CANCEL),
+не переписується і лишається «неточно», якщо її кількість не збігається з розподілом (WP9 `isUncertainCaseLine`; етап 6
+ще не випущено, тож у робочій базі таких позицій немає);
+демо-курси, тарифи й формат рахунку вигадані; **нічого не перевірено на
 справжньому Admin API, Новій пошті чи основному магазині** — лише автотести з імітацією, демо і (пізніше) тестовий
 магазин власника.
 

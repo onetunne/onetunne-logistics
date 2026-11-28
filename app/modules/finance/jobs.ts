@@ -1,6 +1,6 @@
 /**
  * Етап 6: фонові завдання фінансів (черга jobs; docs/stage6-design.md §5.6, §6.3, §13.1, §16.3). ПОВНИЙ перелік назв —
- * тут (ядро, WP0); обробники й розклади — у модулях пакетів (fx, costing, finance-sync, finance-reports), які статично
+ * тут (ядро, WP0); обробники й розклади — у модулях пакетів (fx, costing, finance-sync, finance-reports, expenses), які статично
  * збирає jobs.server.ts. Корисне навантаження й помилки — лише id і коди (§14.2: jobs.last_error не маскується).
  * У демо обробника немає: усе обчислюється при читанні/дії, курси й знімки засіваються.
  */
@@ -26,13 +26,20 @@ export const FINANCE_JOB = {
   snapshot: "finance.snapshot",
   /** Завершення шарів fx_pending, коли з'явився курс. WP2. */
   valuationPending: "finance.valuation_pending",
+  /**
+   * Перерахунок розподілу суми періоду {expenseId} (той самий, що кнопка «Перерахувати розподіл»), коли замовлення
+   * чекає перерозподілу (awaiting_reallocation, I16). Ставить WP4 (enqueueExpenseReallocation). WP6.
+   */
+  expenseReallocate: "finance.expense_reallocate",
 } as const;
 
 export type FinanceJobName = (typeof FINANCE_JOB)[keyof typeof FINANCE_JOB];
 export const FINANCE_JOB_NAMES: readonly FinanceJobName[] = Object.values(FINANCE_JOB);
 
 /** Власник модуля кожного завдання (статичний реєстр jobs.server.ts перевіряє відповідність). */
-export const FINANCE_JOB_OWNER: Readonly<Record<FinanceJobName, "fx" | "costing" | "finance-sync" | "finance-reports">> = {
+export type FinanceJobOwner = "fx" | "costing" | "finance-sync" | "finance-reports" | "expenses";
+
+export const FINANCE_JOB_OWNER: Readonly<Record<FinanceJobName, FinanceJobOwner>> = {
   "finance.fx_fetch_scheduled": "fx",
   "finance.fx_fetch": "fx",
   "finance.fx_backfill": "fx",
@@ -43,6 +50,7 @@ export const FINANCE_JOB_OWNER: Readonly<Record<FinanceJobName, "fx" | "costing"
   "finance.snapshot_scheduled": "finance-reports",
   "finance.snapshot": "finance-reports",
   "finance.valuation_pending": "costing",
+  "finance.expense_reallocate": "expenses",
 };
 
 /** Ключі дедуплікації (серед завдань у черзі). */
@@ -60,6 +68,8 @@ export const financeJobDedupe = {
   snapshotScheduled: () => "finance.snapshot_scheduled",
   snapshot: (kind: string, from: string) => `finance-snapshot:${kind}:${from}`,
   valuationPending: () => "finance.valuation_pending",
+  /** Одне завдання перерахунку на суму періоду серед завдань у черзі. */
+  expenseReallocate: (expenseId: string) => `finance-expense-reallocate:${expenseId.toLowerCase()}`,
 } as const;
 
 const HOUR = 60 * 60 * 1000;
@@ -76,5 +86,10 @@ export const FINANCE_JOB_TIMING = {
   /** Повторні читання customerJourneySummary: через 1 / 6 / 24 год. */
   journeyRetryDelaysMs: [1 * HOUR, 6 * HOUR, 24 * HOUR] as const,
   snapshotIntervalMs: 1 * HOUR,
+  /** Відкладення finance.expense_reallocate: сплеск синхронізацій замовлень однієї суми → один перерахунок. */
+  expenseReallocateDelayMs: 30 * 1000,
+  /** Немає курсу для ваг різних валют: повтор перерахунку через годину, не більше 168 разів поспіль (≈ 7 діб). */
+  expenseReallocateNoRateRetryMs: 1 * HOUR,
+  expenseReallocateNoRateMaxRetries: 168,
   reconcileMaxPages: 20,
 } as const;

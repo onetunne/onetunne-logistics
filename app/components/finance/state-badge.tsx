@@ -7,7 +7,7 @@ import { COMPONENT_STATES, ORDER_FINANCE_STATES, type ComponentState, type Order
 import { financeLabelKeys } from "~/modules/finance/core/labels";
 import { Badge, cx } from "~/ui";
 import type { StateBadgeProps } from "./contracts";
-import { useFinanceUiT } from "./i18n";
+import { useT } from "~/i18n";
 import { FinanceIcon, STATE_PRESENTATION } from "./icons";
 
 /** Ключ i18n підпису стану (стани складника мають пріоритет над однойменними станами інших родин). */
@@ -18,7 +18,7 @@ export function stateLabelKey(state: StateBadgeProps["state"]): string {
 }
 
 export function StateBadge({ state, reason, basis, size = "sm" }: StateBadgeProps) {
-  const ft = useFinanceUiT();
+  const ft = useT();
   const presentation = STATE_PRESENTATION[state] ?? STATE_PRESENTATION["n/a"];
   const label = ft(stateLabelKey(state));
   const details = [reason ? ft(financeLabelKeys.reason(reason)) : null, basis ? ft(financeLabelKeys.basis(basis)) : null].filter(

@@ -96,6 +96,10 @@ export type SyncReturnCasesForOrder = (tx: Tx, actor: PostingActor, orderId: str
 /**
  * Перелік внутрішніх функцій проведення (назва → ТОЧНИЙ модуль, де вона визначена; пакет-власник не переносить її в
  * інший файл без інтеграційного раунду ядра). Сканер забороняє ці назви й модулі в pages/routes/командах/ШІ.
+ * З інтеграційного раунду 1 — також внутрішні читання без перевірки актора, що повертають гроші (пул собівартості,
+ * прогноз, факти замовлення, Δ курсу, розподіл), і логіка завдань (НБУ, факти Shopify, перерахунок розподілу): кожен
+ * суто внутрішній модуль має тут щонайменше одну назву (тест сканера), а реекспорт БУДЬ-ЯКОГО його значення публічним
+ * модулем сканер теж вважає порушенням.
  */
 export const INTERNAL_POSTING_FUNCTIONS = {
   postEntries: "~/modules/finance/core/entries.server",
@@ -113,6 +117,70 @@ export const INTERNAL_POSTING_FUNCTIONS = {
   rebuildValuationForDemo: "~/modules/costing/backfill.server",
   revalueBatchLines: "~/modules/costing/revalue.server",
   syncReturnCasesForOrder: "~/modules/returns/sync.server",
+  // WP2 — собівартість (внутрішні модулі: оцінка, завершення, стан, факти замовлення, входи, прогноз, читання пулу).
+  valueItemMovements: "~/modules/costing/valuation.server",
+  flushValuationResults: "~/modules/costing/valuation.server",
+  applyCompletionPlan: "~/modules/costing/completion.server",
+  planOwnerCompletion: "~/modules/costing/completion.server",
+  planLayerValueCompletion: "~/modules/costing/completion.server",
+  saveCostState: "~/modules/costing/store.server",
+  insertValuation: "~/modules/costing/store.server",
+  persistLayers: "~/modules/costing/store.server",
+  insertCompletions: "~/modules/costing/store.server",
+  loadOrderCostingFacts: "~/modules/costing/order-facts.server",
+  costingEntriesForOrder: "~/modules/costing/order-facts.server",
+  loadCostingContext: "~/modules/costing/inputs.server",
+  convertToValuation: "~/modules/costing/inputs.server",
+  unitCostForecast: "~/modules/costing/forecast.server",
+  ownerStandardCost: "~/modules/costing/forecast.server",
+  poolStatesAt: "~/modules/costing/pool-read.server",
+  loadPoolValues: "~/modules/costing/pool-read.server",
+  // WP1 — курси (переоцінка обмінів, запис офіційних курсів, Δ зміни курсу, демо-курси, логіка завдань НБУ).
+  repriceConversions: "~/modules/fx/conversions-internal.server",
+  conversionsNeedingRate: "~/modules/fx/conversions-internal.server",
+  storeOfficialRates: "~/modules/fx/rates-store.server",
+  rateChangeImpact: "~/modules/fx/impact.server",
+  seedDemoRates: "~/modules/fx/demo-rates.server",
+  // Змішаний модуль: кнопки власника (requestNbuFetch, requestNbuBackfill, setNbuEnabled — requireFinance("manage") і
+  // відмова в демо) поруч із логікою завдань (постановка завантажень НБУ без цих перевірок).
+  runFxFetch: "~/modules/fx/nbu-fetch.server",
+  runFxBackfill: "~/modules/fx/nbu-fetch.server",
+  runFxFetchScheduled: "~/modules/fx/nbu-fetch.server",
+  enqueueFxFetch: "~/modules/fx/nbu-fetch.server",
+  scheduleFxChain: "~/modules/fx/nbu-fetch.server",
+  // WP3 — фінансові факти Shopify (запис фактів, позначка «не читається», завдання синхронізації й довантаження).
+  writeOrderFinanceFacts: "~/modules/finance-sync/facts.server",
+  markOrderUnreadable: "~/modules/finance-sync/facts.server",
+  runFinanceOrderSync: "~/modules/finance-sync/sync-order.server",
+  runFinanceBackfill: "~/modules/finance-sync/scheduled.server",
+  runFinanceReconcile: "~/modules/finance-sync/scheduled.server",
+  enqueueFinanceOrderSync: "~/modules/finance-sync/schedule.server",
+  enqueueJourneyRecheck: "~/modules/finance-sync/schedule.server",
+  scheduleReconcileChain: "~/modules/finance-sync/schedule.server",
+  scheduleBackfill: "~/modules/finance-sync/schedule.server",
+  // Змішаний модуль: лічильники (без грошей) поруч зі скиданням довантаження (зі сторінки — лише requestFinanceBackfill).
+  restartFinanceBackfill: "~/modules/finance-sync/backfill-status.server",
+  // WP6 — проведення витрат і розподіл сум періоду; перерахунок розподілу завданням.
+  syncExpenseEntries: "~/modules/expenses/posting.server",
+  syncOrderExpenseEntries: "~/modules/expenses/posting.server",
+  computeAllocation: "~/modules/expenses/allocation.server",
+  coveringStatusForOrder: "~/modules/expenses/allocation.server",
+  runExpenseReallocation: "~/modules/expenses/reallocation.server",
+  enqueueExpenseReallocation: "~/modules/expenses/reallocation.server",
+  enqueueOrHoldReallocation: "~/modules/expenses/reallocation.server",
+  scheduleNoRateRetry: "~/modules/expenses/reallocation.server",
+  // Змішаний модуль: сервіси власника правил комісій поруч із читанням правил із сумами без перевірки актора.
+  loadFeeRules: "~/modules/expenses/fee-rules.server",
+  // WP7 — комісія партнерів; події комісії з сумами (читання без перевірки актора).
+  syncPartnerCommission: "~/modules/partners/sync.server",
+  loadOrderEvents: "~/modules/partners/events.server",
+  loadPartnerEvents: "~/modules/partners/events.server",
+  // Ядро: запис історії змін (змішаний модуль: listFinanceChanges — для сервісів власника), скидання магазинів демо,
+  // реєстр завдань (обробники від SYSTEM_ACTOR і запуск ланцюжків).
+  writeFinanceChange: "~/modules/finance/core/change-log.server",
+  resetStoresForDemo: "~/modules/finance/core/store.server",
+  createFinanceJobHandlers: "~/modules/finance/jobs.server",
+  ensureFinanceSchedules: "~/modules/finance/jobs.server",
 } as const;
 export type InternalPostingFunction = keyof typeof INTERNAL_POSTING_FUNCTIONS;
 
@@ -130,6 +198,42 @@ export const INTERNAL_ONLY_MODULES = [
   "~/modules/costing/backfill.server",
   "~/modules/costing/revalue.server",
   "~/modules/returns/sync.server",
+  "~/modules/costing/valuation.server",
+  "~/modules/costing/completion.server",
+  "~/modules/costing/store.server",
+  "~/modules/costing/order-facts.server",
+  "~/modules/costing/inputs.server",
+  "~/modules/costing/forecast.server",
+  "~/modules/costing/pool-read.server",
+  "~/modules/fx/conversions-internal.server",
+  "~/modules/fx/rates-store.server",
+  "~/modules/fx/impact.server",
+  "~/modules/fx/demo-rates.server",
+  "~/modules/finance-sync/facts.server",
+  "~/modules/finance-sync/sync-order.server",
+  "~/modules/finance-sync/scheduled.server",
+  "~/modules/expenses/posting.server",
+  "~/modules/expenses/allocation.server",
+  "~/modules/expenses/reallocation.server",
+  "~/modules/partners/sync.server",
+  "~/modules/partners/events.server",
+  "~/modules/finance-sync/schedule.server",
+  "~/modules/finance/jobs.server",
+] as const;
+
+/**
+ * Модулі завдань пакетів (FinanceJobModule: `handlers` виконують роботу від SYSTEM_ACTOR без requireFinance,
+ * `ensureSchedules` ставить ланцюжки) — так само суто внутрішні: сканер забороняє будь-який їх імпорт зі сторінок,
+ * маршрутів, команд і ШІ, а реекспорт будь-якого їх значення вважає обходом F8. Окремим переліком, бо їхні назви
+ * (`handlers`, `ensureSchedules`) однакові в усіх модулях і не можуть бути ключами INTERNAL_POSTING_FUNCTIONS.
+ * Новий модуль FINANCE_JOB_MODULES (jobs.server.ts) — рядок тут (тест сканера).
+ */
+export const INTERNAL_JOB_MODULES = [
+  "~/modules/fx/jobs.server",
+  "~/modules/costing/jobs.server",
+  "~/modules/finance-sync/jobs.server",
+  "~/modules/finance-reports/jobs.server",
+  "~/modules/expenses/jobs.server",
 ] as const;
 
 // ---------------------------------------------------------------------------

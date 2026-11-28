@@ -30,6 +30,7 @@ const STRICT_MODULES = [
   "returns",
   "financeReports",
   "financeCommands",
+  "financeUi",
 ] as const;
 
 function walk(dir: string): string[] {

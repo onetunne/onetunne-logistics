@@ -112,6 +112,8 @@ export async function addRefund(
       restockType: string | null;
       /** Як WP3: RETURN → true за замовчуванням; MIXED — null (WP3 скидає «поповнено» при об'єднанні різних видів). */
       restocked?: boolean | null;
+      /** Як WP3 з міграції 0013: розподіл MIXED (вид → кількість); типово null. */
+      restockQuantities?: Record<string, number> | null;
     }>;
   },
 ): Promise<string> {
@@ -135,6 +137,7 @@ export async function addRefund(
       quantity: l.quantity,
       restockType: l.restockType,
       restocked: l.restocked !== undefined ? l.restocked : l.restockType === "MIXED" ? null : l.restockType === "RETURN",
+      restockQuantities: l.restockQuantities ?? null,
       subtotal: "45.00",
       currency: "EUR",
     });

@@ -14,19 +14,16 @@
  * - `prefers-reduced-motion`: без переходів (styles.css, розділ finance).
  */
 import { useId, useState, type KeyboardEvent, type PointerEvent } from "react";
-import { useLocale } from "~/i18n";
+import { useLocale, useT } from "~/i18n";
 import { formatCompactMoney } from "~/lib/format";
 import { financeLabelKeys } from "~/modules/finance/core/labels";
 import { DataTable, Disclosure, VisuallyHidden, cx, type DataTableColumn } from "~/ui";
 import { AXIS_LABEL_TIERS, CHART_H, CHART_W, chartGeometry, nextChartIndex, type ChartHLine, type ChartRect } from "./chart-geometry";
 import type { ChartBucket, ProfitChartProps } from "./contracts";
 import { DASH, moneyText, parseMinor } from "./format-ui";
-import { useFinanceUiT } from "./i18n";
 
-export interface ProfitChartExtraProps {
-  /** Підпис ряду порівняння в легенді й таблиці (типово «Порівняння»), напр. «Попередній період». */
-  compareLabel?: string;
-}
+/** Додатковий пропс WP0-UI — тепер частина контракту (ProfitChartProps); псевдонім для сумісності. */
+export type ProfitChartExtraProps = Pick<ProfitChartProps, "compareLabel">;
 
 export interface ChartTableRow {
   key: string;
@@ -64,7 +61,7 @@ function HLine({ l, className }: { l: ChartHLine | null; className: string }) {
 }
 
 export function ProfitChart({ buckets, currency, tableCaption, compareLabel }: ProfitChartProps & ProfitChartExtraProps) {
-  const ft = useFinanceUiT();
+  const ft = useT();
   const locale = useLocale();
   const uid = useId().replace(/[^A-Za-z0-9_-]/g, "");
   const hatchId = `ot-hatch-${uid}`;
@@ -274,7 +271,7 @@ export function ProfitChart({ buckets, currency, tableCaption, compareLabel }: P
                   )}
                   style={{ left: `${b.centerPct}%` }}
                 >
-                  {buckets[i]!.label}
+                  {buckets[i]!.axisLabel ?? buckets[i]!.label}
                 </span>
               ) : null,
             )}

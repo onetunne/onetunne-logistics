@@ -209,11 +209,17 @@ describe("owner actions", () => {
     expect(r).toMatchObject({ ok: true, extra: ["financeExpenses.result.noDimension"] });
   });
 
-  it("closed month: the error names the month in the locale's format", async () => {
+  it("closed month: the error names the month in the locale's format (centrally, localizeParams)", async () => {
     await closeMonthRow(env.handle.db, "2026-10-01");
     setContext(OWNER, "uk");
-    const r = await act({ intent: "create", operationId: (await load()).operationId, category: "rent", amount: "100", currency: "UAH", dateMode: "single", expenseDate: "2026-10-05" });
-    expect(r).toMatchObject({ ok: false, error: "finance.error.monthClosed", params: { month: "10.2026" } });
+    const r = (await act({ intent: "create", operationId: (await load()).operationId, category: "rent", amount: "100", currency: "UAH", dateMode: "single", expenseDate: "2026-10-05" })) as {
+      params?: Record<string, string | number>;
+    };
+    expect(r).toMatchObject({ ok: false, error: "finance.error.monthClosed", params: { month: "2026-10-01" } });
+    const { localizeParams } = await import("~/i18n/localize");
+    const { makeT } = await import("~/i18n");
+    expect(localizeParams(r.params, makeT("uk"), "uk")?.month).toBe("жовтень 2026");
+    expect(localizeParams(r.params, makeT("en"), "en")?.month).toBe("October 2026");
   });
 
   it("saves a gateway fee rule and shows it", async () => {

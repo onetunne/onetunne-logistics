@@ -22,7 +22,7 @@ import {
 } from "~/domain/permissions";
 import { DICTIONARIES } from "~/i18n";
 import { canFinance, financeFieldOrNull, requireFinance, requireFinanceOr403 } from "~/modules/finance/core/access.server";
-import { INTERNAL_ONLY_MODULES, INTERNAL_POSTING_FUNCTIONS } from "~/modules/finance/core/contracts";
+import { INTERNAL_JOB_MODULES, INTERNAL_ONLY_MODULES, INTERNAL_POSTING_FUNCTIONS } from "~/modules/finance/core/contracts";
 import { OWNER, STAFF } from "../../helpers";
 
 /** Підроблений актор: дозволи фінансів у наборі, але роль staff (обхід resolvePermissions). */
@@ -146,8 +146,15 @@ function importsOf(src: string): ImportRef[] {
   return out;
 }
 
+/** Назви значень, які модуль експортує власним визначенням (`export [async] function|const|let|class X`). */
+function valueExportsOf(src: string): string[] {
+  return [...src.matchAll(/^export\s+(?:async\s+)?(?:function\*?|const|let|class)\s+([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]!);
+}
+
 const INTERNAL_NAMES = new Set(Object.keys(INTERNAL_POSTING_FUNCTIONS));
-const INTERNAL_ONLY = new Set<string>(INTERNAL_ONLY_MODULES.map(moduleIdOf));
+/** Суто внутрішні модулі: INTERNAL_ONLY_MODULES + модулі завдань пакетів (INTERNAL_JOB_MODULES). */
+const ALL_INTERNAL_ONLY: readonly string[] = [...INTERNAL_ONLY_MODULES, ...INTERNAL_JOB_MODULES];
+const INTERNAL_ONLY = new Set<string>(ALL_INTERNAL_ONLY.map(moduleIdOf));
 
 /**
  * Які внутрішні функції «відкриває» кожен модуль app/: визначення з INTERNAL_POSTING_FUNCTIONS (точні модулі) +
@@ -164,6 +171,14 @@ function exposureMap(files: readonly string[]): Map<string, Map<string, string>>
     return true;
   };
   for (const [fn, spec] of Object.entries(INTERNAL_POSTING_FUNCTIONS)) add(moduleIdOf(spec), fn, fn);
+  // Суто внутрішній модуль «відкриває» ВСІ свої значення (функції, константи, класи): їх реекспорт публічним модулем —
+  // такий самий обхід F8, як і реекспорт функції з переліку.
+  for (const spec of ALL_INTERNAL_ONLY) {
+    const id = moduleIdOf(spec);
+    const file = SOURCE_EXTS.map((e) => path.join(ROOT, id + e)).find((f) => fs.existsSync(f));
+    if (!file) continue;
+    for (const name of valueExportsOf(fs.readFileSync(file, "utf8"))) add(id, name, name);
+  }
   const reexports = files.map((f) => ({ id: fileModuleId(f), file: f, refs: importsOf(fs.readFileSync(f, "utf8")).filter((r) => r.kind.startsWith("reexport")) }));
   for (let changed = true; changed; ) {
     changed = false;
@@ -235,6 +250,22 @@ describe("scanner: internal posting functions stay internal (F8)", () => {
     for (const spec of INTERNAL_ONLY_MODULES) expect(Object.values(INTERNAL_POSTING_FUNCTIONS), spec).toContain(spec);
   });
 
+  it("every package job module of the finance registry is internal-only (INTERNAL_JOB_MODULES = the modules jobs.server.ts assembles)", () => {
+    const registry = fs.readFileSync(path.join(APP, "modules/finance/jobs.server.ts"), "utf8");
+    const assembled = [...registry.matchAll(/import \* as \w+ from "(~\/modules\/[\w/-]+\/jobs\.server)"/g)].map((m) => m[1]!).sort();
+    expect(assembled.length).toBeGreaterThanOrEqual(5);
+    expect([...INTERNAL_JOB_MODULES].sort()).toEqual(assembled);
+    for (const spec of INTERNAL_JOB_MODULES) {
+      const file = SOURCE_EXTS.map((e) => path.join(ROOT, moduleIdOf(spec) + e)).find((f) => fs.existsSync(f));
+      expect(file, spec).toBeTruthy();
+      expect(valueExportsOf(fs.readFileSync(file!, "utf8")), spec).toEqual(expect.arrayContaining(["handlers", "ensureSchedules"]));
+    }
+    // Агрегатор реєстру — теж суто внутрішній (обробники від SYSTEM_ACTOR).
+    expect(INTERNAL_ONLY.has("app/modules/finance/jobs.server")).toBe(true);
+    // Назви, імена й таймінги завдань (без логіки) — публічні.
+    expect(INTERNAL_ONLY.has("app/modules/finance/jobs")).toBe(false);
+  });
+
   it("no page, route, command or AI tool imports an internal posting function or module", () => {
     const offenders: string[] = [];
     for (const file of GUARDED_FILES) for (const v of violationsIn(file, fs.readFileSync(file, "utf8"), EXPOSED)) offenders.push(`${rel(file)}: ${v}`);
@@ -270,6 +301,41 @@ describe("scanner: internal posting functions stay internal (F8)", () => {
     expect(caught(`// import { postEntries } from "~/modules/finance/core/entries.server";`)).toBe(false);
   });
 
+  it("job modules and job/internal helpers of mixed modules are caught (named, namespace, dynamic, re-export); owner services of the same modules are allowed (self-check)", () => {
+    const page = path.join(APP, "pages", "_scanner_sample.tsx");
+    const caught = (src: string) => violationsIn(page, src, EXPOSED).length > 0;
+    // Модулі завдань пакетів і агрегатор реєстру.
+    expect(caught(`import { handlers } from "~/modules/expenses/jobs.server";`)).toBe(true);
+    expect(caught(`import * as j from "~/modules/expenses/jobs.server";`)).toBe(true);
+    expect(caught(`const j = await import("~/modules/expenses/jobs.server");`)).toBe(true);
+    expect(caught(`import type { FinanceJobModule } from "../modules/expenses/jobs.server";`)).toBe(true);
+    expect(caught(`import * as fj from "~/modules/finance-sync/jobs.server";`)).toBe(true);
+    expect(caught(`import { enqueueValuationPending, handlers } from "~/modules/costing/jobs.server";`)).toBe(true);
+    expect(caught(`import { ensureSchedules } from "~/modules/fx/jobs.server.ts";`)).toBe(true);
+    expect(caught(`import "~/modules/finance-reports/jobs.server";`)).toBe(true);
+    expect(caught(`import { createFinanceJobHandlers } from "~/modules/finance/jobs.server";`)).toBe(true);
+    expect(caught(`export { handlers as h } from "~/modules/expenses/jobs.server";`)).toBe(true);
+    // Внутрішні помічники змішаних модулів (постановка завантажень НБУ, скидання довантаження, суми без актора).
+    expect(caught(`import { restartFinanceBackfill } from "~/modules/finance-sync/backfill-status.server";`)).toBe(true);
+    expect(caught(`import { runFxFetchScheduled, enqueueFxFetch, scheduleFxChain } from "~/modules/fx/nbu-fetch.server";`)).toBe(true);
+    expect(caught(`import { loadOrderEvents, loadPartnerEvents } from "~/modules/partners/events.server";`)).toBe(true);
+    expect(caught(`import { eventActiveSql } from "~/modules/partners/events.server";`)).toBe(true);
+    expect(caught(`import { loadFeeRules } from "~/modules/expenses/fee-rules.server";`)).toBe(true);
+    expect(caught(`import { enqueueFinanceOrderSync } from "~/modules/finance-sync/schedule.server";`)).toBe(true);
+    expect(caught(`import { writeFinanceChange } from "~/modules/finance/core/change-log.server";`)).toBe(true);
+    expect(caught(`import { resetStoresForDemo } from "~/modules/finance/core/store.server";`)).toBe(true);
+    expect(caught(`import { enqueueOrHoldReallocation } from "~/modules/expenses/reallocation.server";`)).toBe(true);
+    expect(caught(`import * as nbu from "~/modules/fx/nbu-fetch.server";`)).toBe(true);
+    expect(caught(`import * as fees from "~/modules/expenses/fee-rules.server";`)).toBe(true);
+    // Дозволено: сервіси власника тих самих змішаних модулів за назвою; публічні назви завдань.
+    expect(caught(`import { requestNbuBackfill, requestNbuFetch, setNbuEnabled } from "~/modules/fx/nbu-fetch.server";`)).toBe(false);
+    expect(caught(`import { endFeeRule, listFeeRules, saveFeeRule } from "~/modules/expenses/fee-rules.server";`)).toBe(false);
+    expect(caught(`import { countOrdersWithoutFacts } from "~/modules/finance-sync/backfill-status.server";`)).toBe(false);
+    expect(caught(`import { listFinanceChanges } from "~/modules/finance/core/change-log.server";`)).toBe(false);
+    expect(caught(`import { getDefaultStore } from "~/modules/finance/core/store.server";`)).toBe(false);
+    expect(caught(`import { FINANCE_JOB, financeJobDedupe } from "~/modules/finance/jobs";`)).toBe(false);
+  });
+
   it("exposure is transitive through real re-export files (export * / export { x as y } from)", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "f8-scan-"));
     try {
@@ -286,6 +352,14 @@ describe("scanner: internal posting functions stay internal (F8)", () => {
       expect(violationsIn(sample, `import { listDiscrepancies } from "./bridge-b";`, exposed)).toEqual([]);
       // bridge-c реекспортує лише публічну функцію — простір імен дозволено.
       expect(violationsIn(sample, `import * as x from "./bridge-c";`, exposed)).toEqual([]);
+      // Реекспорт будь-якого значення суто внутрішнього модуля (не лише з переліку) публічним модулем — обхід F8.
+      const d = path.join(dir, "bridge-d.ts");
+      fs.writeFileSync(d, `export { poolStatesAt as states } from "~/modules/costing/pool-read.server";\nexport { itemPairsInLockOrder as pairs } from "~/modules/costing/valuation.server";\nexport { DASH } from "~/components/finance/format-ui";\n`);
+      const exposed2 = exposureMap([...APP_FILES, d]);
+      expect(violationsIn(sample, `import { states } from "./bridge-d";`, exposed2)).not.toEqual([]);
+      expect(violationsIn(sample, `import { pairs } from "./bridge-d";`, exposed2)).not.toEqual([]);
+      expect(violationsIn(sample, `import * as y from "./bridge-d";`, exposed2)).not.toEqual([]);
+      expect(violationsIn(sample, `import { DASH } from "./bridge-d";`, exposed2)).toEqual([]);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

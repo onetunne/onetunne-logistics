@@ -5,16 +5,15 @@
  * (НІКОЛИ не 0). `total` — знаменник часток (чиста виручка), не сума рядків: undefined — без стовпця часток; null або
  * ≤ 0 — частки «—» з поясненням.
  */
-import { useLocale } from "~/i18n";
+import { useLocale, useT } from "~/i18n";
 import { formatPercent } from "~/lib/format";
 import { cx } from "~/ui";
 import type { BreakdownBarsProps } from "./contracts";
 import { DASH, barPercent, moneyText, parseMinor, sharePercent } from "./format-ui";
-import { useFinanceUiT } from "./i18n";
 import { StateBadge } from "./state-badge";
 
 export function BreakdownBars({ rows, currency, total }: BreakdownBarsProps) {
-  const ft = useFinanceUiT();
+  const ft = useT();
   const locale = useLocale();
   const values = rows.map((r) => parseMinor(r.value));
   let max = 0n;

@@ -5,8 +5,9 @@
  *   saveFinanceSettings — settings_history + finance_change_log; валюта оцінки блокується після першої оцінки;
  *   загальний updateSetting ключ finance відхиляє (без обходу історії змін), writeFinanceSettingsVersion імпортує лише
  *   ядро; суми з сотими у валюті з 0 знаками — помилка amountWholeUnits (§5.1);
- * - кожен /finance/* loader і action: працівник → 403; власник → 200; експорт/зразок — 403/404; /analytics —
- *   переадресація працівника; /returns — orders.view, без сум.
+ * - кожен /finance/* loader і action: працівник і підроблений працівник → 403 (і з наміром у формі); власник → 200 на
+ *   реалізованих сторінках (дані, без 403 і без винятку) і notImplemented — лише на заглушках раунду 0 (визначаються з
+ *   коду); експорт/зразок — 403/404; /analytics — переадресація працівника; /returns — orders.view, суми null.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -228,18 +229,53 @@ describe("stage-6 routes: every stub enforces its permission (§14.2)", () => {
   });
 
   it("staff (and a forged staff actor with finance permissions) → 403 on every /finance/* loader and action; owner → 200", async () => {
+    // Картка партнера — справжній партнер (сервіс WP7); для працівника 403 настає раніше за пошук партнера.
+    const { createPartner } = await import("~/modules/partners/partners.server");
+    const partner = await createPartner(
+      { db: env.handle.db, actor: OWNER, now: () => new Date("2026-11-01T10:00:00Z") },
+      { displayName: "Маршрути — тест", kind: "blogger", rateBp: 1000, holdDays: 30, codes: [] },
+    );
+    const paramsOf = (name: string): Record<string, string> =>
+      name === "finance-partner" ? { partnerId: partner.id } : name === "finance-shipping-invoice" ? { invoiceId: "00000000-0000-4000-8000-000000000000" } : {};
+    const pageArgs = (name: string, method = "GET", body?: FormData) => ({
+      request: new Request(`http://localhost/demo/${name}`, { method, ...(body ? { body } : {}) }),
+      params: paramsOf(name),
+      context: {},
+    });
+    const stubs: string[] = [];
     for (const name of FINANCE_PAGES) {
+      const src = fs.readFileSync(path.resolve(`app/pages/${name}.tsx`), "utf8");
+      // Сторінка-заглушка ядра (раунд 0): позначка в коментарі + відповідь notImplemented. Інакше — реалізована пакетом.
+      const isStub = src.includes("СТОРІНКА-ЗАГЛУШКА") && src.includes('financeLabelKeys.error("notImplemented")');
+      if (isStub) stubs.push(name);
       const mod = (await import(`~/pages/${name}.tsx`)) as PageModule;
       for (const actor of [STAFF, FORGED]) {
         setContext(actor);
-        expect(await statusOf(mod.loader(args(`http://localhost/demo/${name}`))), `${name} loader ${actor.id}`).toBe(403);
-        expect(await statusOf(mod.action!(args(`http://localhost/demo/${name}`, "POST"))), `${name} action ${actor.id}`).toBe(403);
+        expect(await statusOf(mod.loader(pageArgs(name))), `${name} loader ${actor.id}`).toBe(403);
+        expect(await statusOf(mod.action!(pageArgs(name, "POST"))), `${name} action ${actor.id}`).toBe(403);
+        // Навіть із наміром у формі (дія власника) — 403 до будь-якої обробки.
+        const form = new FormData();
+        form.set("intent", "save");
+        expect(await statusOf(mod.action!(pageArgs(name, "POST", form))), `${name} action+intent ${actor.id}`).toBe(403);
       }
       setContext(OWNER);
-      const data = await mod.loader(args(`http://localhost/demo/${name}`));
-      expect(data, name).toEqual({ demo: true });
-      expect(await mod.action!(args(`http://localhost/demo/${name}`, "POST"))).toEqual({ ok: false, error: "finance.error.notImplemented" });
+      if (isStub) {
+        expect(await mod.loader(pageArgs(name)), name).toEqual({ demo: true });
+        expect(await mod.action!(pageArgs(name, "POST"))).toEqual({ ok: false, error: "finance.error.notImplemented" });
+        continue;
+      }
+      // Реалізована сторінка: власник отримує дані (200, без 403 і без винятку); POST без наміру — не 403 і не виняток.
+      const data = await mod.loader(pageArgs(name));
+      expect(data instanceof Response ? data.status : 200, `${name} owner loader`).toBe(200);
+      expect(data, `${name} owner loader data`).toMatchObject({ demo: true });
+      const posted = await statusOf(mod.action!(pageArgs(name, "POST", new FormData())));
+      expect(posted, `${name} owner action`).not.toBe(403);
+      expect(posted, `${name} owner action`).toBeLessThan(500);
     }
+    // Заглушки — лише сторінки, ще не реалізовані пакетами (WP4, WP5, WP8, WP10); реалізовані сторінки не стають заглушками.
+    const ROUND0_STUBS = ["finance", "finance-pnl", "finance-orders", "finance-shipping", "finance-shipping-import", "finance-shipping-invoice", "finance-reports", "finance-settings"];
+    for (const s of stubs) expect(ROUND0_STUBS, s).toContain(s);
+    for (const done of ["finance-expenses", "finance-periods", "finance-partners", "finance-partner", "finance-costs", "finance-rates"]) expect(stubs, done).not.toContain(done);
   });
 
   it("resource routes: export → 403 for staff, 501 for the owner (no-store); sample → demo only", async () => {
@@ -258,14 +294,22 @@ describe("stage-6 routes: every stub enforces its permission (§14.2)", () => {
   });
 
   it("returns: orders.view; amounts are null (never an empty object) — and nothing financial reaches staff", async () => {
-    for (const name of ["returns", "return-detail"]) {
-      const mod = (await import(`~/pages/${name}.tsx`)) as PageModule;
+    const list = (await import("~/pages/returns")) as PageModule;
+    const noOrders = makeActor({ id: "no-orders", displayName: "N", role: "staff", overrides: { revoke: ["orders.view"] } });
+    for (const url of ["http://localhost/demo/returns", "http://localhost/demo/returns?tab=stats"]) {
       setContext(STAFF);
-      const data = await mod.loader(args(`http://localhost/demo/${name}`));
-      expect(data).toEqual({ amounts: null });
+      const data = (await list.loader(args(url))) as { amounts: unknown };
+      expect(data.amounts).toBeNull();
       expect(JSON.stringify(data)).not.toMatch(/(profit|прибут|cogs|собіварт|margin|rentab|рентаб|revenue|оборот|turnover)/i);
-      setContext(makeActor({ id: "no-orders", displayName: "N", role: "staff", overrides: { revoke: ["orders.view"] } }));
-      expect(await statusOf(mod.loader(args(`http://localhost/demo/${name}`)))).toBe(403);
+      setContext(noOrders);
+      expect(await statusOf(list.loader(args(url)))).toBe(403);
     }
+    const detail = (await import("~/pages/return-detail")) as PageModule;
+    const id = "00000000-0000-4000-8000-000000000000";
+    const dArgs = { ...args(`http://localhost/demo/returns/${id}`), params: { returnId: id } };
+    setContext(STAFF);
+    expect(await statusOf(detail.loader(dArgs))).toBe(404);
+    setContext(noOrders);
+    expect(await statusOf(detail.loader(dArgs))).toBe(403);
   });
 });

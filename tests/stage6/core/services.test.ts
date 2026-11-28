@@ -25,6 +25,7 @@ import { canonicalJson, saveReportSnapshot, sha256Hex } from "~/modules/finance/
 import { completenessMarker, emptyCompleteness, missingComponents, parseOrderComponents, profitStateOf } from "~/modules/finance/core/states";
 import { normalizeInvoiceNumber, normalizeWaybillNumber } from "~/modules/finance/core/waybills";
 import { recordExternalWaybills } from "~/modules/finance/core/waybills.server";
+import { DEFAULT_STORE_ID } from "~/modules/finance/core/store.server";
 import { FINANCE_CHANGE_ENTITY_TYPES } from "~/domain/finance";
 import { OWNER, STAFF, createTestEnv, type TestEnv } from "../../helpers";
 
@@ -71,12 +72,17 @@ describe("finance_discrepancies (§7.5)", () => {
     const db = env.handle.db;
     const orderId = await env.orderId("#1001");
     const [issuesBefore] = await db.select({ c: count() }).from(issues);
+    // Реєстр не порожній (демо засіває розбіжності інших пакетів, напр. cost_state_out_of_sync WP2) — рахуємо за типом.
+    const allBefore = await countOpenDiscrepancies({ db, actor: OWNER });
+    expect(await countOpenDiscrepancies({ db, actor: OWNER }, DEFAULT_STORE_ID, { type: "shipping_loss" })).toEqual({ total: 0, critical: 0 });
     const key = discrepancyKey("shipping_loss", orderId);
     const a = await openDiscrepancy(db, SYSTEM_ACTOR, { type: "shipping_loss", dedupeKey: key, orderId, details: { lossAmount: "60.00", currency: "UAH" } });
     const b = await openDiscrepancy(db, SYSTEM_ACTOR, { type: "shipping_loss", dedupeKey: key, orderId });
     expect(a).toMatchObject({ created: true });
     expect(b).toEqual({ id: a.id, created: false, reopened: false });
-    expect(await countOpenDiscrepancies({ db, actor: OWNER })).toEqual({ total: 1, critical: 0 });
+    expect(await countOpenDiscrepancies({ db, actor: OWNER }, DEFAULT_STORE_ID, { type: "shipping_loss" })).toEqual({ total: 1, critical: 0 });
+    expect(await countOpenDiscrepancies({ db, actor: OWNER })).toEqual({ total: allBefore.total + 1, critical: allBefore.critical });
+    await expect(countOpenDiscrepancies({ db, actor: FORGED })).rejects.toBeInstanceOf(ForbiddenError);
     await expect(resolveDiscrepancy({ db, actor: FORGED }, { id: a.id, status: "resolved", resolutionCode: "accepted" })).rejects.toBeInstanceOf(ForbiddenError);
     await expect(listDiscrepancies({ db, actor: STAFF })).rejects.toBeInstanceOf(ForbiddenError);
     const r = await resolveDiscrepancy({ db, actor: OWNER }, { id: a.id, status: "resolved", resolutionCode: "accepted", note: "ok", expectedVersion: 1 });

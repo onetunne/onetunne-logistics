@@ -11,13 +11,12 @@
  * (маркер `incomplete`, напр. записи без курсу) лишає «Неповні дані», але без рядка «0 · 0 · 0 — з 0».
  */
 import { ORDER_COMPONENTS, type OrderComponent } from "~/domain/finance";
-import { useLocale, type Locale } from "~/i18n";
+import { type Locale, type TFunction, useLocale, useT } from "~/i18n";
 import { financeLabelKeys } from "~/modules/finance/core/labels";
 import type { CompletenessSummary } from "~/modules/finance/core/states";
 import { Banner, Disclosure, Stack } from "~/ui";
 import type { CompletenessBannerProps } from "./contracts";
 import { countText, formatMonth, moneyText } from "./format-ui";
-import { useFinanceUiT, type FinanceUiT } from "./i18n";
 import { MarkerBadge } from "./marker-badge";
 
 export interface CompletenessItem {
@@ -32,7 +31,7 @@ function orderedComponents(map: Partial<Record<OrderComponent, number>>): Array<
 }
 
 /** Пункти «Що заповнити» з об'єкта повноти (чиста функція; порядок — від того, що змінює числа). */
-export function completenessItems(c: CompletenessSummary, ft: FinanceUiT, locale: Locale): CompletenessItem[] {
+export function completenessItems(c: CompletenessSummary, ft: TFunction, locale: Locale): CompletenessItem[] {
   const n = (v: number) => countText(v, locale);
   const items: CompletenessItem[] = [];
   for (const [component, count] of orderedComponents(c.missingByComponent)) {
@@ -78,7 +77,7 @@ export function completenessItems(c: CompletenessSummary, ft: FinanceUiT, locale
 }
 
 export function CompletenessBanner({ completeness, marker, profitLabel, includesTestOrders, demo }: CompletenessBannerProps) {
-  const ft = useFinanceUiT();
+  const ft = useT();
   const locale = useLocale();
   const items = completenessItems(completeness, ft, locale);
   const noOrders = completeness.orders === 0;

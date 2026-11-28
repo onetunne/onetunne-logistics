@@ -39,6 +39,7 @@ import analytics from "./messages/analytics";
 import returns from "./messages/returns";
 import financeReports from "./messages/finance-reports";
 import financeCommands from "./messages/finance-commands";
+import financeUi from "./messages/finance-ui";
 
 export * from "./types";
 
@@ -81,6 +82,7 @@ export const MESSAGE_MODULES: Record<string, MessageModule> = {
   returns,
   financeReports,
   financeCommands,
+  financeUi,
 };
 
 function merge(locale: Locale): Messages {

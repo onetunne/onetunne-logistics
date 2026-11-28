@@ -109,6 +109,7 @@ export async function loadRefundSourcesForOrders(db: DbOrTx, orderIds: readonly 
       variantId: string | null;
       quantity: number;
       restockType: string | null;
+      restockQuantities: Record<string, number> | null;
     }> = [];
     for (let j = 0; j < heads.length; j += 1000) {
       lines.push(
@@ -120,6 +121,7 @@ export async function loadRefundSourcesForOrders(db: DbOrTx, orderIds: readonly 
             variantId: orderLineItems.variantId,
             quantity: orderRefundLines.quantity,
             restockType: orderRefundLines.restockType,
+            restockQuantities: orderRefundLines.restockQuantities,
           })
           .from(orderRefundLines)
           .leftJoin(orderLineItems, eq(orderLineItems.id, orderRefundLines.orderLineItemId))
@@ -149,6 +151,7 @@ export async function loadRefundSourcesForOrders(db: DbOrTx, orderIds: readonly 
           variantId: l.variantId ?? null,
           quantity: l.quantity,
           restockType: l.restockType,
+          restockQuantities: l.restockQuantities ?? null,
         })),
       });
       out.set(h.orderId, list);

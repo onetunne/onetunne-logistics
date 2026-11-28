@@ -219,16 +219,19 @@ export async function listDiscrepancies(ctx: Pick<ServiceContext, "db" | "actor"
     .limit(Math.min(Math.max(filter.limit ?? 200, 1), 2000));
 }
 
-/** Кількість відкритих (усього й критичних) — finance.view. */
+/** Кількість відкритих (усього й критичних) — finance.view; `type` — лише розбіжності цього коду (DiscrepancyCode). */
 export async function countOpenDiscrepancies(
   ctx: Pick<ServiceContext, "db" | "actor">,
   storeId: string = DEFAULT_STORE_ID,
+  opts: { type?: DiscrepancyCode } = {},
 ): Promise<{ total: number; critical: number }> {
   requireFinance(ctx, "view");
+  const conds: SQL[] = [eq(financeDiscrepancies.storeId, storeId), eq(financeDiscrepancies.status, "open")];
+  if (opts.type) conds.push(eq(financeDiscrepancies.type, opts.type));
   const rows = await ctx.db
     .select({ severity: financeDiscrepancies.severity, c: count() })
     .from(financeDiscrepancies)
-    .where(and(eq(financeDiscrepancies.storeId, storeId), eq(financeDiscrepancies.status, "open")))
+    .where(and(...conds))
     .groupBy(financeDiscrepancies.severity);
   const total = rows.reduce((a, r) => a + Number(r.c), 0);
   const critical = Number(rows.find((r) => r.severity === "critical")?.c ?? 0);

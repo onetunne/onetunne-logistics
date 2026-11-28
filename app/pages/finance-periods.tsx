@@ -44,7 +44,7 @@ function localizedError(e: unknown, locale: Locale): ActionResult {
   const r = toActionError(e);
   if (!r.params) return r;
   const params: Record<string, string | number> = { ...r.params };
-  if (typeof params.month === "string" && parseIsoDate(params.month)) params.month = monthLabel(params.month, locale);
+  // Місяць (finance.error.monthClosed) форматує централізовано localizeParams (ActionBanner).
   return { ...r, params };
 }
 

@@ -6,7 +6,7 @@
 import { createElement as h } from "react";
 import { describe, expect, it } from "vitest";
 import { CompletenessBanner, completenessItems } from "~/components/finance/completeness-banner";
-import { makeFinanceUiT } from "~/components/finance/i18n";
+import { makeT } from "~/i18n";
 import { completenessMarker, emptyCompleteness, type CompletenessSummary } from "~/modules/finance/core/states";
 import { CYRILLIC, renderUi, textOf } from "./render";
 
@@ -127,7 +127,7 @@ describe("CompletenessBanner", () => {
       expect(text, line).toContain(line);
     }
     // Порядок: спершу те, що змінює числа (складники в порядку ORDER_COMPONENTS), потім пояснення.
-    const items = completenessItems(INCOMPLETE, makeFinanceUiT("uk"), "uk");
+    const items = completenessItems(INCOMPLETE, makeT("uk"), "uk");
     expect(items.slice(0, 2).map((i) => i.key)).toEqual(["missing:cogs", "missing:shipping_cost"]);
     expect(items.filter((i) => i.tone === "warning").map((i) => i.key)).toEqual([
       "missing:cogs",

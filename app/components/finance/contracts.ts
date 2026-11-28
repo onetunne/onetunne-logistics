@@ -5,6 +5,7 @@
  * Компоненти: kpi-tile, state-badge, money-value, period-bar, currency-switch, completeness-banner, coverage-note,
  * profit-chart, breakdown-bars, sparkline, finance-tabs (файли app/components/finance/*.tsx — WP0-UI).
  */
+import type { ReactNode } from "react";
 import type {
   CompletenessMarker,
   ComponentReason,
@@ -90,6 +91,12 @@ export interface KpiTileProps {
   href?: string;
   /** Додатковий рядок (напр. «маржа 41,2 %»). */
   note?: string | null;
+  /** Розгортання «Як порахувано» (формула з §2, текст сторінки). */
+  explanation?: ReactNode;
+  /** Для витрат: «менше — добре» біля зміни. Типово — без оцінки напряму. */
+  deltaPreference?: "higher" | "lower";
+  /** Підпис бази зміни (типово «до періоду порівняння»), напр. «до попередніх 30 днів». */
+  deltaLabel?: string;
 }
 
 export interface PeriodBarProps {
@@ -101,6 +108,14 @@ export interface PeriodBarProps {
   allowCustom?: boolean;
   /** Назва параметрів запиту (типово period / from / to / granularity / compare). */
   paramPrefix?: string;
+  /** Показати вибір відрізка (день / тиждень / місяць / рік); типово приховано. */
+  showGranularity?: boolean;
+  /** Показати вибір порівняння (без порівняння / попередній період / торік); типово приховано. */
+  showCompare?: boolean;
+  /** Дозволені відрізки (типово всі). */
+  granularities?: readonly Granularity[];
+  /** Додаткові елементи в «Ще» (напр. перемикач валюти). */
+  extra?: ReactNode;
 }
 
 export interface CurrencySwitchProps {
@@ -108,6 +123,8 @@ export interface CurrencySwitchProps {
   options: readonly string[];
   /** Параметр запиту (типово currency; не зберігається). */
   paramName?: string;
+  /** Показати підпис «Валюта показу» перед перемикачем (типово ні). */
+  showLabel?: boolean;
 }
 
 export interface CompletenessBannerProps {
@@ -120,7 +137,10 @@ export interface CompletenessBannerProps {
 
 export interface ChartBucket {
   key: string;
+  /** Повний підпис відрізка (таблиця, підказка, опис для читачів екрана). */
   label: string;
+  /** Короткий підпис на осі X (напр. «Т47»); типово — `label`. */
+  axisLabel?: string;
   actual: string | null;
   forecast: string | null;
   compare?: string | null;
@@ -131,6 +151,8 @@ export interface ProfitChartProps {
   currency: string;
   /** Заголовок таблиці «Показати таблицею». */
   tableCaption: string;
+  /** Підпис ряду порівняння в легенді й таблиці (типово «Порівняння»), напр. «Попередній період». */
+  compareLabel?: string;
 }
 
 export interface BreakdownRow {

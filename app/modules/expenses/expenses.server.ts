@@ -50,6 +50,7 @@ import { maskFreeTextNote } from "~/modules/privacy/notes";
 import type { AppMode, ServiceContext } from "~/server/types";
 import { computeAllocation, currentAllocations, sameAllocation, type ComputedAllocation } from "./allocation.server";
 import { expenseOrderIds, loadOrderPostingStates, syncExpenseEntries } from "./posting.server";
+import { lockExpenseRow, reallocateExpenseInTx } from "./reallocation.server";
 import {
   BATCH_ONLY_CATEGORIES,
   datesTouched,
@@ -377,13 +378,7 @@ export async function createExpense(ctx: Ctx, input: ExpenseInput): Promise<Expe
 }
 
 /** Рядок витрати під блокуванням операції витрати (FOR UPDATE). */
-async function lockExpense(tx: Tx, id: string): Promise<ExpenseRow> {
-  if (!UUID_RE.test(id ?? "")) throw new NotFoundError("finance_expense");
-  await lockFinanceOperation(tx, `expense|${id.toLowerCase()}`);
-  const [row] = await tx.select().from(financeExpenses).where(eq(financeExpenses.id, id)).for("update");
-  if (!row) throw new NotFoundError("finance_expense");
-  return row;
-}
+const lockExpense = lockExpenseRow;
 
 function checkVersion(row: ExpenseRow, expected: number | null | undefined) {
   if (expected !== undefined && expected !== null && expected !== row.version) throw new ConflictError();
@@ -515,56 +510,8 @@ export async function recalculateAllocation(
   input: { expenseId: string; expectedVersion?: number | null },
 ): Promise<{ changed: boolean; version: number; allocatedOrders: number; posted: number; reversed: number; awaiting: number }> {
   requireFinance(ctx, "manage");
-  return ctx.db.transaction(async (tx) => {
-    const row = await lockExpense(tx, input.expenseId);
-    if (row.status !== "active") throw new DomainError("financeExpenses.error.alreadyVoided", 409);
-    if (!row.coversForecast) throw new DomainError("financeExpenses.error.notCovering", 400);
-    checkVersion(row, input.expectedVersion);
-    await assertMonthsOpen(tx, datesTouched(row));
-    const settings = await settingsOf(tx);
-    const current = await currentAllocations(tx, row);
-    const computed = await computeAllocation(tx, row, { mode: ctx.mode, ...settings });
-    if (sameAllocation(current, computed)) {
-      const r = await syncExpenseEntries(tx, ctx.actor, row.id, { now: ctx.now() });
-      return { changed: false, version: row.version, allocatedOrders: current.length, ...r };
-    }
-    const [next] = await tx
-      .update(financeExpenses)
-      .set({ version: row.version + 1 })
-      .where(and(eq(financeExpenses.id, row.id), eq(financeExpenses.version, row.version)))
-      .returning();
-    if (!next) throw new ConflictError();
-    if (computed) {
-      await tx.insert(financeExpenseAllocations).values(
-        computed.shares.map((s) => ({
-          expenseId: row.id,
-          expenseVersion: next.version,
-          orderId: s.orderId,
-          amount: fromMinor(s.minor),
-          currency: row.currency,
-          weightBasis: computed.weightBasis,
-        })),
-      );
-    }
-    const r = await syncExpenseEntries(tx, ctx.actor, row.id, { now: ctx.now() });
-    await writeFinanceChange(tx, ctx.actor, {
-      entityType: "expense_allocation",
-      entityId: row.id,
-      action: "update",
-      before: { expenseId: row.id, expenseVersion: row.version, orders: current.length, total: row.amount, currency: row.currency },
-      after: {
-        expenseId: row.id,
-        expenseVersion: next.version,
-        orders: computed?.shares.length ?? 0,
-        total: row.amount,
-        currency: row.currency,
-        weightBasis: computed?.weightBasis ?? "none",
-      },
-      storeId: row.storeId,
-    });
-    await writeAudit(tx, ctx.actor, "finance.expense_reallocated", { type: "finance_expense", id: row.id }, { orders: computed?.shares.length ?? 0 });
-    return { changed: true, version: next.version, allocatedOrders: computed?.shares.length ?? 0, ...r };
-  });
+  // Той самий перерахунок виконує завдання finance.expense_reallocate (reallocation.server.ts) — від SYSTEM_ACTOR.
+  return ctx.db.transaction((tx) => reallocateExpenseInTx(tx, ctx.actor, input.expenseId, { mode: ctx.mode, now: ctx.now(), expectedVersion: input.expectedVersion }));
 }
 
 // ---------------------------------------------------------------------------

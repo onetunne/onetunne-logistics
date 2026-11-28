@@ -2,13 +2,14 @@
  * Етап 6: реєстр фінансових завдань (docs/stage6-design.md §21.1). СТАТИЧНО збирає обробники й розклади з модулів
  * пакетів — пакети не дописують рядків у файли ядра:
  *   fx/jobs.server.ts (WP1) · costing/jobs.server.ts (WP2) · finance-sync/jobs.server.ts (WP3) ·
- *   finance-reports/jobs.server.ts (WP10).
+ *   finance-reports/jobs.server.ts (WP10) · expenses/jobs.server.ts (WP6).
  * Точки підключення: createFinanceJobHandlers — у мапі обробників (modules/shopify-sync/handlers.server.ts);
  * ensureFinanceSchedules — в ensureJobWorker (server/production-runtime.server.ts). У демо обробника немає.
  */
 import type { Db } from "~/db/client.server";
 import { logger } from "~/lib/logger.server";
 import * as costingJobs from "~/modules/costing/jobs.server";
+import * as expensesJobs from "~/modules/expenses/jobs.server";
 import * as financeReportsJobs from "~/modules/finance-reports/jobs.server";
 import * as financeSyncJobs from "~/modules/finance-sync/jobs.server";
 import * as fxJobs from "~/modules/fx/jobs.server";
@@ -21,6 +22,7 @@ export const FINANCE_JOB_MODULES = {
   costing: costingJobs satisfies FinanceJobModule,
   "finance-sync": financeSyncJobs satisfies FinanceJobModule,
   "finance-reports": financeReportsJobs satisfies FinanceJobModule,
+  expenses: expensesJobs satisfies FinanceJobModule,
 } as const;
 
 /**

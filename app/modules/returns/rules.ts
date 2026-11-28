@@ -7,10 +7,12 @@
  *    «Повернення покупця»; лише NO_RESTOCK (гроші повернено, товар на склад не повертали) → «Лише повернення коштів».
  *    Повернення коштів без позицій або до відвантаження (зменшення продажу, §2.1) випадку не створює.
  *    `MIXED` (WP3 об'єднує кілька рядків повернення однієї позиції з РІЗНИМИ видами — напр. CANCEL 1 + RETURN 2 — в один
- *    рядок; розподіл кількості втрачено): можливо містить повернення товару → «Повернення покупця» (як і інші рядки не
- *    CANCEL — лише після відвантаження), але кількість НЕТОЧНА (верхня межа, частина може бути скасуванням
- *    невідвантаженого): такі позиції позначено `uncertain` і в одиниці випадку їх не додано мовчки (`caseUnits` →
- *    `uncertainUnits`, «ще до N од. — кількість неточна»).
+ *    рядок): з міграції 0013 WP3 зберігає розподіл `restock_quantities` (вид → кількість, Σ = quantity) — тоді рядок
+ *    розкладається за тими самими правилами видів (`resolveMixedLine`: RETURN — завжди, CANCEL — ніколи, інші — лише
+ *    після відвантаження), кількість ТОЧНА, позначки `uncertain` немає. Без розподілу (рядки до 0013 або пошкоджений
+ *    розподіл) — як раніше: можливо містить повернення товару → «Повернення покупця» (лише після відвантаження), але
+ *    кількість НЕТОЧНА (верхня межа): такі позиції позначено `uncertain` і в одиниці випадку їх не додано мовчки
+ *    (`caseUnits` → `uncertainUnits`, «ще до N од. — кількість неточна»).
  * 2. Зв'язування джерел (`planReturnSync`, ідемпотентно): джерела — у порядку часу; уже враховане джерело (є випадок
  *    із його ключем або позиція з його детермінованим id) пропускається. Повернення коштів приєднується до найранішого
  *    незакритого випадку без повернення коштів, інакше — новий випадок (`open`). Надходження на склад приєднується до
@@ -21,7 +23,15 @@
  *    оглянуті на складі; одиниць товару в випадку = max(заявлено, оглянуто) на позицію замовлення — повернення коштів і
  *    надходження тих самих одиниць не рахуються двічі.
  */
-import type { RETURN_KINDS, RETURN_LINE_CONDITIONS, RETURN_REASON_CODES, RETURN_SOURCES, RETURN_STATUSES } from "~/domain/finance";
+import {
+  RESTOCK_TYPE_MIXED,
+  RESTOCK_TYPE_UNKNOWN,
+  type RETURN_KINDS,
+  type RETURN_LINE_CONDITIONS,
+  type RETURN_REASON_CODES,
+  type RETURN_SOURCES,
+  type RETURN_STATUSES,
+} from "~/domain/finance";
 import { mulDivHalfAwayFromZero, scaledToDecimal } from "~/lib/decimal";
 import { RECEIPT_LINE_PARTS, returnLineId, returnSourceKeys } from "./keys";
 
@@ -40,8 +50,13 @@ export interface RefundLineSource {
   orderLineItemId: string | null;
   variantId: string | null;
   quantity: number;
-  /** Shopify RefundLineItem.restockType (RETURN | NO_RESTOCK | CANCEL | LEGACY_RESTOCK) або null. */
+  /** Shopify RefundLineItem.restockType (RETURN | NO_RESTOCK | CANCEL | LEGACY_RESTOCK), MIXED (об'єднаний WP3) або null. */
   restockType: string | null;
+  /**
+   * Лише для MIXED (міграція 0013, `order_refund_lines.restock_quantities`): вид → кількість (Σ = quantity; ключ
+   * UNKNOWN — рядок без виду). null / відсутнє — розподілу немає (кількість неточна).
+   */
+  restockQuantities?: Readonly<Record<string, number>> | null;
 }
 
 export interface RefundSource {
@@ -75,8 +90,8 @@ const norm = (v: string | null) => (v ?? "").trim().toUpperCase();
 
 /** Види повернення на склад Shopify, що означають повернення товару (§6.7, §11). */
 export const RETURN_RESTOCK_TYPES = ["RETURN", "LEGACY_RESTOCK"] as const;
-/** Рядок повернення коштів, у якому WP3 об'єднав кілька видів повернення на склад (кількість за видами втрачено). */
-export const MIXED_RESTOCK_TYPE = "MIXED";
+/** Рядок повернення коштів, у якому WP3 об'єднав кілька видів повернення на склад (розподіл — restockQuantities, 0013). */
+export const MIXED_RESTOCK_TYPE = RESTOCK_TYPE_MIXED;
 
 /** Рядок означає повернення товару (RETURN / LEGACY_RESTOCK) — або, можливо, містить його (MIXED). */
 export function isReturnRestock(restockType: string | null): boolean {
@@ -87,6 +102,52 @@ export function isReturnRestock(restockType: string | null): boolean {
 /** Кількість рядка неточна (MIXED — частина може бути CANCEL). */
 export function isUncertainRestock(restockType: string | null): boolean {
   return norm(restockType) === MIXED_RESTOCK_TYPE;
+}
+
+/**
+ * Точний розподіл рядка MIXED (0013): пари [вид, кількість > 0] (вид без restockType — ""), лише якщо значення — цілі
+ * ≥ 0 і Σ = quantity; інакше (не MIXED, розподілу немає, пошкоджений) — null: кількість рядка неточна.
+ */
+export function exactRestockSplit(l: Pick<RefundLineSource, "quantity" | "restockType" | "restockQuantities">): Array<[string, number]> | null {
+  if (norm(l.restockType) !== MIXED_RESTOCK_TYPE || !l.restockQuantities || typeof l.restockQuantities !== "object") return null;
+  const out: Array<[string, number]> = [];
+  let sum = 0;
+  for (const [type, qty] of Object.entries(l.restockQuantities)) {
+    if (typeof qty !== "number" || !Number.isInteger(qty) || qty < 0) return null;
+    sum += qty;
+    const t = norm(type);
+    if (qty > 0) out.push([t === RESTOCK_TYPE_UNKNOWN ? "" : t, qty]);
+  }
+  if (out.length === 0 || sum !== l.quantity) return null;
+  return out;
+}
+
+/** Вид рядка рахується як повернення виконаної / поверненої позиції: RETURN — завжди, CANCEL — ніколи, інші — після відвантаження. */
+function typeCounts(t: string, after: boolean): boolean {
+  if (t === "RETURN") return true;
+  if (t === "CANCEL") return false;
+  return after;
+}
+
+/** Представницький вид розкладеного рядка: RETURN > LEGACY_RESTOCK > NO_RESTOCK > інший > null (без виду). */
+const REPRESENTATIVE_ORDER = ["RETURN", "LEGACY_RESTOCK", "NO_RESTOCK"] as const;
+function representativeType(types: readonly string[]): string | null {
+  for (const t of REPRESENTATIVE_ORDER) if (types.includes(t)) return t;
+  return types.find((t) => t !== "") ?? null;
+}
+
+/**
+ * Рядок MIXED з точним розподілом → рядок одного (представницького) виду з ТОЧНОЮ кількістю — лише одиниці, що
+ * рахуються за правилами видів (`after` — відвантажено до повернення коштів; не задано — усі, крім CANCEL, для
+ * походження позицій, де рядок випадку вже існує). null — жодна одиниця не рахується. Без розподілу — рядок як є.
+ */
+export function resolveMixedLine(l: RefundLineSource, after?: boolean): RefundLineSource | null {
+  const split = exactRestockSplit(l);
+  if (!split) return l;
+  const counted = split.filter(([t]) => (after === undefined ? t !== "CANCEL" : typeCounts(t, after)));
+  const quantity = counted.reduce((a, [, q]) => a + q, 0);
+  if (quantity === 0) return null;
+  return { ...l, quantity, restockType: representativeType(counted.map(([t]) => t)), restockQuantities: null };
 }
 
 /** Чи замовлення було відвантажене на момент `at` (час передачі невідомий, але замовлення відвантажене → так). */
@@ -106,14 +167,18 @@ export function classifyRefund(
   uncertain: boolean;
 } | null {
   const after = shippedBy(shipping, refund.at);
-  const lines = refund.lines.filter((l) => {
-    if (!(l.quantity > 0)) return false;
-    const t = norm(l.restockType);
-    if (t === "RETURN") return true;
-    if (t === "CANCEL") return false;
-    // NO_RESTOCK, LEGACY_RESTOCK, MIXED, невідомий — лише виконані позиції (після відвантаження).
-    return after;
-  });
+  const lines: RefundLineSource[] = [];
+  for (const l of refund.lines) {
+    if (!(l.quantity > 0)) continue;
+    // MIXED з точним розподілом (0013) — лише одиниці, що рахуються, з точною кількістю (без позначки «неточно»).
+    if (exactRestockSplit(l)) {
+      const resolved = resolveMixedLine(l, after);
+      if (resolved) lines.push(resolved);
+      continue;
+    }
+    // NO_RESTOCK, LEGACY_RESTOCK, MIXED без розподілу, невідомий — лише виконані позиції (після відвантаження).
+    if (typeCounts(norm(l.restockType), after)) lines.push(l);
+  }
   if (lines.length === 0) return null;
   const returned = lines.some((l) => isReturnRestock(l.restockType));
   return {

@@ -8,10 +8,10 @@ import { financeLabelKeys } from "~/modules/finance/core/labels";
 import { Tabs } from "~/ui";
 import { useHref } from "../shell";
 import type { FinanceTabsProps } from "./contracts";
-import { useFinanceUiT } from "./i18n";
+import { useT } from "~/i18n";
 
 export function FinanceTabs({ current }: FinanceTabsProps) {
-  const ft = useFinanceUiT();
+  const ft = useT();
   const href = useHref();
   return (
     <Tabs

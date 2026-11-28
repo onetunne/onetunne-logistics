@@ -6,28 +6,20 @@
  * Пропси — `KpiTileProps` з contracts.ts; додаткові необов'язкові пропси WP0-UI (`KpiTileExtraProps`) не змінюють
  * контракт: текст «Як порахувано» і напрям «менше — добре» для витрат.
  */
-import type { ReactNode } from "react";
 import { Link } from "react-router";
-import { useLocale } from "~/i18n";
+import { useLocale, useT } from "~/i18n";
 import { formatDecimal } from "~/lib/format";
 import { financeLabelKeys } from "~/modules/finance/core/labels";
 import { Card, Disclosure, Text, VisuallyHidden, cx } from "~/ui";
 import type { KpiTileProps } from "./contracts";
 import { CoverageNote } from "./coverage-note";
 import { DASH, signOf, signedMoneyText, signedPercentText } from "./format-ui";
-import { useFinanceUiT } from "./i18n";
 import { MarkerBadge } from "./marker-badge";
 import { MoneyValue } from "./money-value";
 import { Sparkline } from "./sparkline";
 
-export interface KpiTileExtraProps {
-  /** Розгортання «Як порахувано» (формула з §2, текст сторінки). */
-  explanation?: ReactNode;
-  /** Для витрат: «менше — добре» біля зміни. Типово — без оцінки напряму. */
-  deltaPreference?: "higher" | "lower";
-  /** Підпис бази зміни (типово «до періоду порівняння»), напр. «до попередніх 30 днів». */
-  deltaLabel?: string;
-}
+/** Додаткові необов'язкові пропси WP0-UI — тепер частина контракту (KpiTileProps); псевдонім для сумісності. */
+export type KpiTileExtraProps = Pick<KpiTileProps, "explanation" | "deltaPreference" | "deltaLabel">;
 
 export type DeltaDirection = "up" | "down" | "flat" | "unknown";
 
@@ -56,7 +48,7 @@ export function KpiTile({
   deltaPreference,
   deltaLabel,
 }: KpiTileProps & KpiTileExtraProps) {
-  const ft = useFinanceUiT();
+  const ft = useT();
   const locale = useLocale();
   const withForecast = forecast !== undefined;
   const missingItems = (missing ?? []).filter((m) => m.count > 0);

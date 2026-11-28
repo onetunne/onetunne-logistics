@@ -1,5 +1,5 @@
 import { isOrderStatus } from "~/domain/order-status";
-import { countryName } from "~/lib/format";
+import { countryName, formatMonthYear } from "~/lib/format";
 import { hasKey, type TFunction, type TranslateParams } from "./index";
 import type { Locale } from "./types";
 
@@ -28,10 +28,14 @@ function fieldText(field: string, t: TFunction): string {
   return field;
 }
 
+/** Параметр `month` сервісів фінансів (напр. finance.error.monthClosed { month: "2026-10-01" }) — календарний місяць. */
+const ISO_MONTH_PARAM = /^\d{4}-\d{2}(?:-01)?$/;
+
 /**
  * Локалізує параметри повідомлень сервісів: статус замовлення, службові коди перевізника, коди країн
- * (`country`, `phoneCountry`), перелік полів (`fields`: поля замовлення та відправника).
- * Так у інтерфейсі не з'являються сирі ідентифікатори («UA», «shipping.city»).
+ * (`country`, `phoneCountry`), перелік полів (`fields`: поля замовлення та відправника), календарний місяць (`month`
+ * "YYYY-MM-01" → «жовтень 2026» / «October 2026», етап 6: finance.error.monthClosed — централізовано, сторінки не
+ * форматують самі). Так у інтерфейсі не з'являються сирі ідентифікатори («UA», «shipping.city», «2026-10-01»).
  */
 export function localizeParams(
   params: TranslateParams | undefined | null,
@@ -46,6 +50,7 @@ export function localizeParams(
     const value = out[key];
     if (typeof value === "string") out[key] = localizeCountry(value, locale);
   }
+  if (typeof out.month === "string" && ISO_MONTH_PARAM.test(out.month.trim())) out.month = formatMonthYear(out.month, locale);
   if (typeof out.fields === "string") {
     out.fields = out.fields
       .split(",")

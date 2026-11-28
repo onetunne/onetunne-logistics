@@ -1,7 +1,8 @@
 /**
  * Етап 6, WP0-UI: тексти, стилі й безпека спільних фінансових компонентів.
- * - модуль текстів `financeUi` (app/components/finance/i18n.ts): однакові ключі uk/en, без порожніх, без збігу з
- *   ключами загальних словників, кожен ключ використано, кожен літеральний ключ перекладача існує, en — без кирилиці;
+ * - модуль текстів `financeUi` (app/i18n/messages/finance-ui.ts, зареєстрований у MESSAGE_MODULES): однакові ключі
+ *   uk/en, без порожніх, жоден інший модуль не перевизначає ці ключі, кожен ключ використано, кожен літеральний ключ
+ *   перекладача існує, en — без кирилиці;
  * - styles.css, розділ «finance»: токени `--ot-chart-ink/muted/grid/hatch` для світлої, темної й системної темної тем,
  *   висота графіка на телефоні, prefers-reduced-motion;
  * - компоненти — клієнтські: без серверних модулів, без внутрішніх функцій проведення (F8), без normalizeAmount (F4),
@@ -10,9 +11,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { financeUiMessages, translateFinanceUi } from "~/components/finance/i18n";
+import financeUiMessages from "~/i18n/messages/finance-ui";
 import { INTERNAL_ONLY_MODULES, INTERNAL_POSTING_FUNCTIONS } from "~/modules/finance/core/contracts";
-import { DICTIONARIES } from "~/i18n";
+import { DICTIONARIES, MESSAGE_MODULES, translate as translateFinanceUi } from "~/i18n";
 import { CYRILLIC } from "./render";
 
 const DIR = path.resolve("app/components/finance");
@@ -20,7 +21,7 @@ const files = fs
   .readdirSync(DIR)
   .filter((f) => /\.(tsx?|ts)$/.test(f))
   .map((f) => ({ name: f, src: fs.readFileSync(path.join(DIR, f), "utf8") }));
-const code = files.filter((f) => f.name !== "i18n.ts");
+const code = files;
 
 describe("financeUi messages", () => {
   const uk = financeUiMessages.uk;
@@ -38,8 +39,14 @@ describe("financeUi messages", () => {
     }
   });
 
-  it("no key collides with the shared dictionaries", () => {
-    expect(Object.keys(uk).filter((k) => k in DICTIONARIES.uk)).toEqual([]);
+  it("registered as MESSAGE_MODULES.financeUi; no other module defines (overrides) these keys", () => {
+    expect(MESSAGE_MODULES.financeUi).toBe(financeUiMessages);
+    const others = Object.entries(MESSAGE_MODULES).filter(([name]) => name !== "financeUi");
+    expect(Object.keys(uk).filter((k) => others.some(([, m]) => k in m.uk || k in m.en))).toEqual([]);
+    for (const k of Object.keys(uk)) {
+      expect(DICTIONARIES.uk[k], k).toBe(uk[k]);
+      expect(DICTIONARIES.en[k], k).toBe(en[k]);
+    }
   });
 
   it("every key is used by a component (literally or through a dynamic family)", () => {
@@ -60,7 +67,7 @@ describe("financeUi messages", () => {
     expect(missing).toEqual([]);
   });
 
-  it("translator: own keys first, then shared dictionaries; plurals and parameters", () => {
+  it("translator (shared translate): module keys and shared dictionaries; plurals and parameters", () => {
     expect(translateFinanceUi("uk", "financeUi.coverage.orders", { n: "1", m: "1" })).toBe("за 1 з 1 замовлення");
     expect(translateFinanceUi("en", "financeUi.coverage.orders", { n: "2", m: "3" })).toBe("for 2 of 3 orders");
     expect(translateFinanceUi("en", "finance.state.missing")).toBe("No data");

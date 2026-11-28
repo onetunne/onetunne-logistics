@@ -3,7 +3,8 @@
  *
  * Позиції випадків із джерел мають детерміновані id (keys.ts `returnLineId`), тож за самими id видно, з якого джерела
  * позиція: рядок повернення коштів Shopify (з його `restockType`) чи надходження на склад. Звідси:
- * - `lineOrigins` — походження кожної позиції замовлення з джерела;
+ * - `lineOrigins` — походження кожної позиції замовлення з джерела (MIXED з точним розподілом — точно, лише якщо кількість
+ *   позиції випадку збігається з розподілом: `refundLineRestockType` / `isUncertainCaseLine`);
  * - `sourceOwners` — якому випадку належить кожне повернення коштів / надходження (за ключем випадку або за його
  *   позиціями; джерело, що випадку не утворило — напр. повернення коштів без позицій, — не належить нікому);
  * - `caseInsight` — одиниці випадку (рядки MIXED — неточні, rules.ts caseUnits), «Очікує надходження на склад» (§6.7:
@@ -15,8 +16,10 @@
 import { returnSourceKeys } from "./keys";
 import {
   caseUnits,
+  exactRestockSplit,
   isReturnRestock,
   isUncertainRestock,
+  resolveMixedLine,
   receiptLineIds,
   refundLineIds,
   type CaseLineLike,
@@ -26,17 +29,58 @@ import {
   type ReturnStatus,
 } from "./rules";
 
-export type LineOrigin = { kind: "refund"; refundId: string; restockType: string | null } | { kind: "receipt"; movementId: string };
+export type LineOrigin =
+  | {
+      kind: "refund";
+      refundId: string;
+      /** Вид рядка повернення коштів, як записано (MIXED — кількість позиції неточна, якщо `exact` її не підтверджує). */
+      restockType: string | null;
+      /**
+       * Лише MIXED з точним розподілом (0013): кількості, які дає розподіл (після / до відвантаження — resolveMixedLine), з
+       * представницьким видом. Позиція випадку ТОЧНА, лише якщо її кількість — одна з них; інакше її створено до 0013 з
+       * верхньої межі (разом з CANCEL) — і вона лишається «неточно» (позиції з джерел не переписуються мовчки).
+       */
+      exact?: ReadonlyArray<{ quantity: number; restockType: string | null }>;
+    }
+  | { kind: "receipt"; movementId: string };
 
 /** Походження позицій з джерел замовлення (id позиції → джерело). */
 export function lineOrigins(refunds: ReadonlyArray<Pick<RefundSource, "refundId" | "lines">>, receiptMovementIds: readonly string[]): Map<string, LineOrigin> {
   const out = new Map<string, LineOrigin>();
   for (const r of refunds) {
     const ids = refundLineIds(r);
-    r.lines.forEach((l, i) => out.set(ids[i]!, { kind: "refund", refundId: r.refundId, restockType: l.restockType }));
+    r.lines.forEach((l, i) => {
+      const origin: LineOrigin = { kind: "refund", refundId: r.refundId, restockType: l.restockType };
+      if (exactRestockSplit(l)) {
+        const exact: Array<{ quantity: number; restockType: string | null }> = [];
+        for (const after of [true, false]) {
+          const resolved = resolveMixedLine(l, after);
+          if (resolved && !exact.some((e) => e.quantity === resolved.quantity)) exact.push({ quantity: resolved.quantity, restockType: resolved.restockType });
+        }
+        origin.exact = exact;
+      }
+      out.set(ids[i]!, origin);
+    });
   }
   for (const movementId of receiptMovementIds) for (const id of receiptLineIds({ movementId })) out.set(id, { kind: "receipt", movementId });
   return out;
+}
+
+/**
+ * Вид одиниць позиції випадку з джерела-повернення коштів (undefined — позиція не з повернення коштів). MIXED з точним
+ * розподілом — представницький вид, якщо кількість позиції збігається з розподілом; інакше MIXED (неточно).
+ */
+export function refundLineRestockType(o: LineOrigin | undefined, quantity: number): string | null | undefined {
+  if (o?.kind !== "refund") return undefined;
+  if (!o.exact) return o.restockType;
+  const match = o.exact.find((e) => e.quantity === quantity);
+  return match ? match.restockType : o.restockType;
+}
+
+/** Кількість позиції випадку неточна (рядок повернення коштів MIXED, не підтверджений точним розподілом). */
+export function isUncertainCaseLine(o: LineOrigin | undefined, quantity: number): boolean {
+  const t = refundLineRestockType(o, quantity);
+  return t !== undefined && isUncertainRestock(t);
 }
 
 export interface SourceOwners {
@@ -93,11 +137,13 @@ export function caseInsight(
   const marked = lines.map((l) => {
     const o = origins.get(l.id);
     if (o?.kind === "receipt") receipt = true;
-    if (o?.kind === "refund" && isReturnRestock(o.restockType)) {
-      if (isUncertainRestock(o.restockType)) possibleReturnRefund = true;
+    const t = refundLineRestockType(o, l.quantity);
+    const uncertain = t !== undefined && isUncertainRestock(t);
+    if (t !== undefined && isReturnRestock(t)) {
+      if (uncertain) possibleReturnRefund = true;
       else returnRefund = true;
     }
-    return o?.kind === "refund" && isUncertainRestock(o.restockType) ? { ...l, uncertain: true } : { ...l, uncertain: false };
+    return { ...l, uncertain };
   });
   const units = caseUnits(marked);
   const awaiting = c.status !== "closed" && PHYSICAL_RETURN_KINDS.includes(c.kind) && !receipt && (returnRefund || possibleReturnRefund);

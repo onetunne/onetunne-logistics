@@ -4,16 +4,15 @@
  * підтримується. Підходять: .xlsx, .csv.». Сервер не довіряє цій перевірці (ліміт тіла, «магічні» байти — WP5).
  */
 import type { ReactNode } from "react";
-import { useLocale, type Locale } from "~/i18n";
+import { type Locale, makeT, type TFunction, useLocale } from "~/i18n";
 import { formatDecimal } from "~/lib/format";
 import { FileInput, acceptedExtensions, type FileInputFile } from "~/ui";
-import { makeFinanceUiT, type FinanceUiT } from "./i18n";
 
 const KB = 1024;
 const MB = 1024 * 1024;
 
 /** Розмір файлу: «512 Б», «12,5 КБ», «14 МБ» (1 знак, без «,0»). */
-export function formatFileSize(bytes: number, locale: Locale, ft: FinanceUiT = makeFinanceUiT(locale)): string {
+export function formatFileSize(bytes: number, locale: Locale, ft: TFunction = makeT(locale)): string {
   const b = Math.max(0, Math.floor(bytes));
   if (b < KB) return ft("financeUi.file.size.b", { n: formatDecimal(b, locale, { maximumFractionDigits: 0 }) });
   const unit = b < MB ? "kb" : "mb";
@@ -40,7 +39,7 @@ export interface FinanceFileInputProps {
 
 export function FinanceFileInput({ accept = ".xlsx,.csv", maxBytes, ...rest }: FinanceFileInputProps) {
   const locale = useLocale();
-  const ft = makeFinanceUiT(locale);
+  const ft = makeT(locale);
   const size = (n: number) => formatFileSize(n, locale, ft);
   const types = acceptedExtensions(accept).join(", ");
   return (

@@ -30,7 +30,6 @@ import {
   financeEntries,
   financeExpenseAllocations,
   financeExpenses,
-  fxRates,
   inventoryValuations,
   orderExternalWaybills,
   orderFinance,
@@ -58,6 +57,7 @@ import {
   isCoveringCategory,
   type CoveringCategory,
 } from "./rules";
+import { resolveRateMode } from "~/modules/finance/core/rate-mode.server";
 
 const reversals = alias(financeEntries, "fe_alloc_rev");
 
@@ -342,8 +342,9 @@ export async function coveringStatusForOrder(db: DbOrTx, orderId: string, opts: 
   const pending = sums.filter((r) => !seen.has(r.id) && isAllocatableRow(r));
   if (pending.length === 0) return out;
   const includeTestOrders = opts.includeTestOrders ?? (await loadFinanceSettings(db)).includeTestOrders;
-  // syncOrderFinance (WP4) не знає режиму: демо-база має демо-курси, робоча — ні (як costingRateMode WP2).
-  const mode: AppMode = opts.mode ?? ((await db.select({ one: sql<number>`1` }).from(fxRates).where(eq(fxRates.source, "demo")).limit(1)).length > 0 ? "demo" : "production");
+  // syncOrderFinance (WP4) не знає режиму: ядро (resolveRateMode) — робочий сервер завжди production; демо й тести —
+  // demo за наявністю демо-курсів (як costingRateMode WP2).
+  const mode: AppMode = opts.mode ?? (await resolveRateMode(db));
   for (const r of pending) {
     const category = r.category as CoveringCategory;
     let wouldShare: boolean;

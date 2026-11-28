@@ -184,13 +184,15 @@ describe("with NBU rates (production context)", () => {
     expect(html).toContain("Поточний ручний курс: 49,6, версія 1.");
     expect(html).toContain("Анулювати ручний курс");
     await closeMonth(env.handle.db, "2026-10-01");
-    expect(await act({ intent: "saveRate", currency: "EUR", effectiveDate: "2026-10-15", rate: "48", units: "1", reason: "x" })).toMatchObject({
-      ok: false,
-      error: "finance.error.monthClosed",
-      params: { month: "10.2026" },
-    });
+    // Місяць — сирий календарний місяць; назву місяця мовою інтерфейсу дає централізовано localizeParams (ActionBanner).
+    const closed = (await act({ intent: "saveRate", currency: "EUR", effectiveDate: "2026-10-15", rate: "48", units: "1", reason: "x" })) as { params?: Record<string, string | number> };
+    expect(closed).toMatchObject({ ok: false, error: "finance.error.monthClosed", params: { month: "2026-10-01" } });
+    const { localizeParams } = await import("~/i18n/localize");
+    const { makeT } = await import("~/i18n");
+    expect(makeT("uk")("finance.error.monthClosed", localizeParams(closed.params, makeT("uk"), "uk"))).toContain("Місяць жовтень 2026 закрито");
     setContext(OWNER, { mode: "production", locale: "en" });
-    expect(await act({ intent: "saveRate", currency: "EUR", effectiveDate: "2026-10-15", rate: "48", units: "1", reason: "x" })).toMatchObject({ params: { month: "10/2026" } });
+    const closedEn = (await act({ intent: "saveRate", currency: "EUR", effectiveDate: "2026-10-15", rate: "48", units: "1", reason: "x" })) as { params?: Record<string, string | number> };
+    expect(makeT("en")("finance.error.monthClosed", localizeParams(closedEn.params, makeT("en"), "en"))).toContain("Month October 2026 is closed");
   });
 
   it("owner records a currency exchange (G4 numbers) and sees it in the list; no rate → readable date", async () => {

@@ -234,7 +234,7 @@ export function chartGeometry(buckets: readonly ChartBucket[]): ChartGeometry {
 
   const n = buckets.length;
   const slot = n > 0 ? CHART_W / n : CHART_W;
-  const labelWidth = Math.max(0, ...buckets.map((b) => estimateLabelWidth(b.label)));
+  const labelWidth = Math.max(0, ...buckets.map((b) => estimateLabelWidth(b.axisLabel ?? b.label)));
   const labelled = Object.fromEntries(
     AXIS_LABEL_TIERS.map((t) => [t.id, new Set(axisLabelIndexes(n, labelWidth, t.width, t.limit))]),
   ) as Record<AxisTierId, Set<number>>;

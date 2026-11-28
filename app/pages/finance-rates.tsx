@@ -116,10 +116,7 @@ function localizedError(e: unknown, locale: Locale): ActionResult {
   if (!r.params) return r;
   const params: Record<string, string | number> = { ...r.params };
   if (typeof params.date === "string" && parseIsoDate(params.date)) params.date = formatIsoDate(params.date, locale);
-  if (typeof params.month === "string" && parseIsoDate(params.month)) {
-    const [y, m] = params.month.split("-");
-    params.month = locale === "uk" ? `${m}.${y}` : `${m}/${y}`;
-  }
+  // Місяць (finance.error.monthClosed) форматує централізовано localizeParams (ActionBanner).
   return { ...r, params };
 }
 

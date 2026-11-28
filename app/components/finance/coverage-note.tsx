@@ -2,10 +2,9 @@
  * Етап 6, WP0-UI: рядок покриття «за N з M замовлень» / «на основі N з M накладних» (§2.6) з малим лічильником повноти
  * (смуга N/M, декоративна — число вже в тексті). Чисельник і знаменник — завжди той самий набір (правило повноти).
  */
-import { useLocale } from "~/i18n";
+import { useLocale, useT } from "~/i18n";
 import type { CoverageNoteProps } from "./contracts";
 import { countText } from "./format-ui";
-import { useFinanceUiT } from "./i18n";
 
 /** Заповнення смуги у відсотках (ціле 0–100); m ≤ 0 → 0. */
 export function coveragePercent(n: number, m: number): number {
@@ -14,7 +13,7 @@ export function coveragePercent(n: number, m: number): number {
 }
 
 export function CoverageNote({ n, m, kind = "orders" }: CoverageNoteProps) {
-  const ft = useFinanceUiT();
+  const ft = useT();
   const locale = useLocale();
   const pct = coveragePercent(n, m);
   return (

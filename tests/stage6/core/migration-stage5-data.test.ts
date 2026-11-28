@@ -1,6 +1,7 @@
 /**
  * Етап 6 (WP0): міграція 0012 на базі з даними етапу 5 (docs/stage6-design.md §6.4, §17, §20.3). Спершу 0000–0011,
- * потім рядки «як у етапу 5» (сирий SQL — схема ще без колонок етапу 6), потім 0012:
+ * потім рядки «як у етапу 5» (сирий SQL — схема ще без колонок етапу 6), потім 0012, рядки етапу 6 у формі 0012
+ * (повернення коштів з рядком MIXED), потім 0013 (order_refund_lines.restock_quantities jsonb NULL + CHECK «лише об'єкт»):
  * - inventory_movements.seq нумерує наявні рядки за (created_at, входи перед виходами, ключ), NOT NULL, identity;
  *   наступна вставка отримує max + 1; явне значення seq заборонено (GENERATED ALWAYS);
  * - магазин 'default' і рядок finance_state створено; orders.shopify_test = false; requires_shipping = null;
@@ -24,14 +25,14 @@ afterAll(() => {
   for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true });
 });
 
-/** Копія міграцій до 0011 включно (журнал без 0012). */
-function stage5Folder(): string {
+/** Копія міграцій ДО міграції з префіксом `before` (журнал без неї й наступних): «0012_» — етап 5, «0013_» — 0012. */
+function folderBefore(before: string, expectedIdx: number): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ot-mig5-"));
   tmpDirs.push(dir);
   fs.mkdirSync(path.join(dir, "meta"));
   const journal = JSON.parse(fs.readFileSync(path.join(MIGRATIONS_FOLDER, "meta", "_journal.json"), "utf8")) as { entries: Array<{ tag: string }> };
-  const idx = journal.entries.findIndex((e) => e.tag.startsWith("0012_"));
-  expect(idx).toBe(12);
+  const idx = journal.entries.findIndex((e) => e.tag.startsWith(before));
+  expect(idx).toBe(expectedIdx);
   const kept = { ...journal, entries: journal.entries.slice(0, idx) };
   fs.writeFileSync(path.join(dir, "meta", "_journal.json"), JSON.stringify(kept));
   for (const e of kept.entries) fs.copyFileSync(path.join(MIGRATIONS_FOLDER, `${e.tag}.sql`), path.join(dir, `${e.tag}.sql`));
@@ -84,6 +85,7 @@ const ID = {
   item: "00000000-0000-4000-8000-000000000004",
   order: "00000000-0000-4000-8000-000000000005",
   line: "00000000-0000-4000-8000-000000000006",
+  refund: "00000000-0000-4000-8000-000000000007",
 };
 
 /** Рядки етапу 5: три «транзакції» (однаковий created_at усередині), рухи різних видів і ключів. */
@@ -114,12 +116,38 @@ async function seedStage5(x: Exec): Promise<void> {
     ].join(",\n")}`);
 }
 
+/** Рядки етапу 6 у формі 0012 (до restock_quantities): повернення коштів з об'єднаним рядком MIXED і звичайним. */
+async function seedStage6At0012(x: Exec): Promise<void> {
+  await x.run(
+    `insert into order_refunds (id, order_id, shopify_refund_id, total, currency) values ('${ID.refund}', '${ID.order}', 'gid://shopify/Refund/1', '25.00', 'EUR')`,
+  );
+  await x.run(`insert into order_refund_lines (refund_id, shopify_line_item_id, order_line_item_id, quantity, restock_type, restocked) values
+    ('${ID.refund}', 'gid://shopify/LineItem/1', '${ID.line}', 3, 'MIXED', null),
+    ('${ID.refund}', 'gid://shopify/LineItem/2', null, 1, 'RETURN', true)`);
+}
+
 async function scenario(x: Exec): Promise<void> {
-  await x.migrate(stage5Folder());
+  await x.migrate(folderBefore("0012_", 12));
   const before = await x.run(`select count(*)::int as c from information_schema.columns where table_name = 'inventory_movements' and column_name = 'seq'`);
   expect(before[0]!.c).toBe(0);
   await seedStage5(x);
+  // 0012 на даних етапу 5, потім рядки етапу 6 у формі 0012, потім 0013 (і всі наступні).
+  await x.migrate(folderBefore("0013_", 13));
+  const noColumn = await x.run(`select count(*)::int as c from information_schema.columns where table_name = 'order_refund_lines' and column_name = 'restock_quantities'`);
+  expect(noColumn[0]!.c).toBe(0);
+  await seedStage6At0012(x);
   await x.migrate(MIGRATIONS_FOLDER);
+
+  // 0013: restock_quantities jsonb NULL; наявні рядки — null (розподілу немає → WP9 лишає «неточно»); лише об'єкт.
+  const rq = await x.run(`select is_nullable, data_type from information_schema.columns where table_name = 'order_refund_lines' and column_name = 'restock_quantities'`);
+  expect(rq[0]).toMatchObject({ is_nullable: "YES", data_type: "jsonb" });
+  expect(await x.run(`select shopify_line_item_id as l, restock_type as t, restock_quantities as q from order_refund_lines order by shopify_line_item_id`)).toEqual([
+    { l: "gid://shopify/LineItem/1", t: "MIXED", q: null },
+    { l: "gid://shopify/LineItem/2", t: "RETURN", q: null },
+  ]);
+  await x.run(`update order_refund_lines set restock_quantities = '{"CANCEL":1,"RETURN":2}'::jsonb where shopify_line_item_id = 'gid://shopify/LineItem/1'`);
+  expect((await x.run(`select (restock_quantities->>'RETURN')::int as r from order_refund_lines where shopify_line_item_id = 'gid://shopify/LineItem/1'`))[0]!.r).toBe(2);
+  await expect(x.run(`update order_refund_lines set restock_quantities = '[1,2]'::jsonb where shopify_line_item_id = 'gid://shopify/LineItem/2'`)).rejects.toThrow();
 
   const order = await x.run(`select idempotency_key as k, seq::int as seq from inventory_movements order by seq`);
   expect(order.map((r) => [r.k, r.seq])).toEqual([
@@ -171,9 +199,10 @@ async function scenario(x: Exec): Promise<void> {
   await x.migrate(MIGRATIONS_FOLDER);
   expect((await x.run(`select count(*)::int as c from inventory_movements`))[0]!.c).toBe(7);
   expect((await x.run(`select count(*)::int as c from stores`))[0]!.c).toBe(1);
+  expect((await x.run(`select count(*)::int as c from order_refund_lines where restock_quantities is not null`))[0]!.c).toBe(1);
 }
 
-describe("migration 0012 on a database with stage-5 data", () => {
+describe("migrations 0012 + 0013 on a database with stage-5 data (and 0013 on stage-6 rows of 0012)", () => {
   it("PGlite", async () => {
     const x = await pgliteExec();
     try {
@@ -192,13 +221,25 @@ describe("migration 0012 on a database with stage-5 data", () => {
     }
   });
 
-  it("the migration file and the journal entry are consistent", () => {
+  it("the migration files and the journal entries are consistent (0012, 0013)", () => {
     const journal = JSON.parse(fs.readFileSync(path.join(MIGRATIONS_FOLDER, "meta", "_journal.json"), "utf8")) as { entries: Array<{ idx: number; tag: string; when: number }> };
-    const last = journal.entries.at(-1)!;
-    expect(last).toMatchObject({ idx: 12, tag: "0012_stage6_finance" });
-    expect(last.when).toBeGreaterThan(journal.entries.at(-2)!.when);
-    expect(fs.existsSync(path.join(MIGRATIONS_FOLDER, "0012_stage6_finance.sql"))).toBe(true);
-    expect(fs.existsSync(path.join(MIGRATIONS_FOLDER, "meta", "0012_snapshot.json"))).toBe(true);
+    const e12 = journal.entries[12]!;
+    const e13 = journal.entries[13]!;
+    expect(e12).toMatchObject({ idx: 12, tag: "0012_stage6_finance" });
+    expect(e13).toMatchObject({ idx: 13, tag: "0013_stage6_refund_restock_quantities" });
+    expect(journal.entries.at(-1)).toBe(e13);
+    expect(e12.when).toBeGreaterThan(journal.entries[11]!.when);
+    expect(e13.when).toBeGreaterThan(e12.when);
+    for (const tag of [e12.tag, e13.tag]) {
+      expect(fs.existsSync(path.join(MIGRATIONS_FOLDER, `${tag}.sql`)), tag).toBe(true);
+      expect(fs.existsSync(path.join(MIGRATIONS_FOLDER, "meta", `${tag.slice(0, 4)}_snapshot.json`)), tag).toBe(true);
+    }
+    // 0013 — лише нова колонка й її CHECK (без змін інших таблиць).
+    const t13 = fs.readFileSync(path.join(MIGRATIONS_FOLDER, `${e13.tag}.sql`), "utf8");
+    expect(t13.split("--> statement-breakpoint").map((x) => x.trim()).filter(Boolean)).toEqual([
+      'ALTER TABLE "order_refund_lines" ADD COLUMN "restock_quantities" jsonb;',
+      `ALTER TABLE "order_refund_lines" ADD CONSTRAINT "order_refund_lines_restock_quantities_chk" CHECK ("order_refund_lines"."restock_quantities" is null or jsonb_typeof("order_refund_lines"."restock_quantities") = 'object');`,
+    ]);
     const text = fs.readFileSync(path.join(MIGRATIONS_FOLDER, "0012_stage6_finance.sql"), "utf8");
     // Ручні оператори §6.4 замість згенерованого ADD COLUMN … IDENTITY.
     expect(text).not.toMatch(/ADD COLUMN "seq" bigint NOT NULL GENERATED/);

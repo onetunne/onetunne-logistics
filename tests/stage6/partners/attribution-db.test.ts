@@ -359,13 +359,15 @@ describe("automatic attribution rules", () => {
     expect((await eventsOf(env.handle.db, o))[4]).toMatchObject({ kind: "adjustment", amount: "-2.70", recognizedOn: "2026-11-26" });
   });
 
-  it("review: a lost dispute without an amount → no event, component «awaiting data», review dispute_open; amount entered → adjustment dated the decision", async () => {
+  it("review: a lost dispute without an amount → no event, component missing (dispute_amount_unknown, not «dispute open»); amount entered → adjustment dated the decision", async () => {
     await makePartner(env, { codes: [{ source: "discount_code", code: "DISPNULL" }] });
     const o = await g1Order(env, "DISPNULL");
     await recognize(env, o, "2026-10-05");
     await sync(env, o, recognized("2026-10-05"));
     const d = await addDispute(env.handle.db, o, { outcome: "lost", amount: null, decidedOn: "2026-11-12" });
-    expect(await sync(env, o)).toMatchObject({ events: 0, component: { state: "missing", reason: "awaiting_shopify", required: true }, review: ["dispute_open"] });
+    const pending = await sync(env, o);
+    expect(pending).toMatchObject({ events: 0, component: { state: "missing", reason: "dispute_amount_unknown", required: true } });
+    expect(pending.review).toEqual([]);
     expect(await eventsOf(env.handle.db, o)).toHaveLength(1);
     await env.handle.db.update(orderDisputes).set({ amount: "129.00", recoveredAmount: "0.00" }).where(eq(orderDisputes.id, d));
     expect(await sync(env, o)).toMatchObject({ events: 1, component: { state: "actual" }, review: [] });

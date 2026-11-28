@@ -1,16 +1,15 @@
 /**
- * Етап 6, WP0-UI: тексти спільних фінансових компонентів (docs/stage6-design.md §18.9, §18.10) — uk (типово) і en з
- * однаковими наборами ключів (тест tests/stage6/ui/i18n-css-safety.test.ts). Пакет WP0-UI не має власного модуля в
- * `app/i18n/messages/` (файли `app/i18n/**` — спільні, їх змінює лише ядро), тому модуль лежить тут і підключається
- * перекладачем `useFinanceUiT()`: спершу ключі цього модуля, далі — загальні словники (`translate` з `~/i18n`), тож
- * у компонентах однаково працюють `financeUi.*` і спільні ключі `finance.*` / `common.*`. Коли ядро зареєструє модуль
- * у `MESSAGE_MODULES` (запит ядру в звіті WP0-UI), поведінка не зміниться.
+ * Етап 6, WP0-UI: тексти спільних фінансових компонентів app/components/finance/*.tsx (docs/stage6-design.md §18.9,
+ * §18.10) — uk (типово) і en з однаковими наборами ключів. Ключі з префіксом «financeUi.». Модуль належить WP0-UI;
+ * ядро перенесло його сюди з app/components/finance/i18n.ts (інтеграційний раунд) і зареєструвало в MESSAGE_MODULES
+ * (app/i18n/index.ts) та в перевірці «без зайвих ключів» (tests/i18n/completeness.test.ts). Компоненти перекладають
+ * звичайним `useT()` / `makeT()` з `~/i18n` (ці ключі й спільні `finance.*` / `common.*`).
  *
  * Множина — ICU `{n, plural, …}` (applyPlurals з `~/i18n`), числа в параметрах — уже відформатовані `app/lib/format.ts`.
  */
-import { applyPlurals, translate, useLocale, type Locale, type MessageModule, type TranslateParams } from "~/i18n";
+import type { MessageModule } from "../types";
 
-export const financeUiMessages: MessageModule = {
+const messages: MessageModule = {
   uk: {
     "financeUi.money.originalLabel": "У валюті запису:",
     "financeUi.rate.onDate": "{source} на {date}",
@@ -139,26 +138,4 @@ export const financeUiMessages: MessageModule = {
   },
 };
 
-export type FinanceUiT = (key: string, params?: TranslateParams) => string;
-
-/** Переклад: ключ цього модуля → загальні словники → сам ключ (як `translate`). */
-export function translateFinanceUi(locale: Locale, key: string, params?: TranslateParams): string {
-  const own = financeUiMessages[locale][key] ?? financeUiMessages.uk[key];
-  if (own === undefined) return translate(locale, key, params);
-  const plural = applyPlurals(own, financeUiMessages[locale][key] === undefined ? "uk" : locale, params);
-  if (!params) return plural;
-  return plural.replace(/\{(\w+)\}/g, (match, name: string) => {
-    const v = params[name];
-    return v === undefined || v === null ? match : String(v);
-  });
-}
-
-export function makeFinanceUiT(locale: Locale): FinanceUiT {
-  return (key, params) => translateFinanceUi(locale, key, params);
-}
-
-/** Перекладач компонентів фінансів для мови з кореневого loader. */
-export function useFinanceUiT(): FinanceUiT {
-  const locale = useLocale();
-  return makeFinanceUiT(locale);
-}
+export default messages;

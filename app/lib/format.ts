@@ -1,4 +1,5 @@
 import type { Locale } from "~/i18n/types";
+import { currencyMinorDigits } from "./decimal";
 import { formatMoney as formatMoneyExact, groupDigits } from "./money";
 
 /**
@@ -59,6 +60,35 @@ export function formatDate(value: Date | string | null | undefined, locale: Loca
   return `${p.day}${sep}${p.month}${sep}${p.year}`;
 }
 
+/** Назви місяців (називний відмінок; детерміновано для SSR — без Intl-назв, що різняться між рушіями). */
+const MONTH_NAMES: Readonly<Record<Locale, readonly string[]>> = {
+  uk: ["січень", "лютий", "березень", "квітень", "травень", "червень", "липень", "серпень", "вересень", "жовтень", "листопад", "грудень"],
+  en: ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"],
+};
+
+/**
+ * Місяць → «жовтень 2026» (uk) / «October 2026» (en). Приймає календарний місяць "YYYY-MM" / "YYYY-MM-DD" (як є, без
+ * часового поясу) або мітку часу (Date / ISO-рядок з часом — місяць за Europe/Kyiv). Нерозпізнане — як є.
+ */
+export function formatMonthYear(value: Date | string, locale: Locale): string {
+  let year: string | undefined;
+  let month: number | undefined;
+  const cal = typeof value === "string" ? /^(\d{4})-(\d{2})(?:-(\d{2}))?$/.exec(value.trim()) : null;
+  if (cal) {
+    year = cal[1];
+    month = Number(cal[2]);
+  } else if (value instanceof Date || (typeof value === "string" && /^\d{4}-\d{2}-\d{2}T/.test(value.trim()))) {
+    const p = kyivParts(value);
+    if (p) {
+      year = p.year;
+      month = Number(p.month);
+    }
+  }
+  const name = month !== undefined ? MONTH_NAMES[locale][month - 1] : undefined;
+  if (!year || !name) return typeof value === "string" ? value : "—";
+  return `${name} ${year}`;
+}
+
 /** Календарна дата "YYYY-MM-DD" (без часу й часового поясу) → «11.12.2026» / «11/12/2026». */
 export function formatIsoDate(value: string | null | undefined, locale: Locale): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec((value ?? "").trim());
@@ -67,9 +97,17 @@ export function formatIsoDate(value: string | null | undefined, locale: Locale):
   return `${m[3]}${sep}${m[2]}${sep}${m[1]}`;
 }
 
+/**
+ * Сума з валютою (детерміновано для SSR, app/lib/money.ts). Кількість знаків після коми — за валютою (той самий
+ * довідник ISO 4217, що перевірка налаштувань фінансів: currencyMinorDigits з app/lib/decimal.ts): валюти без
+ * дробових одиниць (JPY, KRW…) — без «,00» («1 250 JPY», «JPY 1,250»); сума з сотими в такій валюті (пошкоджені
+ * дані) показується точно, з сотими — нічого не приховується. Інші валюти — як раніше (2 знаки).
+ */
 export function formatMoney(amount: string | null | undefined, currency: string | null | undefined, locale: Locale): string {
   if (!amount || !currency) return "—";
-  return formatMoneyExact(amount, currency, locale);
+  const text = formatMoneyExact(amount, currency, locale);
+  if (currencyMinorDigits(currency) !== 0) return text;
+  return locale === "uk" ? text.replace(/,00(\u00A0[^\u00A0]+)$/, "$1") : text.replace(/\.00$/, "");
 }
 
 /** Цифри без групування з округленням Intl (визначено стандартом ECMA-402 однаково в усіх рушіях). */

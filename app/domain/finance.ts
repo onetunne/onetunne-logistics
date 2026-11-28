@@ -316,6 +316,10 @@ export const MISSING_REASONS = [
   "no_rate",
   "ambiguous_partner",
   "order_unreadable",
+  /** I16 (§10.3): сума періоду покриває складник, але розподіл ще не перераховано (WP6 coveringStatusForOrder). */
+  "awaiting_reallocation",
+  /** Спір програно / прийнято, але Shopify не дав суми втрати (WP7: комісія партнера невідома). */
+  "dispute_amount_unknown",
 ] as const;
 export type MissingReason = (typeof MISSING_REASONS)[number];
 export const PARTIAL_REASONS = ["reconciliation_mismatch"] as const;
@@ -702,6 +706,14 @@ export const DEFAULT_PARTNER_RATE_BP = 1000;
 // ---------------------------------------------------------------------------
 // Повернення (§11)
 // ---------------------------------------------------------------------------
+
+/**
+ * `order_refund_lines.restock_type` об'єднаного рядка (WP3 writeRefunds): кілька рядків повернення ОДНІЄЇ позиції з
+ * РІЗНИМИ видами повернення на склад в одному поверненні коштів. Розподіл кількості за видом — `restock_quantities`
+ * (міграція 0013); ключ для рядка без виду (Shopify не дав restockType) — RESTOCK_TYPE_UNKNOWN.
+ */
+export const RESTOCK_TYPE_MIXED = "MIXED";
+export const RESTOCK_TYPE_UNKNOWN = "UNKNOWN";
 
 export const RETURN_KINDS = ["customer_return", "carrier_return", "refused", "lost", "refund_only", "other"] as const;
 export const RETURN_STATUSES = ["open", "in_transit", "received", "closed"] as const;

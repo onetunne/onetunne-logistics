@@ -1936,6 +1936,13 @@ export const orderRefundLines = pgTable(
     quantity: integer("quantity").notNull(),
     restockType: text("restock_type"),
     restocked: boolean("restocked"),
+    /**
+     * Етап 6 (міграція 0013): розподіл кількості за типом повернення на склад (restockType → кількість), коли кілька
+     * рядків повернення ОДНІЄЇ позиції в одному поверненні з РІЗНИМИ типами об'єднано в один рядок `MIXED`
+     * (унікальний індекс refund_id + shopify_line_item_id); інакше null. Σ значень = quantity. Пише WP3 (writeRefunds),
+     * читає WP9 (classifyRefund: рахує лише RETURN / після передачі).
+     */
+    restockQuantities: jsonb("restock_quantities").$type<Record<string, number>>(),
     subtotal: money("subtotal"),
     currency: currencyCode("currency"),
   },
@@ -1943,6 +1950,7 @@ export const orderRefundLines = pgTable(
     uniqueIndex("order_refund_lines_uq").on(t.refundId, t.shopifyLineItemId),
     index("order_refund_lines_line_idx").on(t.orderLineItemId),
     currencyChk("order_refund_lines_currency_chk", t.currency),
+    check("order_refund_lines_restock_quantities_chk", sql`${t.restockQuantities} is null or jsonb_typeof(${t.restockQuantities}) = 'object'`),
   ],
 );
 

@@ -7,7 +7,7 @@
 import { Link, useLocation } from "react-router";
 import { cx } from "~/ui";
 import type { CurrencySwitchProps } from "./contracts";
-import { useFinanceUiT } from "./i18n";
+import { useT } from "~/i18n";
 
 /** Посилання на ту саму сторінку з іншою валютою (інші параметри запиту зберігаються). */
 export function currencyHref(pathname: string, search: string, paramName: string, currency: string): string {
@@ -16,13 +16,11 @@ export function currencyHref(pathname: string, search: string, paramName: string
   return `${pathname}?${params.toString()}`;
 }
 
-export interface CurrencySwitchExtraProps {
-  /** Показати підпис «Валюта показу» перед перемикачем. */
-  showLabel?: boolean;
-}
+/** Додатковий пропс WP0-UI — тепер частина контракту (CurrencySwitchProps); псевдонім для сумісності. */
+export type CurrencySwitchExtraProps = Pick<CurrencySwitchProps, "showLabel">;
 
 export function CurrencySwitch({ current, options, paramName = "currency", showLabel = false }: CurrencySwitchProps & CurrencySwitchExtraProps) {
-  const ft = useFinanceUiT();
+  const ft = useT();
   const location = useLocation();
   const list = options.includes(current) ? options : [current, ...options];
   const label = ft("financeUi.currency.label");

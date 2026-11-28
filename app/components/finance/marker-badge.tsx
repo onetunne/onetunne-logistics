@@ -5,7 +5,7 @@
 import type { CompletenessMarker } from "~/domain/finance";
 import { financeLabelKeys } from "~/modules/finance/core/labels";
 import { Badge } from "~/ui";
-import { useFinanceUiT } from "./i18n";
+import { useT } from "~/i18n";
 import { FinanceIcon, MARKER_PRESENTATION } from "./icons";
 
 export interface MarkerBadgeProps {
@@ -14,7 +14,7 @@ export interface MarkerBadgeProps {
 }
 
 export function MarkerBadge({ marker, size = "sm" }: MarkerBadgeProps) {
-  const ft = useFinanceUiT();
+  const ft = useT();
   const p = MARKER_PRESENTATION[marker];
   return (
     <span className="ot-marker" data-marker={marker}>

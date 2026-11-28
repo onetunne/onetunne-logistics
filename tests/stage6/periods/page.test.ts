@@ -114,7 +114,8 @@ describe("owner actions", () => {
 
   it("the current month cannot be closed; with the WP8 stub the close is refused as «in development» and nothing changes", async () => {
     setContext();
-    expect(await act({ intent: "close", month: "2026-11-01" })).toMatchObject({ ok: false, error: "financeExpenses.error.monthNotPast", params: { month: "11.2026" } });
+    // Місяць помилки сервісу — календарний; назву місяця дає централізовано localizeParams (ActionBanner).
+    expect(await act({ intent: "close", month: "2026-11-01" })).toMatchObject({ ok: false, error: "financeExpenses.error.monthNotPast", params: { month: "2026-11-01" } });
     expect(await act({ intent: "close", month: "2026-10-01", expectedVersion: "1" })).toMatchObject({ ok: false, error: "finance.error.notImplemented" });
     const data = await load("?month=2026-10-01");
     expect(data.overview).toMatchObject({ status: "open", version: 1, snapshots: [] });

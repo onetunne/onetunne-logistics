@@ -32,7 +32,7 @@ import {
   orders,
   stores,
 } from "~/db/schema";
-import { RECONCILIATION_CHECKS, type ReconciliationCheck } from "~/domain/finance";
+import { RECONCILIATION_CHECKS, RESTOCK_TYPE_MIXED, RESTOCK_TYPE_UNKNOWN, type ReconciliationCheck } from "~/domain/finance";
 import type { Actor } from "~/domain/permissions";
 import { discrepancyKey, autoResolveDiscrepancy, openDiscrepancy } from "~/modules/finance/core/discrepancies.server";
 import { lockFinanceOrder } from "~/modules/finance/core/locks.server";
@@ -506,18 +506,31 @@ async function writeRefunds(tx: Tx, input: WriteFactsInput, refunds: ParsedRefun
     if (!row) continue;
     headers++;
     // Один рядок на позицію (унікальний (refund_id, shopify_line_item_id)): кілька рядків однієї позиції — сума кількостей;
-    // різні види повернення на склад → "MIXED" (звірка складу не рахує його поверненим на склад Shopify — консервативно).
-    const merged = new Map<string, { quantity: number; restockType: string | null; restocked: boolean | null; subtotal: Money | null; mixedMoney: boolean }>();
+    // різні види повернення на склад → "MIXED" (звірка складу не рахує його поверненим на склад Shopify — консервативно),
+    // а розподіл кількості за видом — у restock_quantities (міграція 0013; WP9 рахує повернені одиниці точно).
+    const merged = new Map<
+      string,
+      { quantity: number; restockType: string | null; restocked: boolean | null; subtotal: Money | null; mixedMoney: boolean; byType: Map<string, number> }
+    >();
+    const typeKey = (t: string | null) => t ?? RESTOCK_TYPE_UNKNOWN;
     for (const l of r.lines) {
       const prev = merged.get(l.lineItemGid);
       const subtotal = l.subtotal?.shop ?? null;
       if (!prev) {
-        merged.set(l.lineItemGid, { quantity: l.quantity, restockType: l.restockType, restocked: l.restocked, subtotal, mixedMoney: false });
+        merged.set(l.lineItemGid, {
+          quantity: l.quantity,
+          restockType: l.restockType,
+          restocked: l.restocked,
+          subtotal,
+          mixedMoney: false,
+          byType: new Map([[typeKey(l.restockType), l.quantity]]),
+        });
         continue;
       }
       prev.quantity += l.quantity;
+      prev.byType.set(typeKey(l.restockType), (prev.byType.get(typeKey(l.restockType)) ?? 0) + l.quantity);
       if (prev.restockType !== l.restockType) {
-        prev.restockType = "MIXED";
+        prev.restockType = RESTOCK_TYPE_MIXED;
         prev.restocked = null;
       } else if (prev.restocked !== l.restocked) prev.restocked = null;
       if (prev.subtotal && subtotal && prev.subtotal.currency === subtotal.currency) {
@@ -533,6 +546,8 @@ async function writeRefunds(tx: Tx, input: WriteFactsInput, refunds: ParsedRefun
         quantity: l.quantity,
         restockType: l.restockType,
         restocked: l.restocked,
+        // Лише для об'єднаного MIXED: вид → кількість (ключі впорядковано; Σ = quantity). Інакше null.
+        restockQuantities: l.restockType === RESTOCK_TYPE_MIXED ? Object.fromEntries([...l.byType].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) : null,
         subtotal: subtotal?.amount ?? null,
         currency: subtotal?.currency ?? null,
       };

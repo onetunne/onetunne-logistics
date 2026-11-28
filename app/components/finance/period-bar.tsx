@@ -14,9 +14,9 @@
  * навігації без перемонтування поля показували б попередній вибір над числами іншого періоду, а «Застосувати»
  * непомітно повертало б його (§12.1, §18.3: панель періоду називає саме той період, за який показано числа).
  */
-import { useId, useState, type ReactNode } from "react";
+import { useId, useState } from "react";
 import { Form, useLocation } from "react-router";
-import { useLocale } from "~/i18n";
+import { useLocale, useT } from "~/i18n";
 import {
   COMPARE_MODES,
   GRANULARITIES,
@@ -31,18 +31,9 @@ import { financeLabelKeys } from "~/modules/finance/core/labels";
 import { Button, Disclosure, Select, TextField } from "~/ui";
 import type { PeriodBarProps } from "./contracts";
 import { formatDateRange } from "./format-ui";
-import { useFinanceUiT } from "./i18n";
 
-export interface PeriodBarExtraProps {
-  /** Показати вибір відрізка (день / тиждень / місяць / рік). */
-  showGranularity?: boolean;
-  /** Показати вибір порівняння (без порівняння / попередній період / торік). */
-  showCompare?: boolean;
-  /** Дозволені відрізки (типово всі). */
-  granularities?: readonly Granularity[];
-  /** Додаткові елементи в «Ще» (напр. перемикач валюти). */
-  extra?: ReactNode;
-}
+/** Додаткові пропси WP0-UI — тепер частина контракту (PeriodBarProps); псевдонім для сумісності. */
+export type PeriodBarExtraProps = Pick<PeriodBarProps, "showGranularity" | "showCompare" | "granularities" | "extra">;
 
 /** Параметри запиту PeriodBar з префіксом. */
 export function periodParamNames(prefix = "") {
@@ -104,7 +95,7 @@ export function PeriodBar({
   granularities = GRANULARITIES,
   extra,
 }: PeriodBarProps & PeriodBarExtraProps) {
-  const ft = useFinanceUiT();
+  const ft = useT();
   const locale = useLocale();
   const location = useLocation();
   const uid = useId().replace(/[^A-Za-z0-9_-]/g, "");

@@ -6,7 +6,7 @@
 import { and, asc, desc, eq, inArray, isNull, like, lte, notExists, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { DbOrTx } from "~/db/client.server";
-import { financeEntries, fxRates, inventoryValuations, packagingMaterials, stockItemCosts, stockItems } from "~/db/schema";
+import { financeEntries, inventoryValuations, packagingMaterials, stockItemCosts, stockItems } from "~/db/schema";
 import { convertMinor, minorDigits, isSupportedCurrency } from "~/lib/decimal";
 import { toMinor } from "~/lib/money";
 import { loadFinanceSettings } from "~/modules/finance/core/settings.server";
@@ -14,6 +14,7 @@ import { rateFor } from "~/modules/fx/rate-for.server";
 import type { AppMode } from "~/server/types";
 import { currencyQuantum, mulDivQ, roundToQuantum, type MovementValueInput, type SaleSource, type StandardSource, type StandardUnit } from "./engine";
 import { completionTotals, detailList, type ValuationRow } from "./store.server";
+import { resolveRateMode } from "~/modules/finance/core/rate-mode.server";
 
 /** Налаштування й режим курсів для одного виклику рушія. */
 export interface CostingContext {
@@ -25,12 +26,12 @@ export interface CostingContext {
 
 /**
  * Режим курсів для оцінки. Внутрішні функції проведення не отримують ServiceContext (контракт ValueInsertedMovements),
- * тож режим визначається за базою: демо-курси (source = demo) засіваються ЛИШЕ в демо-базі (WP1/WP11), у робочій базі їх
- * немає ніколи — тоді rateFor бере НБУ. Ручні курси діють в обох режимах.
+ * тож режим дає ядро (finance/core/rate-mode.server.ts resolveRateMode): робочий сервер — ЗАВЖДИ production (з
+ * налаштувань сервера, не з вмісту таблиць); демо-сервер і тести — demo, якщо в базі є демо-курси. Ручні курси діють в
+ * обох режимах.
  */
 export async function costingRateMode(db: DbOrTx): Promise<AppMode> {
-  const [row] = await db.select({ one: sql<number>`1` }).from(fxRates).where(eq(fxRates.source, "demo")).limit(1);
-  return row ? "demo" : "production";
+  return resolveRateMode(db);
 }
 
 export async function loadCostingContext(db: DbOrTx, overrides: Partial<CostingContext> = {}): Promise<CostingContext> {

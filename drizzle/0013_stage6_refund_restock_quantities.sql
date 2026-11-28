@@ -1,0 +1,2 @@
+ALTER TABLE "order_refund_lines" ADD COLUMN "restock_quantities" jsonb;--> statement-breakpoint
+ALTER TABLE "order_refund_lines" ADD CONSTRAINT "order_refund_lines_restock_quantities_chk" CHECK ("order_refund_lines"."restock_quantities" is null or jsonb_typeof("order_refund_lines"."restock_quantities") = 'object');

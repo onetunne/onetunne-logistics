@@ -240,7 +240,8 @@ export async function syncPartnerCommission(tx: Tx, actor: PostingActor, orderId
       confirmedProducts: opts.confirmedProducts ?? null,
     });
     salesSource = sales[0]?.source ?? null;
-    if (!comp.known && comp.reason === "dispute_amount_unknown") review.push("dispute_open");
+    // Програний / прийнятий спір без суми: складник «Немає даних» з причиною dispute_amount_unknown (не «спір відкрито» —
+    // рішення вже є, бракує лише суми; замовлення не остаточне, доки Shopify або власник не дасть суму).
     // Дата коригування (R2): лише факти, новіші за останню чинну подію поточного партнера (старі вже враховано);
     // рішення про атрибуцію після неї — теж «подія» (§3.3).
     // Визнане замовлення: сторновані події нижче проводяться повторно (знову чинні) — враховуються й вони.
@@ -366,9 +367,16 @@ function componentOf(input: {
   if (!attr || attr.status === "removed") return NOT_APPLICABLE;
   if (attr.status === "ambiguous") return { state: "missing", reason: "ambiguous_partner", basis: null, hasForecast: false, required: true };
   if (!comp || !comp.known) {
-    // Немає продажів / суми програного спору ще немає — очікуємо дані (Shopify або власника); інша валюта спору — курс.
+    // Немає продажів — очікуємо дані Shopify; суми програного спору ще немає — dispute_amount_unknown (Shopify або
+    // власник); інша валюта спору — курс.
     const reason: ComponentReason =
-      !comp || comp.reason === "no_sales" || comp.reason === "dispute_amount_unknown" ? "awaiting_shopify" : comp.reason === "dispute_currency" ? "no_rate" : "order_unreadable";
+      !comp || comp.reason === "no_sales"
+        ? "awaiting_shopify"
+        : comp.reason === "dispute_amount_unknown"
+          ? "dispute_amount_unknown"
+          : comp.reason === "dispute_currency"
+            ? "no_rate"
+            : "order_unreadable";
     return { state: "missing", reason, basis: null, hasForecast: false, required: true };
   }
   if (finance.state === "open") return { state: "forecast", reason: null, basis: input.basis, hasForecast: input.hasForecast, required: true };
