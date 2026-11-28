@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
-import { auditLog, inventoryMovements, packagingMaterials, stockAlerts, stockItems } from "~/db/schema";
+import { auditLog, financeChangeLog, inventoryMovements, packagingMaterials, stockAlerts, stockItemCosts, stockItems } from "~/db/schema";
+import { businessDate } from "~/lib/periods";
 import { ForbiddenError, makeActor } from "~/domain/permissions";
 import { ConflictError, DomainError } from "~/lib/errors";
 import { listOpenAlerts, movementHistory } from "~/modules/inventory/ledger.server";
@@ -365,5 +366,37 @@ describe("concurrency", () => {
       .from(stockAlerts)
       .where(and(eq(stockAlerts.status, "open")));
     expect(openAlerts.some((x) => x.stockItemId === a.stockItemId || x.stockItemId === b.stockItemId)).toBe(false);
+  });
+});
+
+describe("stage 6: catalogue price history (docs/stage6-design.md §6.6, §6.7)", () => {
+  it("owner create / update with a price → material_catalogue row effective today + material_cost change log before → after; the same price or a staff update → nothing", async () => {
+    const today = businessDate(new Date());
+    const { id } = await createMaterial(env.ctx(OWNER), boxInput("box_cat6", { unitCost: "9.90", costCurrency: "UAH" }));
+    const stockItemId = await stockItemOf(id);
+    const rows = async () =>
+      (await env.handle.db.select().from(stockItemCosts).where(and(eq(stockItemCosts.stockItemId, stockItemId), eq(stockItemCosts.source, "material_catalogue"))))
+        .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+        .map((r) => [r.unitCost, r.currency, r.effectiveFrom, r.confirmed]);
+    const logs = async () =>
+      (await env.handle.db.select().from(financeChangeLog).where(and(eq(financeChangeLog.entityType, "material_cost"), eq(financeChangeLog.entityId, id))))
+        .sort((a, b) => a.id - b.id)
+        .map((l) => [l.action, l.before, l.after]);
+    expect(await rows()).toEqual([["9.90", "UAH", today, true]]);
+    expect(await logs()).toEqual([["create", null, { materialId: id, unitCost: "9.90", currency: "UAH" }]]);
+    const version = async () => (await getMaterial(env.handle.db, id, { includeCosts: true })).version;
+    await updateMaterial(env.ctx(OWNER), id, boxInput("box_cat6", { unitCost: "11.00", costCurrency: "UAH" }), { expectedVersion: await version() });
+    expect(await rows()).toEqual([
+      ["9.90", "UAH", today, true],
+      ["11.00", "UAH", today, true],
+    ]);
+    expect((await logs())[1]).toEqual(["update", { materialId: id, unitCost: "9.90", currency: "UAH" }, { materialId: id, unitCost: "11.00", currency: "UAH" }]);
+    // Та сама ціна (змінено лише назву) — без нового рядка й запису історії.
+    await updateMaterial(env.ctx(OWNER), id, boxInput("box_cat6", { name: "Renamed box", unitCost: "11.00", costCurrency: "UAH" }), { expectedVersion: await version() });
+    // Працівник із warehouse.adjust ціни не змінює (поле власника) — нічого.
+    await updateMaterial(env.ctx(STAFF_ADJUST), id, boxInput("box_cat6", { unitCost: "0.01", costCurrency: "UAH" }), { expectedVersion: await version() });
+    expect(await rows()).toHaveLength(2);
+    expect(await logs()).toHaveLength(2);
+    expect((await getMaterial(env.handle.db, id, { includeCosts: true })).unitCost).toBe("11.00");
   });
 });

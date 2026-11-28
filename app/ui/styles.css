@@ -2771,3 +2771,938 @@ textarea.ot-input {
     border-bottom-color: #000000;
   }
 }
+
+/* ==========================================================================
+   Фінанси (етап 6, WP0-UI; docs/stage6-design.md §18.3, §18.9) — розділ «finance»
+   Токени графіків для світлої й темної тем, штрихування прогнозу, лічильник повноти, компоненти
+   app/components/finance/* і поле файлу UI-кіту (FileInput). Колір стану — лише разом зі значком і текстом.
+   ========================================================================== */
+
+:root {
+  --ot-chart-ink: #1a1a1a;
+  --ot-chart-muted: #8a8a8a;
+  --ot-chart-grid: #e3e3e3;
+  --ot-chart-hatch: #616161;
+  --ot-chart-height: 200px;
+}
+
+html[data-theme="dark"] {
+  --ot-chart-ink: #ededed;
+  --ot-chart-muted: #7d7d83;
+  --ot-chart-grid: #2e2e31;
+  --ot-chart-hatch: #a5a5aa;
+}
+
+@media (prefers-color-scheme: dark) {
+  html[data-theme="system"] {
+    --ot-chart-ink: #ededed;
+    --ot-chart-muted: #7d7d83;
+    --ot-chart-grid: #2e2e31;
+    --ot-chart-hatch: #a5a5aa;
+  }
+}
+
+/* Телефон: графік 140 px заввишки (§18.3). */
+@media (max-width: 767.98px) {
+  :root {
+    --ot-chart-height: 140px;
+  }
+}
+
+.ot-finance-icon {
+  flex: none;
+}
+
+/* --- Стан і маркер повноти (значок + текст) --- */
+
+.ot-state,
+.ot-marker {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 6px;
+  max-width: 100%;
+  min-width: 0;
+  vertical-align: middle;
+}
+
+.ot-state__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ot-state__detail {
+  min-width: 0;
+  color: var(--ot-color-text-subdued);
+  font-size: var(--ot-font-size-caption);
+  line-height: 16px;
+  overflow-wrap: anywhere;
+}
+
+/* --- Сума (MoneyValue) --- */
+
+.ot-money {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 6px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.ot-money__amount {
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.ot-money--strong .ot-money__amount {
+  font-weight: 600;
+}
+
+.ot-money__state,
+.ot-money__original,
+.ot-money__rate {
+  color: var(--ot-color-text-subdued);
+  font-size: var(--ot-font-size-caption);
+  line-height: 16px;
+}
+
+.ot-money__original,
+.ot-money__rate {
+  flex-basis: 100%;
+  overflow-wrap: anywhere;
+}
+
+/* --- Плитка показника (KpiTile) --- */
+
+.ot-kpi {
+  display: flex;
+  flex-direction: column;
+}
+
+.ot-kpi > .ot-card__body {
+  flex: 1 1 auto;
+}
+
+.ot-kpi__body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.ot-kpi__values {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ot-kpi__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  margin: 0;
+  min-width: 0;
+}
+
+.ot-kpi__row--forecast {
+  margin-top: 2px;
+}
+
+.ot-kpi__label {
+  color: var(--ot-color-text-subdued);
+  font-size: var(--ot-font-size-caption);
+  line-height: 16px;
+}
+
+.ot-kpi__value {
+  min-width: 0;
+}
+
+.ot-kpi__value .ot-money__amount {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 28px;
+}
+
+.ot-kpi__value--forecast .ot-money__amount {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.ot-kpi__delta {
+  margin: 4px 0 0;
+  font-size: var(--ot-font-size-sm);
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.ot-kpi__arrow {
+  margin-right: 4px;
+}
+
+.ot-kpi__delta-base,
+.ot-kpi__delta-hint {
+  color: var(--ot-color-text-subdued);
+}
+
+.ot-kpi__coverage {
+  margin: 2px 0 0;
+}
+
+.ot-kpi .ot-sparkline {
+  margin-top: 6px;
+}
+
+.ot-kpi__missing {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding-left: 18px;
+  font-size: var(--ot-font-size-sm);
+  line-height: 18px;
+}
+
+.ot-kpi__explanation {
+  color: var(--ot-color-text-subdued);
+  font-size: var(--ot-font-size-sm);
+  line-height: 18px;
+}
+
+.ot-kpi__more > .ot-disclosure__content {
+  padding-top: 0;
+}
+
+/* --- Покриття «за N з M» з лічильником повноти --- */
+
+.ot-coverage {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 6px;
+  max-width: 100%;
+  color: var(--ot-color-text-subdued);
+  font-size: var(--ot-font-size-caption);
+  line-height: 16px;
+}
+
+.ot-coverage__meter {
+  position: relative;
+  flex: none;
+  width: 32px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--ot-chart-grid);
+}
+
+.ot-coverage__fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  background: var(--ot-chart-ink);
+}
+
+.ot-coverage__text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* --- Міні-графік --- */
+
+.ot-sparkline {
+  display: block;
+  width: 96px;
+  height: 24px;
+  overflow: visible;
+}
+
+.ot-sparkline__line {
+  fill: none;
+  stroke: var(--ot-chart-ink);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.ot-sparkline__dot {
+  fill: var(--ot-chart-ink);
+}
+
+.ot-sparkline__zero {
+  stroke: var(--ot-chart-grid);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+/* --- Графік прибутку (ProfitChart) --- */
+
+.ot-chart {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ot-space-2);
+  min-width: 0;
+  margin: 0;
+}
+
+.ot-chart__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--ot-color-text-subdued);
+  font-size: var(--ot-font-size-caption);
+  line-height: 16px;
+}
+
+.ot-chart__legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ot-chart__swatch {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+}
+
+.ot-chart__swatch--actual {
+  background: var(--ot-chart-ink);
+}
+
+.ot-chart__swatch--compare {
+  border: 1.5px solid var(--ot-chart-muted);
+  background: transparent;
+}
+
+.ot-chart__swatch-svg {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  overflow: visible;
+}
+
+.ot-chart__frame {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  grid-template-rows: var(--ot-chart-height) auto;
+  column-gap: var(--ot-space-2);
+  min-width: 0;
+}
+
+.ot-chart__yaxis {
+  position: relative;
+  grid-row: 1;
+  grid-column: 1;
+  color: var(--ot-color-text-subdued);
+  font-size: 11px;
+  line-height: 14px;
+  text-align: end;
+}
+
+/* Невидимі копії підписів задають ширину стовпця осі (видимі підписи позиціюються абсолютно). */
+.ot-chart__ysizer {
+  display: flex;
+  flex-direction: column;
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  white-space: nowrap;
+}
+
+.ot-chart__tick {
+  position: absolute;
+  right: 0;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transform: translateY(-50%);
+}
+
+.ot-chart__tick.is-zero {
+  color: var(--ot-color-text);
+}
+
+.ot-chart__plot {
+  position: relative;
+  grid-row: 1;
+  grid-column: 2;
+  min-width: 0;
+  border-radius: 4px;
+  touch-action: pan-y;
+}
+
+.ot-chart__plot:focus {
+  outline: none;
+}
+
+.ot-chart__plot:focus-visible {
+  outline: 2px solid var(--ot-color-focus);
+  outline-offset: 4px;
+}
+
+.ot-chart__svg {
+  display: block;
+  width: 100%;
+  height: var(--ot-chart-height);
+  overflow: visible;
+}
+
+.ot-chart__grid,
+.ot-chart__axis {
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+  vector-effect: non-scaling-stroke;
+}
+
+.ot-chart__grid {
+  stroke: var(--ot-chart-grid);
+}
+
+.ot-chart__axis {
+  stroke: var(--ot-chart-muted);
+}
+
+.ot-chart__actual {
+  fill: var(--ot-chart-ink);
+}
+
+/*
+ * Розділювач між фактом і прогнозною частиною: лінія кольору поверхні 4 px ЕКРАНА на краю стовпця факту
+ * (non-scaling — не залежить від масштабу viewBox 200 → 140 px на телефоні); нижню половину накриває стовпець факту,
+ * тож видимий проміжок — рівно 2 px (§18.3).
+ */
+.ot-chart__gap {
+  stroke: var(--ot-color-surface);
+  stroke-width: 4px;
+  vector-effect: non-scaling-stroke;
+}
+
+.ot-chart__bucket.is-active .ot-chart__gap {
+  stroke: var(--ot-color-surface-active);
+}
+
+/* Рівень факту, коли прогнозна частина перекриває стовпець: лінія 2 px екрана. */
+.ot-chart__cap {
+  stroke: var(--ot-chart-ink);
+  stroke-width: 2px;
+  vector-effect: non-scaling-stroke;
+}
+
+/* Відомий нуль — тонка позначка на осі (не розрив, як null). */
+.ot-chart__actual--zero {
+  fill: var(--ot-chart-ink);
+  shape-rendering: crispEdges;
+}
+
+.ot-chart__forecast {
+  stroke: var(--ot-chart-hatch);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+/* Штрихування прогнозу (<pattern>): фон поверхні + діагональні лінії --ot-chart-hatch. */
+.ot-chart__hatch-bg {
+  fill: var(--ot-color-surface);
+}
+
+.ot-chart__hatch-line {
+  stroke: var(--ot-chart-hatch);
+  stroke-width: 2;
+}
+
+.ot-chart__compare {
+  fill: none;
+  stroke: var(--ot-chart-muted);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.ot-chart__focus {
+  fill: var(--ot-color-surface-active);
+}
+
+.ot-chart__tooltip {
+  position: absolute;
+  top: 4px;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 140px;
+  max-width: min(260px, 90%);
+  padding: 6px 8px;
+  border: 1px solid var(--ot-color-border-strong);
+  border-radius: var(--ot-radius-sm);
+  background: var(--ot-color-surface);
+  box-shadow: var(--ot-shadow-overlay);
+  color: var(--ot-color-text);
+  font-size: var(--ot-font-size-caption);
+  font-variant-numeric: tabular-nums;
+  line-height: 16px;
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.ot-chart__tooltip--start {
+  transform: translateX(-12px);
+}
+
+.ot-chart__tooltip--end {
+  transform: translateX(calc(-100% + 12px));
+}
+
+/* Підписи осі X — за шириною області графіка (контейнер), рівні = AXIS_LABEL_TIERS у chart-geometry.ts. */
+.ot-chart__xaxis {
+  container: ot-chart-xaxis / inline-size;
+  position: relative;
+  grid-row: 2;
+  grid-column: 2;
+  height: 20px;
+  overflow: hidden;
+  color: var(--ot-color-text-subdued);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.ot-chart__xlabel {
+  position: absolute;
+  top: 3px;
+  display: none;
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+
+/* Крайні підписи — до краю області (inline left перекривається), щоб не обрізались. */
+.ot-chart__xlabel.is-first {
+  left: 0 !important;
+  transform: none;
+}
+
+.ot-chart__xlabel.is-last {
+  right: 0;
+  left: auto !important;
+  transform: none;
+}
+
+/* c0 — найвужчий рівень і запасний для браузерів без контейнерних запитів. */
+.ot-chart__xlabel.is-c0 {
+  display: block;
+}
+
+@container ot-chart-xaxis (min-width: 240px) {
+  .ot-chart__xlabel.is-c0 {
+    display: none;
+  }
+
+  .ot-chart__xlabel.is-c1 {
+    display: block;
+  }
+}
+
+@container ot-chart-xaxis (min-width: 360px) {
+  .ot-chart__xlabel.is-c1 {
+    display: none;
+  }
+
+  .ot-chart__xlabel.is-c2 {
+    display: block;
+  }
+}
+
+@container ot-chart-xaxis (min-width: 480px) {
+  .ot-chart__xlabel.is-c2 {
+    display: none;
+  }
+
+  .ot-chart__xlabel.is-c3 {
+    display: block;
+  }
+}
+
+@container ot-chart-xaxis (min-width: 720px) {
+  .ot-chart__xlabel.is-c3 {
+    display: none;
+  }
+
+  .ot-chart__xlabel.is-c4 {
+    display: block;
+  }
+}
+
+@container ot-chart-xaxis (min-width: 960px) {
+  .ot-chart__xlabel.is-c4 {
+    display: none;
+  }
+
+  .ot-chart__xlabel.is-c5 {
+    display: block;
+  }
+}
+
+.ot-chart__empty {
+  margin: 0;
+  padding: var(--ot-space-5) 0;
+  color: var(--ot-color-text-subdued);
+  text-align: center;
+}
+
+/* --- Розбивка витрат (BreakdownBars) --- */
+
+.ot-breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ot-space-2);
+  min-width: 0;
+}
+
+.ot-breakdown__head {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0;
+  color: var(--ot-color-text-subdued);
+  font-size: var(--ot-font-size-caption);
+  line-height: 16px;
+}
+
+.ot-breakdown__list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ot-breakdown__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-areas:
+    "label amount share"
+    "track track track"
+    "state state state";
+  gap: 4px 12px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.ot-breakdown__label {
+  grid-area: label;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ot-breakdown__amount {
+  grid-area: amount;
+  text-align: end;
+  white-space: nowrap;
+}
+
+.ot-breakdown__share {
+  grid-area: share;
+  min-width: 3.5em;
+  color: var(--ot-color-text-subdued);
+  text-align: end;
+  white-space: nowrap;
+}
+
+.ot-breakdown__track {
+  display: block;
+  grid-area: track;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--ot-chart-grid);
+}
+
+.ot-breakdown__bar {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--ot-chart-ink);
+  transition: width var(--ot-duration) var(--ot-ease);
+}
+
+.ot-breakdown__row.is-forecast .ot-breakdown__bar {
+  background: repeating-linear-gradient(45deg, var(--ot-chart-hatch) 0 2px, transparent 2px 5px);
+  box-shadow: inset 0 0 0 1px var(--ot-chart-hatch);
+}
+
+.ot-breakdown__row.is-negative .ot-breakdown__bar {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--ot-chart-ink);
+}
+
+.ot-breakdown__state {
+  grid-area: state;
+  min-width: 0;
+}
+
+/* Вузький телефон: назва — окремим рядком (не розривається посеред слова), сума й частка — під нею. */
+@media (max-width: 479.98px) {
+  .ot-breakdown__row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "label label"
+      "amount share"
+      "track track"
+      "state state";
+  }
+
+  .ot-breakdown__amount {
+    text-align: start;
+  }
+}
+
+.ot-breakdown__note {
+  margin: 0;
+  color: var(--ot-color-text-subdued);
+  font-size: var(--ot-font-size-caption);
+  line-height: 16px;
+}
+
+/* --- Перемикач валюти --- */
+
+.ot-currency-switch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  min-width: 0;
+}
+
+.ot-currency-switch__label {
+  color: var(--ot-color-text-subdued);
+  font-size: var(--ot-font-size-sm);
+}
+
+.ot-currency-switch__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  max-width: 100%;
+  margin: 0;
+  padding: 2px;
+  list-style: none;
+  border: 1px solid var(--ot-color-border-strong);
+  border-radius: var(--ot-radius-control);
+  background: var(--ot-color-surface);
+}
+
+.ot-currency-switch__link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: calc(var(--ot-control-height) - 6px);
+  padding: 2px 10px;
+  border-radius: var(--ot-radius-sm);
+  color: var(--ot-color-text);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  text-decoration: none;
+  touch-action: manipulation;
+}
+
+.ot-currency-switch__link:hover {
+  background: var(--ot-color-surface-hover);
+}
+
+.ot-currency-switch__link.is-selected {
+  background: var(--ot-color-primary);
+  color: var(--ot-color-on-primary);
+}
+
+/* Цілі дотику ≥ 44 px на телефоні й сенсорних екранах (§18.3, як --ot-control-height інших полів). */
+@media (max-width: 1023.98px), (pointer: coarse) {
+  .ot-currency-switch__link {
+    min-height: 44px;
+  }
+}
+
+/* --- Вибір періоду (PeriodBar) --- */
+
+.ot-period-bar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ot-space-2);
+  min-width: 0;
+}
+
+.ot-period-bar__main,
+.ot-period-bar__extra-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px 12px;
+  min-width: 0;
+}
+
+.ot-period-bar__preset,
+.ot-period-bar__extra-body > .ot-field {
+  flex: 0 1 220px;
+  min-width: 160px;
+}
+
+.ot-period-bar__date {
+  flex: 0 1 170px;
+  min-width: 140px;
+}
+
+.ot-period-bar__range {
+  display: flex;
+  align-items: center;
+  min-height: var(--ot-control-height);
+  margin: 0;
+  color: var(--ot-color-text-subdued);
+  font-size: var(--ot-font-size-sm);
+  white-space: nowrap;
+}
+
+/* ПК і планшет: «Ще» розгорнуто й заголовок прихований (на телефоні — згорнуто, Disclosure collapsedOnMobile). */
+@media (min-width: 768px) {
+  .ot-period-bar__extra[open] > summary {
+    display: none;
+  }
+
+  .ot-period-bar__extra[open] > .ot-disclosure__content {
+    padding-top: 0;
+  }
+}
+
+@media (max-width: 767.98px) {
+  .ot-period-bar__preset,
+  .ot-period-bar__date,
+  .ot-period-bar__extra-body > .ot-field {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+}
+
+/* --- Банер повноти --- */
+
+.ot-completeness__body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.ot-completeness__body p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.ot-completeness__profit {
+  color: var(--ot-color-text-subdued);
+}
+
+.ot-completeness__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.ot-completeness__list li[data-tone="info"] {
+  color: var(--ot-color-text-subdued);
+}
+
+.ot-completeness__details > .ot-disclosure__content {
+  padding-top: 0;
+}
+
+/* --- Поле файлу (app/ui/FileInput.tsx) --- */
+
+.ot-file__control {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  min-width: 0;
+}
+
+.ot-file__picker {
+  position: relative;
+  display: inline-flex;
+  max-width: 100%;
+}
+
+/* Справжнє поле — прозоре над кнопкою: відкриває системний вибір файлу (iPhone «Файли»). */
+.ot-file__input {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.ot-file__input:disabled {
+  cursor: not-allowed;
+}
+
+.ot-file__input:hover + .ot-file__button {
+  background: var(--ot-color-surface-hover);
+}
+
+.ot-file__input:focus-visible + .ot-file__button {
+  outline: 2px solid var(--ot-color-focus);
+  outline-offset: 2px;
+}
+
+.ot-file__input:disabled + .ot-file__button {
+  opacity: 0.5;
+}
+
+.ot-field--invalid .ot-file__button {
+  border-color: var(--ot-color-critical);
+}
+
+.ot-file__name {
+  min-width: 0;
+  font-size: var(--ot-font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.ot-file__name.is-empty {
+  color: var(--ot-color-text-subdued);
+}
+
+/* --- Рух і друк --- */
+
+@media (prefers-reduced-motion: reduce) {
+  .ot-breakdown__bar,
+  .ot-chart__tooltip,
+  .ot-chart__bucket * {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+@media print {
+  .ot-chart__tooltip,
+  .ot-chart__focus {
+    display: none !important;
+  }
+
+  .ot-chart,
+  .ot-kpi,
+  .ot-breakdown {
+    break-inside: avoid;
+  }
+}

@@ -184,8 +184,14 @@ describe("import of past orders", () => {
     await run();
     const all = await h.db.select().from(orders);
     expect(all.filter((o) => o.shopifyOrderId === "gid://shopify/Order/4002")).toHaveLength(1);
+    // Етап 6: після збереження кожного ЗБЕРЕЖЕНОГО замовлення ставиться фінансова синхронізація (finance.sync_order,
+    // +30 с, dedupe finance-order:<gid> — повторний імпорт не множить завдання); інших завдань черга не тримає.
     const q = await h.db.select().from(jobs).where(eq(jobs.status, "queued"));
-    expect(q).toHaveLength(0);
+    expect(q.filter((j) => j.type !== "finance.sync_order")).toHaveLength(0);
+    const stored = all.filter((o) => o.shopifyOrderId).map((o) => `finance-order:${o.shopifyOrderId}`).sort();
+    expect(q.map((j) => j.dedupeKey).sort()).toEqual(stored);
+    expect(q.every((j) => j.runAt.getTime() > Date.now())).toBe(true);
+    expect(q.map((j) => j.dedupeKey)).not.toContain("finance-order:gid://shopify/Order/4003"); // неоплачене не збережено
     await updateSetting(h.db, OWNER, "automation", { mode: "semi", globalPause: false });
   });
 });
@@ -211,4 +217,107 @@ it("validation still works on synced orders", async () => {
   const v = await validateOrderById(ctx, o.id);
   expect(v.status).toBe("awaiting_review");
   expect((await loadOrderRow(h.db, o.id)).source).toBe("shopify");
+});
+
+// ---------------------------------------------------------------------------
+// Етап 6 (WP3, docs/stage6-design.md §16.3–§16.4, §14.3 п. 6): синхронізація етапу 2 зберігає Order.test і
+// LineItem.requiresShipping, для відвантажених — лише current_quantity; нові webhooks ставлять обидві синхронізації.
+// ---------------------------------------------------------------------------
+
+describe("stage 6: finance facts kept by the stage-2 order sync", () => {
+  const line = (n: number, over: Partial<GqlOrder["lineItems"]["nodes"][number]> = {}) => ({ ...gqlOrder(n).lineItems.nodes[0]!, ...over });
+  const lineRows = async (gid: string) => {
+    const o = (await orderRow(gid))!;
+    return h.db.select().from(orderLineItems).where(eq(orderLineItems.orderId, o.id));
+  };
+  const financeJob = async (gid: string) =>
+    (await h.db.select().from(jobs).where(and(eq(jobs.type, "finance.sync_order"), eq(jobs.dedupeKey, `finance-order:${gid}`), eq(jobs.status, "queued"))))[0];
+
+  it("stores orders.shopify_test and order_line_items.requires_shipping (and their later changes)", async () => {
+    store.orders.set("gid://shopify/Order/6001", gqlOrder(6001, { test: false, lineItems: { nodes: [line(6001, { requiresShipping: false })] } }));
+    await webhook("ORDERS_PAID", { admin_graphql_api_id: "gid://shopify/Order/6001" });
+    await run();
+    expect((await orderRow("gid://shopify/Order/6001"))?.shopifyTest).toBe(false);
+    expect((await lineRows("gid://shopify/Order/6001")).map((l) => l.requiresShipping)).toEqual([false]);
+    const before = (await lineRows("gid://shopify/Order/6001"))[0]!.id;
+
+    store.orders.set(
+      "gid://shopify/Order/6001",
+      gqlOrder(6001, { test: true, updatedAt: "2026-11-21T10:00:00Z", lineItems: { nodes: [line(6001, { requiresShipping: true })] } }),
+    );
+    await webhook("ORDERS_UPDATED", { admin_graphql_api_id: "gid://shopify/Order/6001" });
+    await run();
+    expect((await orderRow("gid://shopify/Order/6001"))?.shopifyTest).toBe(true);
+    const after = await lineRows("gid://shopify/Order/6001");
+    expect(after.map((l) => [l.id, l.requiresShipping])).toEqual([[before, true]]);
+    // Без поля в даних (старі відповіді) — null, а не вигадане значення.
+    store.orders.set("gid://shopify/Order/6003", gqlOrder(6003));
+    await webhook("ORDERS_PAID", { admin_graphql_api_id: "gid://shopify/Order/6003" });
+    await run();
+    expect((await lineRows("gid://shopify/Order/6003")).map((l) => l.requiresShipping)).toEqual([null]);
+  });
+
+  it("queues finance.sync_order (+30 s, dedupe) after a stored order is saved", async () => {
+    const job = await financeJob("gid://shopify/Order/6001");
+    expect(job).toBeTruthy();
+    expect(job!.payload).toEqual({ shop: SHOP, orderGid: "gid://shopify/Order/6001" });
+    expect(job!.runAt.getTime()).toBeGreaterThan(Date.now() + 10_000);
+    const queued = await h.db.select().from(jobs).where(and(eq(jobs.type, "finance.sync_order"), eq(jobs.status, "queued")));
+    // Повторні події того самого замовлення не множать завдання.
+    expect(queued.filter((j) => j.dedupeKey === "finance-order:gid://shopify/Order/6001")).toHaveLength(1);
+  });
+
+  it("a refund after shipment updates ONLY current_quantity (same line ids, no line history, no problem)", async () => {
+    store.orders.set("gid://shopify/Order/6002", gqlOrder(6002, { lineItems: { nodes: [line(6002, { quantity: 2, currentQuantity: 2 })] } }));
+    await webhook("ORDERS_PAID", { admin_graphql_api_id: "gid://shopify/Order/6002" });
+    await run();
+    const o = (await orderRow("gid://shopify/Order/6002"))!;
+    await h.db.update(orders).set({ status: "handed_to_carrier" }).where(eq(orders.id, o.id));
+    const [before] = await lineRows("gid://shopify/Order/6002");
+    expect(before).toMatchObject({ quantity: 2, currentQuantity: 2 });
+    const historyBefore = await h.db.select().from(orderChanges).where(eq(orderChanges.orderId, o.id));
+
+    store.orders.set(
+      "gid://shopify/Order/6002",
+      gqlOrder(6002, {
+        updatedAt: "2026-11-25T10:00:00Z",
+        displayFinancialStatus: "PARTIALLY_REFUNDED",
+        displayFulfillmentStatus: "FULFILLED",
+        lineItems: { nodes: [line(6002, { quantity: 2, currentQuantity: 1, title: "Перейменовано" })] },
+      }),
+    );
+    await webhook("ORDERS_UPDATED", { admin_graphql_api_id: "gid://shopify/Order/6002" });
+    await run();
+    const [after] = await lineRows("gid://shopify/Order/6002");
+    // Позицію не замінено (той самий id, назва й кількість — як були), змінено лише поточну кількість.
+    expect(after).toMatchObject({ id: before!.id, quantity: 2, currentQuantity: 1, title: before!.title });
+    expect(await h.db.select().from(orderChanges).where(eq(orderChanges.orderId, o.id))).toHaveLength(historyBefore.length);
+    const open = await h.db.select().from(issues).where(and(eq(issues.orderId, o.id), eq(issues.status, "open")));
+    expect(open.map((i) => i.code)).not.toContain("SHOPIFY_ORDER_CHANGED");
+    expect((await orderRow("gid://shopify/Order/6002"))?.status).toBe("handed_to_carrier");
+  });
+
+  it("REFUNDS_CREATE takes the order from order_id (not the refund's admin_graphql_api_id) and queues both syncs", async () => {
+    await h.db.delete(jobs);
+    expect(await webhook("REFUNDS_CREATE", { id: 777, order_id: 6002, admin_graphql_api_id: "gid://shopify/Refund/777" })).toBe("queued");
+    const q = await h.db.select().from(jobs).where(eq(jobs.status, "queued"));
+    expect(q.map((j) => [j.type, j.dedupeKey, (j.payload as { orderGid: string }).orderGid]).sort()).toEqual([
+      ["finance.sync_order", "finance-order:gid://shopify/Order/6002", "gid://shopify/Order/6002"],
+      ["shopify.sync_order", "order:gid://shopify/Order/6002", "gid://shopify/Order/6002"],
+    ]);
+    // Число понад 2^53 після JSON.parse неточне — не вгадуємо замовлення.
+    expect(await webhook("REFUNDS_CREATE", { id: 778, order_id: 2 ** 60, admin_graphql_api_id: "gid://shopify/Refund/778" })).toBe("ignored");
+    expect(await webhook("REFUNDS_CREATE", { id: 779, admin_graphql_api_id: "gid://shopify/Refund/779" })).toBe("ignored");
+  });
+
+  it("ORDERS_EDITED takes order_edit.order_id and is routed before the generic ORDERS_* rule", async () => {
+    await h.db.delete(jobs);
+    expect(await webhook("orders/edited", { order_edit: { id: 55, order_id: 6001, notify_customer: false } })).toBe("queued");
+    const q = await h.db.select().from(jobs).where(eq(jobs.status, "queued"));
+    expect(q.map((j) => (j.payload as { orderGid: string }).orderGid)).toEqual(["gid://shopify/Order/6001", "gid://shopify/Order/6001"]);
+    expect(q.map((j) => j.type).sort()).toEqual(["finance.sync_order", "shopify.sync_order"]);
+    // Корінь — правка, не замовлення: id кореня (id правки) не використовується.
+    expect(await webhook("ORDERS_EDITED", { id: 6001, admin_graphql_api_id: "gid://shopify/Order/6001" })).toBe("ignored");
+    await h.db.delete(jobs);
+  });
 });

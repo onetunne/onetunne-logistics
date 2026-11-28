@@ -49,7 +49,7 @@ const messages: MessageModule = {
     "warehouseAnalytics.kpi.recommendationsHint": "Разом {units} шт.",
     "warehouseAnalytics.kpi.variantsSold": "Варіантів із продажами",
     "warehouseAnalytics.kpi.value": "Вартість запасу",
-    "warehouseAnalytics.kpi.valueHint": "Фактичний залишок × собівартість з останнього надходження з виробництва",
+    "warehouseAnalytics.kpi.valueHint": "За обліком собівартості (ковзна середня; деталі — «Фінанси → Собівартість»)",
     "warehouseAnalytics.kpi.valueMissing": "Без собівартості: {items, plural, one {# позиція} few {# позиції} many {# позицій} other {# позиції}} ({units} шт.) — не враховано",
     "warehouseAnalytics.notForecast":
       "Для {count, plural, one {# позиції} other {# позицій}} облік складу ще не ініціалізовано (або Shopify не веде їх залишок) — днів запасу й рекомендації для них не рахуються.",
@@ -294,7 +294,7 @@ const messages: MessageModule = {
     "warehouseAnalytics.kpi.recommendationsHint": "{units, plural, one {# unit} other {# units}} in total",
     "warehouseAnalytics.kpi.variantsSold": "Variants with sales",
     "warehouseAnalytics.kpi.value": "Inventory value",
-    "warehouseAnalytics.kpi.valueHint": "On hand × unit cost from the latest production receipt",
+    "warehouseAnalytics.kpi.valueHint": "From the cost records (moving average; details — «Finance → Costs»)",
     "warehouseAnalytics.kpi.valueMissing": "No unit cost: {items, plural, one {# item} other {# items}} ({units, plural, one {# unit} other {# units}}) — not included",
     "warehouseAnalytics.notForecast":
       "Inventory is not initialized yet for {count, plural, one {# item} other {# items}} (or Shopify does not track their stock) — days of cover and recommendations are not calculated for them.",

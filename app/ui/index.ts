@@ -61,6 +61,7 @@ export {
   type DataTableColumn,
   type DataTableSelection,
 } from "./DataTable";
+export { FileInput, acceptedExtensions, checkFile, type FileInputFile, type FileInputProps } from "./FileInput";
 export { EmptyState, type EmptyStateProps } from "./EmptyState";
 export { Tabs, type TabsProps, type TabItem } from "./Tabs";
 export { KeyValueList, type KeyValueListProps, type KeyValueItem } from "./KeyValueList";

@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react";
 import { Form, useLoaderData, useLocation, useNavigation, type LoaderFunctionArgs } from "react-router";
 import { useCan, useHref } from "~/components/shell";
 import { can } from "~/domain/permissions";
+import { canFinance } from "~/modules/finance/core/access.server";
 import { useLocale, useT, type Locale, type TFunction } from "~/i18n";
 import { formatDecimal, formatIsoDate, formatMoney, formatNumber } from "~/lib/format";
 import {
@@ -101,7 +102,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const query = parseAnalyticsQuery(url.searchParams);
   const today = businessDate(ctx.now());
   const period = resolvePeriod({ key: query.period, from: query.from, to: query.to, today });
-  const includeCosts = can(ctx.actor, "finance.view");
+  // Собівартість — лише власник (finance.view + роль owner, як requireFinance етапу 6); вартість — з рушія оцінки.
+  const includeCosts = canFinance(ctx.actor, "view");
   const canManageProduction = can(ctx.actor, "production.manage");
   const [data, options] = await Promise.all([
     computeWarehouseAnalytics(ctx.db, { today, period, filters: filtersOf(query), includeCosts }),

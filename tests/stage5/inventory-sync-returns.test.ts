@@ -38,6 +38,19 @@ import { receiveStock } from "~/modules/warehouse/operations.server";
 import { createDemoCarriers } from "~/server/demo-runtime.server";
 import type { RequestContext, ServiceContext } from "~/server/types";
 import { gqlOrder, gqlProduct } from "../stage2/fixtures";
+import { runFinanceOrderSync } from "~/modules/finance-sync/sync-order.server";
+import {
+  SHOP as FINANCE_SHOP,
+  agreement as financeAgreement,
+  bag,
+  fakeFinanceAdmin,
+  financeNode,
+  refund as financeRefund,
+  refundLine,
+  sale as financeSale,
+  transaction as financeTransaction,
+  type FinanceOrderFixture,
+} from "../stage6/fixtures/shopify-finance";
 import { OWNER, openTestDatabase } from "../helpers";
 import { apply, balance } from "./helpers";
 import { fakeInventoryAdmin, type FakeInventoryAdmin } from "./inventory-sync-fixtures";
@@ -70,7 +83,8 @@ vi.mock("~/integrations/shopify/admin-client.server", async (importOriginal) => 
 
 const SHOP = "ot-returns.myshopify.com";
 const APP_URL = "https://ot-app.example.com";
-const N = 14;
+// Етап 6 (WP3): товари 15–16 — звірка повернень за рядками повернень Shopify (NO_RESTOCK / RETURN), справжній шлях синхронізації.
+const N = 16;
 
 let hd: DatabaseHandle;
 let ctx: ServiceContext;
@@ -541,3 +555,87 @@ describe("page: returns awaiting Shopify's restock and held units", () => {
     expect(html).toContain(esc(uk("inventorySync.action.dismiss.pushPending")));
   });
 });
+
+// ---------------------------------------------------------------------------
+// Етап 6 (WP3, docs/stage6-design.md §14.3 п. 6): «повернено на склад Shopify» — з рядків повернень коштів
+// (restockType RETURN + restocked), а не з «списано − поточна кількість». Повернення коштів без повернення на склад
+// (NO_RESTOCK) теж зменшує currentQuantity, але на склад Shopify нічого не повертає — раніше воно «пояснювало» справжню
+// розбіжність. Обидва шляхи — справжні: синхронізація етапу 2 (current_quantity відвантаженого замовлення) і фінансова
+// синхронізація (рядки повернень) з імітацією Admin API.
+// ---------------------------------------------------------------------------
+
+describe("stage 6: Shopify restock comes from refund lines (NO_RESTOCK regression through the real sync paths)", () => {
+  const finance = new Map<string, FinanceOrderFixture>();
+  const financeAdmin = fakeFinanceAdmin(finance);
+
+  /** Відшкодування в Shopify: синхронізація етапу 2 (currentQuantity 0) і фінансів (рядок повернення з видом). */
+  async function refundInShopify(n: number, orderNo: number, restock: "NO_RESTOCK" | "RETURN") {
+    const orderGid = `gid://shopify/Order/${orderNo}`;
+    const updatedAt = new Date(Date.now() + 1000).toISOString();
+    const refunded = fulfilledOrder(n, orderNo, 1);
+    refunded.updatedAt = updatedAt;
+    refunded.displayFinancialStatus = "REFUNDED";
+    refunded.lineItems.nodes[0]!.currentQuantity = 0;
+    await upsertOrder(ctx, mapOrder(refunded), "live");
+    const lineGid = refunded.lineItems.nodes[0]!.id;
+    const ref = financeRefund({ amount: "29.90", lines: [refundLine(lineGid, 1, restock, restock === "RETURN", "29.90")] });
+    finance.set(orderGid, {
+      finance: financeNode(orderGid, {
+        updatedAt,
+        displayFinancialStatus: "REFUNDED",
+        transactions: [financeTransaction({ amount: "29.90" }), financeTransaction({ kind: "REFUND", amount: "29.90" })],
+        totals: { currentTotalPriceSet: bag("0.00"), netPaymentSet: bag("0.00"), totalRefundedSet: bag("29.90") },
+      }),
+      agreements: [
+        financeAgreement("OrderAgreement", updatedAt, [financeSale({ total: "29.90", lineItem: lineGid })]),
+        financeAgreement("RefundAgreement", updatedAt, [financeSale({ total: "-29.90", quantity: -1, actionType: "RETURN", lineItem: lineGid })], {
+          refund: { id: ref.id },
+        }),
+      ],
+      refunds: [ref],
+    });
+    return { orderGid, lineGid };
+  }
+
+  const syncFinance = (orderGid: string) => runFinanceOrderSync({ db: hd.db, admin: financeAdmin.admin }, { shop: FINANCE_SHOP, orderGid });
+
+  it("NO_RESTOCK: the stage-2 sync now updates current_quantity of the shipped order; refund lines then show «not restocked» — the difference is no longer explained", async () => {
+    const o = await shippedOrder(15, 9815); // склад 11, Shopify 11
+    const { orderGid } = await refundInShopify(15, 9815, "NO_RESTOCK"); // Shopify НЕ поповнив
+    const [line] = await hd.db.select().from(orderLineItems).where(eq(orderLineItems.orderId, o.id));
+    expect(line).toMatchObject({ quantity: 1, currentQuantity: 0 }); // §14.3 п. 6: лише current_quantity
+    // До фінансових фактів — як раніше (за кількістю): одиниця «може бути поповнена», звірка невизначена.
+    expect(await timing(15)).toMatchObject({ returnsPending: 1, uncertain: true });
+
+    expect(await syncFinance(orderGid)).toMatchObject({ status: "synced", refundsRead: true, refundLines: 1 });
+    // З рядками повернень: NO_RESTOCK на склад Shopify нічого не повернув — нічого й не очікується.
+    expect(await timing(15)).toMatchObject({ returnsPending: 0, uncertain: false });
+    expect(await reconcileItem(15)).toEqual(["match"]);
+
+    // Справжня розбіжність (хтось змінив Shopify вручну) більше не «пояснюється» поверненням: її видно без невизначеності.
+    setShopify(15, level(15).available + 1);
+    expect(await reconcileItem(15)).toEqual(["opened"]);
+    expect(await observation(15)).toMatchObject({ diff: 1, returnsPending: 0, uncertain: false });
+    expect((await observation(15)).autoApplyBlockers ?? []).not.toContain("uncertain");
+  });
+
+  it("RETURN + restocked: pending until the parcel is received, then in sync (refund lines say Shopify restocked)", async () => {
+    const o = await shippedOrder(16, 9816); // склад 11, Shopify 11
+    const { orderGid } = await refundInShopify(16, 9816, "RETURN");
+    setShopify(16, level(16).available + 1); // Shopify поповнив
+    expect(await syncFinance(orderGid)).toMatchObject({ status: "synced", refundLines: 1 });
+    expect(await timing(16)).toMatchObject({ returnsPending: 1, uncertain: true });
+    await returnReceipt(16, 1, o.id); // посилка надійшла: склад 12 = Shopify 12
+    expect(await timing(16)).toMatchObject({ returnsPending: 0 });
+    expect(await reconcileItem(16)).toEqual(["match"]);
+    expect(await onHand(16)).toBe(12);
+  });
+
+  it("stale refund facts (the order changed in Shopify after the finance sync) fall back to the quantity rule", async () => {
+    // Замовлення 9815 знову змінилося в Shopify (новіший updatedAt), фінанси ще не перечитано: рядки повернень можуть бути
+    // неповними — звірка тимчасово рахує за кількістю (консервативно: невизначеність, а не хибний збіг).
+    await hd.db.update(orders).set({ shopifyUpdatedAt: new Date(Date.now() + 60_000) }).where(eq(orders.shopifyOrderId, "gid://shopify/Order/9815"));
+    expect(await timing(15)).toMatchObject({ returnsPending: 1, uncertain: true });
+  });
+});
+

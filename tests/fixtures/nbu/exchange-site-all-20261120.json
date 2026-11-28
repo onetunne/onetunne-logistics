@@ -1,0 +1,137 @@
+[
+{ 
+"exchangedate":"20.11.2026","r030":12,"cc":"DZD","txt":"Алжирський динар","enname":"Algerian Dinar","rate":3.2872,"units":10,"rate_per_unit":0.32872,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":36,"cc":"AUD","txt":"Австралійський долар","enname":"Australian Dollar","rate":30.2221,"units":1,"rate_per_unit":30.2221,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":50,"cc":"BDT","txt":"Така","enname":"Taka","rate":3.6105,"units":10,"rate_per_unit":0.36105,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":124,"cc":"CAD","txt":"Канадський долар","enname":"Canadian Dollar","rate":31.4853,"units":1,"rate_per_unit":31.4853,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":156,"cc":"CNY","txt":"Юань Женьміньбі","enname":"Yuan Renminbi ","rate":6.7576,"units":1,"rate_per_unit":6.7576,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":203,"cc":"CZK","txt":"Чеська крона","enname":"Czech Koruna","rate":2.0282,"units":1,"rate_per_unit":2.0282,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":208,"cc":"DKK","txt":"Данська крона","enname":"Danish Krone","rate":6.627,"units":1,"rate_per_unit":6.627,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":344,"cc":"HKD","txt":"Гонконгівський долар","enname":"Hong Kong Dollar","rate":5.743,"units":1,"rate_per_unit":5.743,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":348,"cc":"HUF","txt":"Форинт","enname":"Forint","rate":13.4308,"units":100,"rate_per_unit":0.134308,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":356,"cc":"INR","txt":"Індійська рупія","enname":"Indian Rupee","rate":4.8294,"units":10,"rate_per_unit":0.48294,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":360,"cc":"IDR","txt":"Рупія","enname":"Rupiah","rate":2.468,"units":1000,"rate_per_unit":0.002468,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":376,"cc":"ILS","txt":"Новий ізраїльський шекель","enname":"New Israeli Sheqel","rate":13.7552,"units":1,"rate_per_unit":13.7552,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":392,"cc":"JPY","txt":"Єна","enname":"Yen","rate":2.818,"units":10,"rate_per_unit":0.2818,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":398,"cc":"KZT","txt":"Теньге","enname":"Tenge","rate":10.0126,"units":100,"rate_per_unit":0.100126,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":410,"cc":"KRW","txt":"Вона","enname":"Won","rate":3.3896,"units":100,"rate_per_unit":0.033896,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":422,"cc":"LBP","txt":"Ліванський фунт","enname":"Lebanese Pound","rate":0.0502,"units":100,"rate_per_unit":0.000502,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":458,"cc":"MYR","txt":"Малайзійський ринггіт","enname":"Malaysian Ringgit","rate":10.956,"units":1,"rate_per_unit":10.956,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":484,"cc":"MXN","txt":"Мексиканське песо","enname":"Mexican Peso","rate":2.3907,"units":1,"rate_per_unit":2.3907,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":498,"cc":"MDL","txt":"Молдовський лей","enname":"Moldovan Leu","rate":2.4578,"units":1,"rate_per_unit":2.4578,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":554,"cc":"NZD","txt":"Новозеландський долар","enname":"New Zealand Dollar","rate":24.8868,"units":1,"rate_per_unit":24.8868,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":578,"cc":"NOK","txt":"Норвезька крона","enname":"Norwegian Krone","rate":4.6511,"units":1,"rate_per_unit":4.6511,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":682,"cc":"SAR","txt":"Саудівський ріял","enname":"Saudi Riyal","rate":12.0096,"units":1,"rate_per_unit":12.0096,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":702,"cc":"SGD","txt":"Сінгапурський долар","enname":"Singapore Dollar","rate":34.9428,"units":1,"rate_per_unit":34.9428,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":704,"cc":"VND","txt":"Донг","enname":"Dong","rate":1.7505,"units":1000,"rate_per_unit":0.0017505,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":710,"cc":"ZAR","txt":"Ренд","enname":"Rand","rate":2.6137,"units":1,"rate_per_unit":2.6137,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":752,"cc":"SEK","txt":"Шведська крона","enname":"Swedish Krona","rate":4.4423,"units":1,"rate_per_unit":4.4423,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":756,"cc":"CHF","txt":"Швейцарський франк","enname":"Swiss Franc","rate":53.4788,"units":1,"rate_per_unit":53.4788,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":764,"cc":"THB","txt":"Бат","enname":"Baht","rate":13.2968,"units":10,"rate_per_unit":1.32968,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":784,"cc":"AED","txt":"Дирхам ОАЕ","enname":"UAE Dirham","rate":12.2659,"units":1,"rate_per_unit":12.2659,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":788,"cc":"TND","txt":"Туніський динар","enname":"Tunisian Dinar","rate":14.7489,"units":1,"rate_per_unit":14.7489,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":818,"cc":"EGP","txt":"Єгипетський фунт","enname":"Egyptian Pound","rate":0.837,"units":1,"rate_per_unit":0.837,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":826,"cc":"GBP","txt":"Фунт стерлінгів","enname":"Pound Sterling","rate":59.2714,"units":1,"rate_per_unit":59.2714,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":840,"cc":"USD","txt":"Долар США","enname":"US Dollar","rate":45.0532,"units":1,"rate_per_unit":45.0532,"group":"1","calcdate":"19.11.2026","special":"N"
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":941,"cc":"RSD","txt":"Сербський динар","enname":"Serbian Dinar","rate":4.2102,"units":10,"rate_per_unit":0.42102,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":944,"cc":"AZN","txt":"Азербайджанський манат","enname":"Azerbaijan Manat","rate":26.5058,"units":1,"rate_per_unit":26.5058,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":946,"cc":"RON","txt":"Румунський лей","enname":"Romanian Leu","rate":9.2645,"units":1,"rate_per_unit":9.2645,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":949,"cc":"TRY","txt":"Турецька ліра","enname":"Turkish Lira","rate":0.8927,"units":1,"rate_per_unit":0.8927,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":960,"cc":"XDR","txt":"СПЗ (спеціальні права запозичення)","enname":"SDR (Special Drawing Right)","rate":60.5744,"units":1,"rate_per_unit":60.5744,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":978,"cc":"EUR","txt":"Євро","enname":"Euro","rate":49.5335,"units":1,"rate_per_unit":49.5335,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":981,"cc":"GEL","txt":"Ларі","enname":"Lari","rate":17.3706,"units":1,"rate_per_unit":17.3706,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":985,"cc":"PLN","txt":"Злотий","enname":"Zloty","rate":11.2185,"units":1,"rate_per_unit":11.2185,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":959,"cc":"XAU","txt":"Золото","enname":"Gold","rate":167949.54,"units":1,"rate_per_unit":167949.54,"group":"3","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":961,"cc":"XAG","txt":"Срібло","enname":"Silver","rate":2036.14,"units":1,"rate_per_unit":2036.14,"group":"3","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":962,"cc":"XPT","txt":"Платина","enname":"Platinum","rate":62417.44,"units":1,"rate_per_unit":62417.44,"group":"3","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":964,"cc":"XPD","txt":"Паладій","enname":"Palladium","rate":42924.84,"units":1,"rate_per_unit":42924.84,"group":"3","calcdate":"19.11.2026","special":null
+ }
+]

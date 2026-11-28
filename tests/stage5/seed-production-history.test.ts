@@ -10,6 +10,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import {
   auditLog,
   inventoryBalances,
+  inventoryCostState,
   inventoryConflicts,
   inventoryMovements,
   jobs,
@@ -27,6 +28,10 @@ import { DEMO_HISTORY_NOTE, DEMO_MATERIAL_HISTORY, DEMO_PRODUCTION_HISTORY, demo
 import { DEMO_MATERIALS } from "~/db/seed/demo-warehouse.server";
 import { resetDemoData, seedDemoData } from "~/db/seed/seed.server";
 import { SYSTEM_ACTOR, type Actor } from "~/domain/permissions";
+import { rebuildValuationForDemo } from "~/modules/costing/backfill.server";
+import { centsAverage } from "~/modules/costing/queries.server";
+import { formatMoney } from "~/lib/format";
+import { fromMinor, toMinor } from "~/lib/money";
 import { makeT } from "~/i18n";
 import { inventoryKeys } from "~/modules/inventory/keys";
 import { getBalances } from "~/modules/inventory/ledger.server";
@@ -350,45 +355,61 @@ describe("demo production history: production statistics on a fresh demo", () =>
     setContext(OWNER);
   });
 
-  it("analytics: the owner's inventory value counts the history's landed unit costs; staff gets no cost (finance.view)", async () => {
+  // Етап 6 (WP2, раунд 1): «Вартість запасу» — з рушія оцінки (ковзна середня пулів), а не «залишок × остання ціна
+  // надходження». Демо-історія переносить дати й змінює відкриття після вставки, тому наприкінці seedDemoFinance (WP11)
+  // викликає rebuildValuationForDemo — тут те саме. Очікування — з незалежного читання inventory_cost_state + C0;
+  // точні демо-числа фінансів закріплює WP11 (раунд 6) разом із новими демо-даними.
+  it("analytics: the owner's inventory value comes from the costing engine (moving average); staff gets no cost", async () => {
+    await env.handle.db.transaction((tx) => rebuildValuationForDemo(tx, { mode: "demo" }));
+    const warehouse = await getDefaultWarehouse(env.handle.db);
+    const pools = await env.handle.db
+      .select({ s: inventoryCostState, onHand: inventoryBalances.onHand, variantId: stockItems.variantId })
+      .from(inventoryCostState)
+      .innerJoin(stockItems, eq(stockItems.id, inventoryCostState.stockItemId))
+      .innerJoin(inventoryBalances, and(eq(inventoryBalances.stockItemId, inventoryCostState.stockItemId), eq(inventoryBalances.warehouseId, warehouse.id)))
+      .where(eq(inventoryCostState.warehouseId, warehouse.id));
+    // C0 після перебудови: on_hand = відомі + невідомі − дефіцит для КОЖНОЇ позиції.
+    for (const p of pools) expect(p.s.knownQty + p.s.unknownQty - p.s.deficitQty, p.s.stockItemId).toBe(p.onHand);
     const owner = await loadWarehouseAnalytics(env.ctx(OWNER));
-    // Собівартість одиниці — з останнього надходження історії: ціна позиції + додаткові витрати партії на одиницю
-    // (1200.00 / 95 = 12.63; 600.00 / 23 = 26.09). Решта демо-товарів — без собівартості.
+    const poolByVariant = new Map(pools.filter((p) => p.variantId).map((p) => [p.variantId!, p.s]));
+    const active = owner.variants.filter((v) => v.active);
+    let total = 0n;
+    let valued = 0;
+    let units = 0;
+    for (const v of active) {
+      const p = poolByVariant.get(v.variantId);
+      if (!p || p.knownQty === 0) {
+        expect(v.cost, v.sku!).toBeNull();
+        continue;
+      }
+      total += toMinor(p.knownValue);
+      valued += 1;
+      units += p.knownQty;
+      expect(v.cost, v.sku!).toEqual({ unitCost: centsAverage(toMinor(p.knownValue), p.knownQty), currency: "UAH" });
+    }
+    // Позиції лише з однією партією історії — собівартість одиниці = планова собівартість тієї партії (ціна + додаткові
+    // витрати / Σ billed): 1200.00 / 95 = 12.63 і 600.00 / 23 = 26.09.
     const costs = Object.fromEntries(owner.variants.filter((v) => v.cost).map((v) => [v.sku, v.cost]));
-    expect(costs).toEqual({
-      "OT-GR-BLK": { unitCost: "107.63", currency: "UAH" },
-      "OT-GR-GRY": { unitCost: "107.63", currency: "UAH" },
-      "OT-PH-BLK": { unitCost: "222.63", currency: "UAH" },
-      "OT-FK-X": { unitCost: "326.09", currency: "UAH" },
-      "OT-TR-1025": { unitCost: "266.09", currency: "UAH" },
-    });
-    const expected = expectedBalances();
-    const unitsValued = [...HISTORY_SKUS].reduce((s, sku) => s + expected[sku]![0], 0);
-    expect(owner.inventoryValue).toEqual({
-      totals: [{ currency: "UAH", amount: "28931.21" }],
-      itemsValued: HISTORY_SKUS.size,
-      unitsValued,
-      itemsWithoutCost: 4,
-      unitsWithoutCost: 61,
-    });
-    expect(unitsValued).toBe(165);
-    expect(owner.recommendations.find((v) => v.sku === "OT-FK-X")?.cost).toEqual({ unitCost: "326.09", currency: "UAH" });
+    expect(costs["OT-GR-BLK"]).toEqual({ unitCost: "107.63", currency: "UAH" });
+    expect(costs["OT-TR-1025"]).toEqual({ unitCost: "266.09", currency: "UAH" });
+    for (const sku of HISTORY_SKUS) expect(costs[sku], sku).toBeDefined();
+    expect(owner.inventoryValue!.totals).toEqual([{ currency: "UAH", amount: fromMinor(total) }]);
+    expect(owner.inventoryValue).toMatchObject({ itemsValued: valued, unitsValued: units, negativeUnits: 0 });
+    expect(owner.inventoryValue!.itemsWithoutCost).toBeGreaterThan(0);
     const staff = await loadWarehouseAnalytics(env.ctx(STAFF));
     expect(staff.inventoryValue).toBeNull();
     expect(staff.variants.every((v) => v.cost === null)).toBe(true);
-    expect(JSON.stringify(staff)).not.toMatch(/107\.63|222\.63|326\.09|266\.09|28931/);
-    // Сторінка аналітики: KPI «Вартість запасу» власника (той самий текст перевіряє E2E), у працівника KPI немає.
+    expect(JSON.stringify(staff)).not.toContain(fromMinor(total));
+    // Сторінка аналітики: KPI «Вартість запасу» власника, у працівника KPI немає.
     const analyticsPage = await import("~/pages/warehouse-analytics");
     const route = { path: "warehouse/analytics", loader: analyticsPage.loader, Component: analyticsPage.default };
     const text = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
     const ownerHtml = text(await renderPage(route as never, "/demo/warehouse/analytics", OWNER));
     expect(ownerHtml).toContain("Вартість запасу");
-    expect(ownerHtml).toContain("28 931,21 грн");
-    expect(ownerHtml).toContain("Без собівартості: 4 позиції (61 шт.)");
+    expect(ownerHtml).toContain(formatMoney(fromMinor(total), "UAH", "uk").replace(/\u00a0/g, " "));
     setContext(STAFF);
     const staffHtml = text(await renderPage(route as never, "/demo/warehouse/analytics", STAFF));
     expect(staffHtml).not.toContain("Вартість запасу");
-    expect(staffHtml).not.toContain("28 931,21");
     setContext(OWNER);
   });
 });

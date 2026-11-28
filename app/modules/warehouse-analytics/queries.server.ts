@@ -9,17 +9,19 @@
  * - залишки — inventory_balances через listStock (лише активні/чернетки товари; прогноз — лише для ВІДКРИТИХ позицій:
  *   до ініціалізації обліку баланс не відображає реальність);
  * - виробництво — кошик «У виробництві» з балансу + «заплановано» з незапущених партій (openProductionByVariant);
- * - собівартість (лише includeCosts = finance.view) — unit_cost останнього руху receipt_production позиції
- *   (планова собівартість одиниці з урахуванням додаткових витрат партії, як її записує модуль виробництва).
+ * - собівартість (лише includeCosts = finance.view + роль власника) — з рушія оцінки етапу 6 (modules/costing):
+ *   поточна ковзна середня пулу позиції (known_value / known_qty); «Вартість запасу» = Σ known_value пулів (одна валюта
+ *   оцінки), одиниці без собівартості (невідомі шари) й від'ємний залишок — окремо, не нулем (docs/stage6-design.md §6.7).
  * Жодних даних покупців: лише кількості, номери й назви товарів.
  */
-import { and, desc, eq, gte, inArray, isNotNull, isNull, lte, ne, sql, type SQL } from "drizzle-orm";
+import { and, eq, gte, inArray, isNotNull, isNull, lte, ne, sql, type SQL } from "drizzle-orm";
 import type { DbOrTx } from "~/db/client.server";
-import { inventoryMovements, orderLineItems, orders, productVariants, products } from "~/db/schema";
-import { can, requirePermission } from "~/domain/permissions";
+import { orderLineItems, orders, productVariants, products } from "~/db/schema";
+import { requirePermission } from "~/domain/permissions";
+import { loadPoolValues, type PoolValue } from "~/modules/costing/pool-read.server";
+import { canFinance } from "~/modules/finance/core/access.server";
 import { fromMinor, toMinor } from "~/lib/money";
 import { effectiveLineQuantitySql } from "~/modules/inventory/reservations.server";
-import { getDefaultWarehouse } from "~/modules/inventory/warehouse.server";
 import { openProductionByVariant } from "~/modules/production/queries.server";
 import { getSetting } from "~/modules/settings/settings.server";
 import { displayVariantTitle, type StockTrackingState } from "~/modules/warehouse/constants";
@@ -201,65 +203,52 @@ export async function listAllStock(db: DbOrTx, filters: AnalyticsFilters = {}): 
   return out;
 }
 
-export interface UnitCost {
-  unitCost: string;
-  currency: string;
-  /** Коли записано надходження з цією собівартістю. */
-  at: Date;
-}
-
-/**
- * Собівартість одиниці з ОСТАННЬОГО надходження з виробництва (рух receipt_production з unit_cost) для кожної позиції.
- * Лише для власника (викликач передає can(actor, "finance.view")).
- */
-export async function loadLatestProductionUnitCosts(db: DbOrTx, warehouseId?: string): Promise<Map<string, UnitCost>> {
-  const wid = warehouseId ?? (await getDefaultWarehouse(db)).id;
-  const rows = await db
-    .selectDistinctOn([inventoryMovements.stockItemId], {
-      stockItemId: inventoryMovements.stockItemId,
-      unitCost: inventoryMovements.unitCost,
-      currency: inventoryMovements.costCurrency,
-      at: inventoryMovements.createdAt,
-    })
-    .from(inventoryMovements)
-    .where(
-      and(
-        eq(inventoryMovements.warehouseId, wid),
-        eq(inventoryMovements.type, "receipt_production"),
-        isNotNull(inventoryMovements.unitCost),
-        isNotNull(inventoryMovements.costCurrency),
-      ),
-    )
-    .orderBy(inventoryMovements.stockItemId, desc(inventoryMovements.createdAt), desc(inventoryMovements.id));
-  const out = new Map<string, UnitCost>();
-  for (const r of rows) if (r.unitCost && r.currency) out.set(r.stockItemId, { unitCost: r.unitCost, currency: r.currency, at: r.at });
-  return out;
-}
-
 export interface InventoryValue {
-  /** Вартість фактичного залишку (on_hand > 0) за собівартістю, окремо за валютами. */
+  /** Вартість відомих одиниць пулів (рушій оцінки, валюта оцінки); без відомих одиниць — порожньо («—», не 0). */
   totals: Array<{ currency: string; amount: string }>;
   itemsValued: number;
   unitsValued: number;
-  /** Позиції з залишком, для яких немає собівартості (ще не було надходження з виробництва з ціною). */
+  /** Позиції / одиниці без собівартості (невідомі шари рушія; позиції без стану оцінки — увесь залишок). */
   itemsWithoutCost: number;
   unitsWithoutCost: number;
+  /** Від'ємний залишок (дефіцит рушія), одиниць — у вартість не входить. */
+  negativeUnits: number;
 }
 
-/** Вартість запасу (чиста функція): Σ on_hand × собівартість за валютами. */
-export function inventoryValueOf(rows: ReadonlyArray<{ onHand: number; cost: { unitCost: string; currency: string } | null }>): InventoryValue {
+/** Стан пулу позиції (з рушія оцінки) для вартості запасу. */
+export interface PoolForValue {
+  knownQty: number;
+  knownValue: string;
+  unknownQty: number;
+  deficitQty: number;
+  currency: string;
+}
+
+/**
+ * Вартість запасу (чиста функція) з пулів рушія оцінки: Σ known_value за валютами; невідомі одиниці й від'ємний
+ * залишок — окремо. Позиція з залишком без стану оцінки — увесь залишок «без собівартості».
+ */
+export function inventoryValueOf(rows: ReadonlyArray<{ onHand: number; pool: PoolForValue | null }>): InventoryValue {
   const byCurrency = new Map<string, bigint>();
-  const v: InventoryValue = { totals: [], itemsValued: 0, unitsValued: 0, itemsWithoutCost: 0, unitsWithoutCost: 0 };
+  const v: InventoryValue = { totals: [], itemsValued: 0, unitsValued: 0, itemsWithoutCost: 0, unitsWithoutCost: 0, negativeUnits: 0 };
   for (const r of rows) {
-    if (r.onHand <= 0) continue;
-    if (!r.cost) {
-      v.itemsWithoutCost += 1;
-      v.unitsWithoutCost += r.onHand;
+    if (!r.pool) {
+      if (r.onHand > 0) {
+        v.itemsWithoutCost += 1;
+        v.unitsWithoutCost += r.onHand;
+      } else if (r.onHand < 0) v.negativeUnits += -r.onHand;
       continue;
     }
-    byCurrency.set(r.cost.currency, (byCurrency.get(r.cost.currency) ?? 0n) + toMinor(r.cost.unitCost) * BigInt(r.onHand));
-    v.itemsValued += 1;
-    v.unitsValued += r.onHand;
+    if (r.pool.knownQty > 0) {
+      byCurrency.set(r.pool.currency, (byCurrency.get(r.pool.currency) ?? 0n) + toMinor(r.pool.knownValue));
+      v.itemsValued += 1;
+      v.unitsValued += r.pool.knownQty;
+    }
+    if (r.pool.unknownQty > 0) {
+      v.itemsWithoutCost += 1;
+      v.unitsWithoutCost += r.pool.unknownQty;
+    }
+    v.negativeUnits += r.pool.deficitQty;
   }
   v.totals = [...byCurrency]
     .sort(([a], [b]) => a.localeCompare(b))
@@ -313,8 +302,10 @@ export interface VariantAnalytics {
   risk: RiskLevel;
   /** null — без прогнозу (облік не відкрито / товар неактивний). */
   recommendation: Recommendation | null;
-  /** Лише з includeCosts (finance.view); інакше null. */
+  /** Лише з includeCosts (finance.view): поточна ковзна середня пулу (рушій оцінки, до копійки); інакше null. */
   cost: { unitCost: string; currency: string } | null;
+  /** Лише з includeCosts: стан пулу рушія оцінки (вартість запасу); інакше null. */
+  pool: PoolForValue | null;
 }
 
 export interface AnalyticsKpi {
@@ -426,7 +417,7 @@ export async function computeWarehouseAnalytics(db: DbOrTx, opts: ComputeAnalyti
     loadVelocityUnits(db, opts.today, filters),
     loadPeriodSales(db, opts.period, filters),
     openProductionByVariant(db),
-    includeCosts ? loadLatestProductionUnitCosts(db) : Promise.resolve(new Map<string, UnitCost>()),
+    includeCosts ? loadPoolValues(db) : Promise.resolve(new Map<string, PoolValue>()),
   ]);
   const productionByVariant = new Map(production.map((p) => [p.variantId, p]));
   const stockByVariant = new Map(stock.map((s) => [s.variantId, s]));
@@ -460,7 +451,8 @@ export async function computeWarehouseAnalytics(db: DbOrTx, opts: ComputeAnalyti
     const planned = prod?.planned ?? 0;
     const canForecast = Boolean(s && s.tracking === "opened");
     const f = forecastItem({ ...vu, available: balance.available, inProduction: balance.inProduction, planned }, settings, opts.today);
-    const cost = includeCosts && s?.stockItemId ? (costs.get(s.stockItemId) ?? null) : null;
+    const pool = includeCosts && s?.stockItemId ? (costs.get(s.stockItemId) ?? null) : null;
+    const cost = pool && pool.averageUnit !== null ? { unitCost: pool.averageUnit, currency: pool.currency } : null;
     variants.push({
       variantId,
       stockItemId: s?.stockItemId ?? null,
@@ -484,7 +476,8 @@ export async function computeWarehouseAnalytics(db: DbOrTx, opts: ComputeAnalyti
       stockOutDate: canForecast ? f.stockOutDate : null,
       risk: canForecast ? f.risk : "none",
       recommendation: canForecast ? f.recommendation : null,
-      cost: cost ? { unitCost: cost.unitCost, currency: cost.currency } : null,
+      cost,
+      pool: pool ? { knownQty: pool.knownQty, knownValue: pool.knownValue, unknownQty: pool.unknownQty, deficitQty: pool.deficitQty, currency: pool.currency } : null,
     });
   };
   for (const s of stock) build(s.variantId, s, null);
@@ -629,7 +622,7 @@ export async function loadWarehouseAnalytics(
     today,
     period: opts.period ?? resolvePeriod({ today }),
     filters: opts.filters,
-    includeCosts: can(ctx.actor, "finance.view"),
+    includeCosts: canFinance(ctx.actor, "view"),
     topLimit: opts.topLimit,
   });
 }

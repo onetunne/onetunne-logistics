@@ -23,10 +23,28 @@
  *
  * Неоднозначність, яку не усуває жоден підрахунок: повернення без замовлення може стосуватися будь-якого відшкодування
  * (або ручного поповнення в Shopify). Тому склад має вказувати замовлення в поверненні, коли воно відоме.
+ *
+ * Етап 6 (docs/stage6-design.md §14.3 п. 6): «повернено на склад Shopify» для звірки береться з рядків повернень коштів
+ * (order_refund_lines: restock_type = RETURN і restocked = true — лише тоді Shopify поповнює «доступно»), а не з різниці
+ * «списано − поточна кількість»: повернення коштів без повернення на склад (NO_RESTOCK) теж зменшує currentQuantity, але
+ * на склад Shopify нічого не повертає й інакше «пояснювало» б справжні розбіжності. Рядки беруться, лише коли факти
+ * повернень замовлення повні (order_shopify_finance.snapshot.status.refunds = complete) і не старші за замовлення
+ * (shopify_updated_at фінансів ≥ shopify_updated_at замовлення); якщо рядків повернень немає (або факти ще не
+ * синхронізовано) — як раніше. Підказки форми повернення (returnOrderSuggestions) рахують за кількістю, як раніше:
+ * посилка може прийти й після відшкодування без повернення на склад.
  */
 import { and, eq, gt, inArray, isNotNull, or, sql, type AnyColumn } from "drizzle-orm";
 import type { DbOrTx } from "~/db/client.server";
-import { inventoryMovements, orderLineItems, orders, stockItems, stockReservations } from "~/db/schema";
+import {
+  inventoryMovements,
+  orderLineItems,
+  orderRefundLines,
+  orderRefunds,
+  orderShopifyFinance,
+  orders,
+  stockItems,
+  stockReservations,
+} from "~/db/schema";
 import { SHIPPED_STATUSES } from "~/domain/order-status";
 import { SHOPIFY_RESTOCK_REASONS } from "~/modules/warehouse/constants";
 
@@ -34,7 +52,10 @@ import { SHOPIFY_RESTOCK_REASONS } from "~/modules/warehouse/constants";
 export const RETURN_PENDING_WINDOW_MS = 60 * 24 * 60 * 60 * 1000;
 
 export interface OrderReturns {
-  /** Списані (передані) одиниці позиції, яких більше немає в поточній кількості (повернено/відшкодовано в Shopify). */
+  /**
+   * Списані (передані) одиниці позиції, повернені на склад Shopify: з рядків повернень (RETURN + restocked), коли факти
+   * повернень є; інакше (і для підказок форми) — яких більше немає в поточній кількості (повернено/відшкодовано).
+   */
   returned: number;
   /** Оприбутковані складом придатні одиниці повернень цього замовлення (on_hand). */
   received: number;
@@ -119,13 +140,35 @@ export function parseReturnsSnapshot(v: unknown): ReturnsSnapshot {
   return { net, unlinked };
 }
 
+/**
+ * Основа «повернено в Shopify»: restocked — звірка (рядки повернень RETURN + restocked, коли факти є; інакше кількість);
+ * quantity — підказки форми повернення (поточна кількість менша за списану: повернено або відшкодовано).
+ */
+export type ReturnsBasis = "restocked" | "quantity";
+
+/** Етап 6: факти повернень Shopify замовлення придатні (є рядки; повні; не старші за замовлення). */
+function refundFactsUsable(orderId: AnyColumn) {
+  return sql`(exists (select 1 from ${orderRefunds} rr join ${orderRefundLines} rl on rl.refund_id = rr.id where rr.order_id = ${orderId})
+    and exists (select 1 from ${orderShopifyFinance} sf where sf.order_id = ${orderId}
+      and sf.snapshot #>> '{status,refunds}' = 'complete'
+      and (${orders.shopifyUpdatedAt} is null or (sf.shopify_updated_at is not null and sf.shopify_updated_at >= ${orders.shopifyUpdatedAt}))))`;
+}
+
+/** Етап 6: одиниці позиції, які Shopify повернув на склад (рядки повернень RETURN + restocked). */
+function restockedQty(orderId: AnyColumn, lineGid: AnyColumn) {
+  return sql`coalesce((select sum(rl.quantity) from ${orderRefundLines} rl join ${orderRefunds} rr on rr.id = rl.refund_id
+    where rr.order_id = ${orderId} and rl.shopify_line_item_id = ${lineGid} and rl.restock_type = 'RETURN' and rl.restocked is true), 0)`;
+}
+
 /** Стан повернень позицій складу (запити; викликати під блокуванням балансу для узгодженості з рухами). */
 export async function loadReturnsState(
   db: DbOrTx,
   warehouseId: string,
   stockItemIds: readonly string[],
   now: Date,
+  opts: { basis?: ReturnsBasis } = {},
 ): Promise<Map<string, ReturnsState>> {
+  const restockBasis = (opts.basis ?? "restocked") === "restocked";
   const out = new Map<string, ReturnsState>();
   if (stockItemIds.length === 0) return out;
   const ids = [...new Set(stockItemIds)];
@@ -154,9 +197,16 @@ export async function loadReturnsState(
       sql`${inventoryMovements.createdAt} >= ${since}`,
     )})`;
 
-  // Списані за резервом одиниці, яких більше немає в позиції (повернено/відшкодовано в Shopify).
+  // Списані за резервом одиниці, яких більше немає в позиції (повернено/відшкодовано в Shopify); для звірки — повернені
+  // на склад Shopify за рядками повернень, коли вони є (етап 6).
   const lineQty = sql`greatest(coalesce(${orderLineItems.currentQuantity}, ${orderLineItems.quantity}, ${stockReservations.consumedQty}), 0)`;
-  const reservedQty = sql<number>`coalesce(sum(greatest(${stockReservations.consumedQty} - ${lineQty}, 0)), 0)`;
+  const byQuantity = sql`greatest(${stockReservations.consumedQty} - ${lineQty}, 0)`;
+  const reservedReturned = restockBasis
+    ? sql`case when ${refundFactsUsable(stockReservations.orderId)}
+        then least(${stockReservations.consumedQty}, ${restockedQty(stockReservations.orderId, orderLineItems.shopifyLineItemId)})
+        else ${byQuantity} end`
+    : byQuantity;
+  const reservedQty = sql<number>`coalesce(sum(${reservedReturned}), 0)`;
   const reserved = await db
     .select({ stockItemId: stockReservations.stockItemId, orderId: stockReservations.orderId, qty: reservedQty.mapWith(Number) })
     .from(stockReservations)
@@ -174,8 +224,15 @@ export async function loadReturnsState(
     .having(sql`${reservedQty} > 0`);
   for (const r of reserved) order(get(r.stockItemId), r.orderId).returned += r.qty;
 
-  // Історичні позиції (уперше побачені вже переданими, без рядка резерву): повернено = кількість − поточна кількість.
-  const historicalQty = sql<number>`coalesce(sum(greatest(${orderLineItems.quantity} - coalesce(${orderLineItems.currentQuantity}, ${orderLineItems.quantity}), 0)), 0)`;
+  // Історичні позиції (уперше побачені вже переданими, без рядка резерву): повернено = кількість − поточна кількість
+  // (для звірки — повернені на склад Shopify за рядками повернень, коли вони є).
+  const historicalByQuantity = sql`greatest(${orderLineItems.quantity} - coalesce(${orderLineItems.currentQuantity}, ${orderLineItems.quantity}), 0)`;
+  const historicalReturned = restockBasis
+    ? sql`case when ${refundFactsUsable(orderLineItems.orderId)}
+        then least(${orderLineItems.quantity}, ${restockedQty(orderLineItems.orderId, orderLineItems.shopifyLineItemId)})
+        else ${historicalByQuantity} end`
+    : historicalByQuantity;
+  const historicalQty = sql<number>`coalesce(sum(${historicalReturned}), 0)`;
   const historical = await db
     .select({ stockItemId: stockItems.id, orderId: orderLineItems.orderId, qty: historicalQty.mapWith(Number) })
     .from(orderLineItems)
@@ -258,7 +315,7 @@ export async function returnOrderSuggestions(
   now: Date = new Date(),
   limit: number = RETURN_SUGGESTIONS_LIMIT,
 ): Promise<ReturnOrderSuggestion[]> {
-  const state = (await loadReturnsState(db, warehouseId, [stockItemId], now)).get(stockItemId);
+  const state = (await loadReturnsState(db, warehouseId, [stockItemId], now, { basis: "quantity" })).get(stockItemId);
   if (!state) return [];
   const candidates = [...state.orders].filter(([, o]) => o.returned - o.received > 0);
   if (candidates.length === 0) return [];

@@ -237,6 +237,24 @@ export function divideMinorHalfUp(numerator: bigint, denominator: bigint): bigin
   return (numerator * 2n + denominator) / (denominator * 2n);
 }
 
+/**
+ * Розподіл суми (мінорні одиниці, ≥ 0) за вагами методом найбільших остач (нічия — менший індекс); Σ = total точно.
+ * Те саме правило, що allocateMinor (app/lib/decimal.ts), — локально, бо decimal.ts реекспортує divideMinorHalfUp звідси.
+ */
+function allocateExtra(total: bigint, weights: readonly bigint[]): bigint[] {
+  const sum = weights.reduce((a, b) => a + b, 0n);
+  if (sum <= 0n) return weights.map(() => 0n);
+  const parts = weights.map((w) => (total * w) / sum);
+  const order = weights.map((w, i) => ({ i, r: (total * w) % sum })).sort((a, b) => (a.r === b.r ? a.i - b.i : a.r > b.r ? -1 : 1));
+  let left = total - parts.reduce((a, b) => a + b, 0n);
+  for (const { i } of order) {
+    if (left === 0n) break;
+    parts[i] = parts[i]! + 1n;
+    left -= 1n;
+  }
+  return parts;
+}
+
 export interface CostLineInput extends LineQuantities {
   id: string;
   unitCost: string | null;
@@ -255,6 +273,12 @@ export interface LineCostSummary {
   landedUnitCost: string | null;
   /** Вартість виготовлених одиниць позиції / якісні; null — якісних ще немає або ціни немає. */
   costPerGoodUnit: string | null;
+  /**
+   * Етап 6 (§6.7): вартість виготовлених одиниць позиції = ціна × produced + частка додаткових витрат виготовленого
+   * (allocateMinor з вагами produced) — ціль переоцінки рядка; Σ за позиціями = producedTotal точно (коли ціни повні).
+   * null — ціни позиції немає.
+   */
+  producedValue: string | null;
 }
 
 export interface CostSummary {
@@ -312,7 +336,16 @@ export function batchCostSummary(
     totalProduced += produced;
     const extraShareMinor = extraFor(billed);
     if (!known(l)) {
-      out.push({ id: l.id, billedQty: billed, unitCost: null, total: null, extraShare: extraCost ? fromMinor(extraShareMinor) : null, landedUnitCost: null, costPerGoodUnit: null });
+      out.push({
+        id: l.id,
+        billedQty: billed,
+        unitCost: null,
+        total: null,
+        extraShare: extraCost ? fromMinor(extraShareMinor) : null,
+        landedUnitCost: null,
+        costPerGoodUnit: null,
+        producedValue: null,
+      });
       continue;
     }
     anyLineCost = true;
@@ -328,6 +361,8 @@ export function batchCostSummary(
       extraShare: extraCost ? fromMinor(extraShareMinor) : null,
       landedUnitCost: landedUnitCost(l.unitCost, extraCost, totalBilled),
       costPerGoodUnit: l.received > 0 ? fromMinor(divideMinorHalfUp(unitMinor * BigInt(produced) + extraFor(produced), BigInt(l.received))) : null,
+      // Заповнюється нижче (частка додаткових витрат виготовленого — allocateMinor за всіма позиціями).
+      producedValue: fromMinor(unitMinor * BigInt(produced)),
     });
   }
   const linesWithoutCost = lines.filter((l) => !known(l)).length;
@@ -335,7 +370,15 @@ export function batchCostSummary(
   const hasAny = anyLineCost || extraCost !== null;
   const totalMinor = linesMinor + extraMinor;
   // Отримана/закрита партія: Σ produced = Σ billed → уся сума додаткових витрат (без похибки округлення).
-  const producedMinor = producedLinesMinor + (totalProduced === totalBilled ? extraMinor : extraFor(totalProduced));
+  const producedExtraMinor = totalProduced === totalBilled ? extraMinor : extraFor(totalProduced);
+  const producedMinor = producedLinesMinor + producedExtraMinor;
+  // Етап 6 (§6.7): частки додаткових витрат виготовленого за позиціями (вага — produced), Σ = producedExtraMinor точно.
+  if (totalProduced > 0 && producedExtraMinor > 0n) {
+    const shares = allocateExtra(producedExtraMinor, lines.map((l) => BigInt(lineProduced(l))));
+    out.forEach((o, i) => {
+      if (o.producedValue !== null) o.producedValue = fromMinor(toMinor(o.producedValue) + shares[i]!);
+    });
+  }
   return {
     currency: hasAny ? currency : null,
     complete,

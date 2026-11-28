@@ -26,6 +26,7 @@ import {
   kitTemplateLines,
   packagingMaterials,
   stockAlerts,
+  stockItemCosts,
   stockItems,
   type MaterialUnit,
   type PackagingMaterialKind,
@@ -33,6 +34,7 @@ import {
 import { can, ForbiddenError, requirePermission } from "~/domain/permissions";
 import { ConflictError, DomainError, NotFoundError } from "~/lib/errors";
 import { writeAudit } from "~/modules/audit/audit.server";
+import { writeFinanceChange } from "~/modules/finance/core/change-log.server";
 import { stockLevelStatus, type StockLevelStatus } from "~/modules/inventory/alerts";
 import { inventoryKeys } from "~/modules/inventory/keys";
 import {
@@ -398,6 +400,9 @@ export async function createMaterial(ctx: ServiceContext, input: MaterialInput):
         .returning({ id: packagingMaterials.id });
       const stockItemId = await ensureStockItemForMaterial(tx, row!.id);
       if (parsed.lowStockThreshold !== null) await setLowStockThreshold(tx, stockItemId, parsed.lowStockThreshold);
+      if (withCosts && parsed.unitCost != null) {
+        await recordCatalogueCost(ctx, tx, row!.id, stockItemId, { unitCost: null, currency: null }, { unitCost: parsed.unitCost, currency: parsed.costCurrency ?? null });
+      }
       await writeAudit(tx, ctx.actor, "packaging.material.created", { type: "packaging_material", id: row!.id }, {
         code: parsed.code,
         kind: parsed.kind,
@@ -425,6 +430,11 @@ export async function updateMaterial(
   const withCosts = can(ctx.actor, "finance.view");
   try {
     await ctx.db.transaction(async (tx) => {
+      const [previous] = await tx
+        .select({ unitCost: packagingMaterials.unitCost, currency: packagingMaterials.costCurrency })
+        .from(packagingMaterials)
+        .where(eq(packagingMaterials.id, id))
+        .for("no key update");
       const updated = await tx
         .update(packagingMaterials)
         .set({ ...materialValues(parsed, withCosts), updatedAt: touchedAt() })
@@ -436,6 +446,12 @@ export async function updateMaterial(
         throw new ConflictError();
       }
       const stockItemId = await ensureStockItemForMaterial(tx, id);
+      if (withCosts && parsed.unitCost !== undefined && previous) {
+        const next = { unitCost: parsed.unitCost, currency: parsed.unitCost !== null ? (parsed.costCurrency ?? null) : null };
+        if (next.unitCost !== previous.unitCost || next.currency !== previous.currency) {
+          await recordCatalogueCost(ctx, tx, id, stockItemId, { unitCost: previous.unitCost, currency: previous.currency }, next);
+        }
+      }
       await lockMaterialBalances(tx, [id]);
       const [item] = await tx.select({ t: stockItems.lowStockThreshold }).from(stockItems).where(eq(stockItems.id, stockItemId));
       if ((item?.t ?? null) !== parsed.lowStockThreshold) await setLowStockThreshold(tx, stockItemId, parsed.lowStockThreshold);
@@ -452,6 +468,39 @@ export async function updateMaterial(
     if (isUniqueViolation(e)) throw new DomainError("packaging.error.codeTaken", 409, { code: parsed.code });
     throw e;
   }
+}
+
+/**
+ * Етап 6 (§6.6, §6.7): зміна каталожної ціни матеріалу — рядок stock_item_costs (material_catalogue, діє з сьогодні за
+ * Києвом; лише вставка — оцінки минулих рухів не змінюються) + історія змін (до → після). Порожня ціна — лише запис
+ * історії (рядка без ціни немає: «немає даних», не 0). Викликається лише з finance.view (поле ціни власника).
+ */
+async function recordCatalogueCost(
+  ctx: ServiceContext,
+  tx: Tx,
+  materialId: string,
+  stockItemId: string,
+  before: { unitCost: string | null; currency: string | null },
+  after: { unitCost: string | null; currency: string | null },
+): Promise<void> {
+  if (after.unitCost !== null && after.currency) {
+    await tx.insert(stockItemCosts).values({
+      stockItemId,
+      unitCost: after.unitCost,
+      currency: after.currency,
+      effectiveFrom: businessDate(ctx.now()),
+      source: "material_catalogue",
+      confirmed: true,
+      createdBy: ctx.actor.id,
+    });
+  }
+  await writeFinanceChange(tx, ctx.actor, {
+    entityType: "material_cost",
+    entityId: materialId,
+    action: before.unitCost === null ? "create" : "update",
+    before: before.unitCost === null ? null : { materialId, unitCost: before.unitCost, currency: before.currency },
+    after: { materialId, unitCost: after.unitCost, currency: after.currency },
+  });
 }
 
 /** Масово активувати/деактивувати (warehouse.adjust). Неактивний матеріал не підбирається й не входить у комплекти. */

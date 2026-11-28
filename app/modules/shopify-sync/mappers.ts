@@ -157,6 +157,11 @@ export interface MappedOrder {
     currentQuantity: number;
     /** Коли позицію створено в Shopify (LineItem.createdAt); null — немає в даних (старі відповіді/тести). */
     shopifyCreatedAt: Date | null;
+    /**
+     * Етап 6: чи потребує позиція доставки (LineItem.requiresShipping, Boolean!, уже отримуване) — складник «Доставка»
+     * фінансів (§2.6). null — немає в даних (старі відповіді/тести; фінанси вважають «потребує»).
+     */
+    requiresShipping: boolean | null;
     unitPrice: string;
     /**
      * Ціна одиниці після всіх знижок (LineItem.discountedUnitPriceAfterAllDiscountsSet.shopMoney) — митна вартість
@@ -252,6 +257,7 @@ export function mapOrder(o: GqlOrder): MappedOrder {
       // Старі відповіді/тести без currentQuantity → quantity.
       currentQuantity: typeof li.currentQuantity === "number" ? Math.max(0, li.currentQuantity) : li.quantity,
       shopifyCreatedAt: validDate(li.createdAt),
+      requiresShipping: typeof li.requiresShipping === "boolean" ? li.requiresShipping : null,
       unitPrice: normalizeAmount(li.originalUnitPriceSet.shopMoney.amount),
       discountedUnitPrice: discountedUnitPriceOf(li),
       currency: li.originalUnitPriceSet.shopMoney.currencyCode,
@@ -268,6 +274,31 @@ export function initialStatus(order: MappedOrder, mode: "live" | "import"): Orde
   if (order.cancelledAt) return "cancelled";
   if (mode === "import" && order.fulfillmentStatus === "fulfilled") return "handed_to_carrier";
   return "paid";
+}
+
+/**
+ * Числовий id із payload webhook → GID. Число JSON понад 2^53 після JSON.parse уже неточне — не приймається (null), як і
+ * нецифровий рядок.
+ */
+function gidFromNumericId(id: unknown, type: string): string | null {
+  if (typeof id === "number" && Number.isSafeInteger(id) && id > 0) return `gid://shopify/${type}/${id}`;
+  if (typeof id === "string" && /^\d{1,20}$/.test(id)) return `gid://shopify/${type}/${id}`;
+  return null;
+}
+
+/**
+ * Етап 6: webhook refunds/create — замовлення з `order_id` (`admin_graphql_api_id` корисного навантаження — id САМОГО
+ * повернення, не замовлення; docs/stage6-design.md §16.4).
+ */
+export function orderGidFromRefundPayload(payload: Record<string, unknown>): string | null {
+  return gidFromNumericId(payload.order_id, "Order");
+}
+
+/** Етап 6: webhook orders/edited — корінь корисного навантаження — правка (`order_edit`), id замовлення — `order_edit.order_id`. */
+export function orderGidFromOrderEditPayload(payload: Record<string, unknown>): string | null {
+  const edit = payload.order_edit;
+  if (!edit || typeof edit !== "object") return null;
+  return gidFromNumericId((edit as Record<string, unknown>).order_id, "Order");
 }
 
 /** GID ресурсу з REST-подібного payload webhook. */

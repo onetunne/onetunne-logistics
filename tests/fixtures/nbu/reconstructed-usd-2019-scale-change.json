@@ -1,0 +1,8 @@
+[
+{ 
+"exchangedate":"01.06.2019","r030":840,"cc":"USD","txt":"Долар США","enname":"US Dollar","rate":2687.2573,"units":100,"rate_per_unit":26.872573,"group":"1","calcdate":" ","special":null
+ }
+,{ 
+"exchangedate":"28.12.2019","r030":840,"cc":"USD","txt":"Долар США","enname":"US Dollar","rate":23.6862,"units":1,"rate_per_unit":23.6862,"group":"1","calcdate":"27.12.2019","special":null
+ }
+]

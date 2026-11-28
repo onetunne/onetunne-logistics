@@ -26,24 +26,34 @@ describe("docs/telegram-warehouse-readiness.md", () => {
     for (const name of WAREHOUSE_COMMAND_NAMES) expect(doc, name).toMatch(new RegExp(`^\\| \`${name}\` \\|`, "m"));
   });
 
-  it("the CSV table lists every export dataset; the stage-6 COGS rule is documented as planned", () => {
+  it("the CSV table lists every export dataset; the stage-6 COGS rule is documented as implemented (WP2)", () => {
     for (const dataset of EXPORT_DATASETS) expect(doc, dataset).toMatch(new RegExp(`^\\| \`${dataset}\``, "m"));
-    expect(doc).toMatch(/COGS\) — \*\*заплановано, не реалізовано\*\*/);
+    expect(doc).toMatch(/COGS\) у етапі 6 — \*\*реалізовано\*\*/);
+    expect(doc).not.toMatch(/заплановано, не реалізовано/);
     expect(doc).toMatch(/`consume_sale` і витрати матеріалів `material_consume` \*\*не мають\*\* `unit_cost`/);
+    // Посилання на код рушія існує.
+    expect(fs.existsSync(path.resolve("app/modules/costing/engine.ts"))).toBe(true);
   });
 
-  it("the COGS rule expenses a defective unit exactly once (C-R6-3): write-off adds no cost, repair is covered", () => {
-    const cogs = doc.slice(doc.indexOf("#### Як етап 6 (фінанси)"), doc.indexOf("### 1.3"));
+  it("the COGS rule expenses a defective unit exactly once (C-R6-3) and states the stage-6 refinements", () => {
+    const cogs = doc.slice(doc.indexOf("#### Собівартість проданого (COGS) у етапі 6"), doc.indexOf("### 1.3"));
     expect(cogs).toMatch(/кожна одиниця витрачається рівно один раз/);
     // Брак із виробництва вже в середній якісних — не окремий збиток; утилізація — без нової вартості.
     expect(cogs).toMatch(/брак із виробництва \(`defective_delta` руху `receipt_production`\) окремим збитком \*\*не\*\* рахується/);
     expect(cogs).toMatch(/`defect_writeoff` \(утилізація браку\) — \*\*без нової вартості\*\*/);
-    expect(cogs).toMatch(/`defect_repair` \(брак → якісні\)[^]*\*\*за нульовою вартістю\*\*/);
     expect(cogs).toMatch(/`defect_mark` \(якісні → брак\): збиток = `кількість × середня`/);
-    // Старе формулювання («defect_mark / списання браку — збиток») рахувало брак двічі.
     expect(cogs).not.toMatch(/`defect_mark` \/ списання браку — збиток/);
-    // Перевірка на прикладі: сума витрат = вартість партії.
+    // Уточнення етапу 6: одна валюта оцінки, повернення за собівартістю продажу, невідомі/дефіцитні шари, ремонт повертає вартість.
+    expect(cogs).toMatch(/в ОДНІЙ валюті оцінки/);
+    expect(cogs).toMatch(/\*\*за\s+собівартістю продажу цього замовлення\*\*/);
+    expect(cogs).toMatch(/«невідомий шар», а не нуль/);
+    expect(cogs).toMatch(/дефіцит, без вартості/);
+    expect(cogs).toMatch(/`defect_repair` \(брак → якісні\) \*\*повертає вартість\*\*/);
+    expect(cogs).toMatch(/\*\*за нульовою вартістю\*\*/);
+    // Перевірка на прикладі: сума витрат = вартість партії; з ремонтом — брак і списання разом 0.
     expect(cogs).toMatch(/утилізація браку — 0; продаж 9 → COGS 1000/);
+    expect(cogs).toMatch(/111,11 × 7, 111,12, 111,11/);
+    expect(cogs).toMatch(/−100 \+ 100 = 0/);
   });
 
   it("one operationId — one operation is atomic for parallel calls (C-R6-1/2), not only a pre-check", () => {

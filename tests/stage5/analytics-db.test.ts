@@ -285,22 +285,26 @@ describe("analytics overview", () => {
     }
   });
 
-  it("unit costs (latest production receipt) and inventory value only with finance.view", async () => {
+  // Етап 6 (WP2): собівартість і вартість запасу — з рушія оцінки (ковзна середня: 10 × 12.50 + 10 × 14.00 = 265.00 /
+  // 20 = 13.25), а не «остання ціна надходження × залишок» (14.00 × 20 = 280.00) — docs/stage6-design.md §6.7.
+  it("unit costs (moving average of the costing engine) and inventory value only with finance.view", async () => {
     const owner = await loadWarehouseAnalytics(env.ctx(OWNER), { filters: onlyTest() });
     expect(owner.includeCosts).toBe(true);
-    expect(owner.variants.find((v) => v.variantId === ids.a)!.cost).toEqual({ unitCost: "14.00", currency: "UAH" });
+    expect(owner.variants.find((v) => v.variantId === ids.a)!.cost).toEqual({ unitCost: "13.25", currency: "UAH" });
     expect(owner.variants.find((v) => v.variantId === ids.b)!.cost).toBeNull();
     expect(owner.inventoryValue).toEqual({
-      totals: [{ currency: "UAH", amount: "280.00" }],
+      totals: [{ currency: "UAH", amount: "265.00" }],
       itemsValued: 1,
       unitsValued: 20,
       itemsWithoutCost: 1,
       unitsWithoutCost: 2,
+      negativeUnits: 0,
     });
     const staff = await loadWarehouseAnalytics(env.ctx(STAFF), { filters: onlyTest() });
     expect(staff.includeCosts).toBe(false);
     expect(staff.inventoryValue).toBeNull();
-    expect(JSON.stringify(staff)).not.toContain("14.00");
+    expect(JSON.stringify(staff)).not.toContain("13.25");
+    expect(JSON.stringify(staff)).not.toContain("265.00");
     await expect(loadWarehouseAnalytics(env.ctx(NO_VIEW))).rejects.toMatchObject({ permission: "warehouse.view" });
   });
 
@@ -338,7 +342,7 @@ describe("analytics page", () => {
     expect(data.canSeeCosts).toBe(true);
     expect(data.canManageProduction).toBe(true);
     expect(data.kpi.unitsSold).toBe(22);
-    expect(data.inventoryValue?.totals).toEqual([{ currency: "UAH", amount: "280.00" }]);
+    expect(data.inventoryValue?.totals).toEqual([{ currency: "UAH", amount: "265.00" }]);
     expect(data.recommendations.map((r) => [r.sku, r.recommendation?.quantity])).toEqual([
       ["AT-D", 20],
       ["AT-A", 10],
@@ -348,7 +352,7 @@ describe("analytics page", () => {
     expect(params.getAll("product")).toEqual([ids.product]);
     expect(params.get(`qty.${ids.d}`)).toBe("20");
     expect(params.get(`qty.${ids.a}`)).toBe("10");
-    expect(data.variants.find((v) => v.sku === "AT-A")!.cost).toEqual({ unitCost: "14.00", currency: "UAH" });
+    expect(data.variants.find((v) => v.sku === "AT-A")!.cost).toEqual({ unitCost: "13.25", currency: "UAH" });
   });
 
   it("staff: no costs, no inventory value, no «create batch» (production.manage is the owner's)", async () => {
@@ -492,14 +496,16 @@ describe("CSV export", () => {
       on_hand: "20",
       available: "20",
       // Профіль «;» (Excel uk/EU) — десяткова кома (ui-3).
-      unit_cost: "14,00",
+      unit_cost: "13,25",
       cost_currency: "UAH",
-      stock_value: "280,00",
-      cost_source: "production_receipt",
+      stock_value: "265,00",
+      cost_source: "valuation",
+      units_without_cost: "0",
       tracking: "opened",
     });
     const box = rows.find((r) => r.kind === "material" && r.sku === "box_s");
-    expect(box).toMatchObject({ unit_cost: "12,00", cost_source: "material" });
+    // Етап 6: матеріал оцінено рушієм за каталожною ціною (catalogue) → джерело «valuation», вартість — з пулу.
+    expect(box).toMatchObject({ unit_cost: "12,00", cost_source: "valuation" });
     expect(owner.rows).toBe(rows.length);
 
     const staff = await exportStockCsv(env.ctx(STAFF), { separator: "comma" });
@@ -507,8 +513,8 @@ describe("CSV export", () => {
     const staffRows = parseCsv(staff.content, ",");
     expect(Object.keys(staffRows[0]!)).not.toContain("unit_cost");
     expect(Object.keys(staffRows[0]!)).not.toContain("stock_value");
-    expect(staff.content).not.toContain("14.00");
-    expect(staff.content).not.toContain("14,00");
+    expect(staff.content).not.toContain("13.25");
+    expect(staff.content).not.toContain("13,25");
     for (const s of PII) {
       expect(owner.content, s).not.toContain(s);
       expect(staff.content, s).not.toContain(s);
@@ -577,10 +583,11 @@ describe("CSV export", () => {
     expect(rows[3]).toMatchObject({ sku: "AT-C", units: "0", days_of_cover: "0,0", recommended_qty: "0" });
     expect(Object.keys(rows[0]!)).not.toContain("unit_cost");
     const owner = await exportSalesCsv(env.ctx(OWNER), { period: resolvePeriod({ key: "30", today }), filters: onlyTest() });
-    expect(parseCsv(owner.content)[0]).toMatchObject({ sku: "AT-A", unit_cost: "14,00", cost_currency: "UAH" });
+    // Етап 6: собівартість продажів за варіантами — ковзна середня рушія оцінки (13.25), а не остання ціна (14.00).
+    expect(parseCsv(owner.content)[0]).toMatchObject({ sku: "AT-A", unit_cost: "13,25", cost_currency: "UAH" });
     // Профіль «,» (програми/Sheets) — десяткова крапка.
     const machine = await exportSalesCsv(env.ctx(OWNER), { separator: "comma", period: resolvePeriod({ key: "30", today }), filters: onlyTest() });
-    expect(parseCsv(machine.content, ",")[0]).toMatchObject({ sku: "AT-A", velocity_30d: "0.333", days_of_cover: "60.0", unit_cost: "14.00" });
+    expect(parseCsv(machine.content, ",")[0]).toMatchObject({ sku: "AT-A", velocity_30d: "0.333", days_of_cover: "60.0", unit_cost: "13.25" });
   });
 
   it("resource route: CSV headers, permission checks, invalid parameters and an audit record", async () => {

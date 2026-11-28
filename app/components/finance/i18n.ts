@@ -1,0 +1,164 @@
+/**
+ * Етап 6, WP0-UI: тексти спільних фінансових компонентів (docs/stage6-design.md §18.9, §18.10) — uk (типово) і en з
+ * однаковими наборами ключів (тест tests/stage6/ui/i18n-css-safety.test.ts). Пакет WP0-UI не має власного модуля в
+ * `app/i18n/messages/` (файли `app/i18n/**` — спільні, їх змінює лише ядро), тому модуль лежить тут і підключається
+ * перекладачем `useFinanceUiT()`: спершу ключі цього модуля, далі — загальні словники (`translate` з `~/i18n`), тож
+ * у компонентах однаково працюють `financeUi.*` і спільні ключі `finance.*` / `common.*`. Коли ядро зареєструє модуль
+ * у `MESSAGE_MODULES` (запит ядру в звіті WP0-UI), поведінка не зміниться.
+ *
+ * Множина — ICU `{n, plural, …}` (applyPlurals з `~/i18n`), числа в параметрах — уже відформатовані `app/lib/format.ts`.
+ */
+import { applyPlurals, translate, useLocale, type Locale, type MessageModule, type TranslateParams } from "~/i18n";
+
+export const financeUiMessages: MessageModule = {
+  uk: {
+    "financeUi.money.originalLabel": "У валюті запису:",
+    "financeUi.rate.onDate": "{source} на {date}",
+    "financeUi.rate.fallbackOnDate": "{source} за {date} (запасний курс найближчої попередньої дати)",
+    "financeUi.delta.vsComparison": "до періоду порівняння",
+    "financeUi.delta.up": "Зростання",
+    "financeUi.delta.down": "Зниження",
+    "financeUi.delta.flat": "Без змін",
+    "financeUi.delta.unknown": "Зміна невідома",
+    "financeUi.delta.lowerIsBetter": "менше — добре",
+    "financeUi.kpi.missing": "Чого бракує",
+    "financeUi.kpi.explanation": "Як порахувано",
+    "financeUi.kpi.trend": "Динаміка: {title}",
+    "financeUi.coverage.orders": "за {n} з {m, plural, one {# замовлення} few {# замовлень} many {# замовлень} other {# замовлення}}",
+    "financeUi.coverage.waybills": "на основі {n} з {m, plural, one {# накладної} few {# накладних} many {# накладних} other {# накладної}}",
+    "financeUi.banner.empty": "Немає визнаних замовлень за цей період — показників ще немає.",
+    "financeUi.banner.noOrdersTitle": "Немає визнаних замовлень",
+    "financeUi.banner.noOrders": "Визнаних замовлень за цей період немає — показників замовлень ще немає.",
+    "financeUi.banner.summary":
+      "Остаточно: {final} · Попередньо: {preliminary} · Неповно: {incomplete} — з {orders, plural, one {# визнаного замовлення} few {# визнаних замовлень} many {# визнаних замовлень} other {# визнаного замовлення}}",
+    "financeUi.banner.netProfit": "Усі місяці періоду закрито, витрати й податки підтверджено — показано чистий прибуток.",
+    "financeUi.banner.details": "Що заповнити",
+    "financeUi.banner.missingComponent": "{component}: немає даних — {n, plural, one {# замовлення} few {# замовлення} many {# замовлень} other {# замовлення}}",
+    "financeUi.banner.forecastComponent": "{component}: лише прогноз — {n, plural, one {# замовлення} few {# замовлення} many {# замовлень} other {# замовлення}}",
+    "financeUi.banner.incompleteOrders":
+      "Не входять у прибуток через неповні дані: {n, plural, one {# замовлення} few {# замовлення} many {# замовлень} other {# замовлення}}",
+    "financeUi.banner.preliminaryOrders":
+      "Лише в «≈ Прогноз» (попередні): {n, plural, one {# замовлення} few {# замовлення} many {# замовлень} other {# замовлення}}",
+    "financeUi.banner.open": "Оплачено, ще не відвантажено: {n, plural, one {# замовлення} few {# замовлення} many {# замовлень} other {# замовлення}}",
+    "financeUi.banner.excluded": "Не враховуються (тестові тощо): {n, plural, one {# замовлення} few {# замовлення} many {# замовлень} other {# замовлення}}",
+    "financeUi.banner.needsReview": "Потребують перевірки: {n, plural, one {# замовлення} few {# замовлення} many {# замовлень} other {# замовлення}}",
+    "financeUi.banner.discrepancies": "Відкриті розбіжності: {n}",
+    "financeUi.banner.staleRates": "Курси за попередні дати (запасні): {n}",
+    "financeUi.banner.unknownCostUnits": "Без собівартості на складі: {n} од.",
+    "financeUi.banner.lateEntries": "Пізні записи: {n}",
+    "financeUi.banner.closedMonths": "Закриті місяці — з остаточних знімків: {months}",
+    "financeUi.chart.compare": "Порівняння",
+    "financeUi.chart.showTable": "Показати таблицею",
+    "financeUi.chart.bucket": "Відрізок",
+    "financeUi.chart.empty": "Немає даних за цей період",
+    "financeUi.chart.summary":
+      "{title}: {n, plural, one {# відрізок} few {# відрізки} many {# відрізків} other {# відрізка}}, {first} – {last}; факт відомий для {known}. Точні числа — у таблиці.",
+    "financeUi.chart.extremes": "Найбільший факт — {max} ({maxLabel}), найменший — {min} ({minLabel}).",
+    "financeUi.chart.keyboard": "Стрілки вліво й вправо — перехід між відрізками.",
+    "financeUi.breakdown.share": "% чистої виручки",
+    "financeUi.breakdown.shareOf": "Частки — від чистої виручки {total}.",
+    "financeUi.breakdown.noShare": "Частки не пораховано: чиста виручка невідома або не більша за нуль.",
+    "financeUi.period.label": "Період",
+    "financeUi.period.from": "Від",
+    "financeUi.period.to": "До",
+    "financeUi.period.granularity": "Відрізок",
+    "financeUi.period.compare": "Порівняти з",
+    "financeUi.period.more": "Ще",
+    "financeUi.period.compareRange": "Порівняння: {range}",
+    "financeUi.currency.label": "Валюта показу",
+    "financeUi.file.choose": "Виберіть файл",
+    "financeUi.file.change": "Вибрати інший файл",
+    "financeUi.file.none": "Файл не вибрано",
+    "financeUi.file.tooLarge": "Файл завеликий ({size}). Максимум — {max}.",
+    "financeUi.file.wrongType": "Цей тип файлу не підтримується. Підходять: {types}.",
+    "financeUi.file.size.b": "{n} Б",
+    "financeUi.file.size.kb": "{n} КБ",
+    "financeUi.file.size.mb": "{n} МБ",
+  },
+  en: {
+    "financeUi.money.originalLabel": "In entry currency:",
+    "financeUi.rate.onDate": "{source} for {date}",
+    "financeUi.rate.fallbackOnDate": "{source} for {date} (fallback: rate of the nearest earlier date)",
+    "financeUi.delta.vsComparison": "vs the comparison period",
+    "financeUi.delta.up": "Up",
+    "financeUi.delta.down": "Down",
+    "financeUi.delta.flat": "No change",
+    "financeUi.delta.unknown": "Change unknown",
+    "financeUi.delta.lowerIsBetter": "lower is better",
+    "financeUi.kpi.missing": "What is missing",
+    "financeUi.kpi.explanation": "How it is calculated",
+    "financeUi.kpi.trend": "Trend: {title}",
+    "financeUi.coverage.orders": "for {n} of {m, plural, one {# order} other {# orders}}",
+    "financeUi.coverage.waybills": "based on {n} of {m, plural, one {# waybill} other {# waybills}}",
+    "financeUi.banner.empty": "No recognized orders in this period — there are no figures yet.",
+    "financeUi.banner.noOrdersTitle": "No recognized orders",
+    "financeUi.banner.noOrders": "There are no recognized orders in this period, so there are no order figures yet.",
+    "financeUi.banner.summary":
+      "Final: {final} · Preliminary: {preliminary} · Incomplete: {incomplete} — of {orders, plural, one {# recognized order} other {# recognized orders}}",
+    "financeUi.banner.netProfit": "All months of the period are closed and expenses and taxes are confirmed — net profit is shown.",
+    "financeUi.banner.details": "What to fill in",
+    "financeUi.banner.missingComponent": "{component}: no data — {n, plural, one {# order} other {# orders}}",
+    "financeUi.banner.forecastComponent": "{component}: forecast only — {n, plural, one {# order} other {# orders}}",
+    "financeUi.banner.incompleteOrders": "Not included in profit because of incomplete data: {n, plural, one {# order} other {# orders}}",
+    "financeUi.banner.preliminaryOrders": "Only in “≈ Forecast” (preliminary): {n, plural, one {# order} other {# orders}}",
+    "financeUi.banner.open": "Paid, not shipped yet: {n, plural, one {# order} other {# orders}}",
+    "financeUi.banner.excluded": "Not included (test orders etc.): {n, plural, one {# order} other {# orders}}",
+    "financeUi.banner.needsReview": "Need review: {n, plural, one {# order} other {# orders}}",
+    "financeUi.banner.discrepancies": "Open discrepancies: {n}",
+    "financeUi.banner.staleRates": "Rates from earlier dates (fallback): {n}",
+    "financeUi.banner.unknownCostUnits": "On hand without unit cost: {n} units",
+    "financeUi.banner.lateEntries": "Late entries: {n}",
+    "financeUi.banner.closedMonths": "Closed months come from final snapshots: {months}",
+    "financeUi.chart.compare": "Comparison",
+    "financeUi.chart.showTable": "Show as a table",
+    "financeUi.chart.bucket": "Period",
+    "financeUi.chart.empty": "No data for this period",
+    "financeUi.chart.summary":
+      "{title}: {n, plural, one {# period} other {# periods}}, {first} – {last}; actual known for {known}. Exact figures are in the table.",
+    "financeUi.chart.extremes": "Highest actual {max} ({maxLabel}), lowest {min} ({minLabel}).",
+    "financeUi.chart.keyboard": "Left and right arrow keys move between periods.",
+    "financeUi.breakdown.share": "% of net revenue",
+    "financeUi.breakdown.shareOf": "Shares of net revenue {total}.",
+    "financeUi.breakdown.noShare": "Shares not calculated: net revenue is unknown or not above zero.",
+    "financeUi.period.label": "Period",
+    "financeUi.period.from": "From",
+    "financeUi.period.to": "To",
+    "financeUi.period.granularity": "Group by",
+    "financeUi.period.compare": "Compare with",
+    "financeUi.period.more": "More",
+    "financeUi.period.compareRange": "Comparison: {range}",
+    "financeUi.currency.label": "Display currency",
+    "financeUi.file.choose": "Choose a file",
+    "financeUi.file.change": "Choose another file",
+    "financeUi.file.none": "No file chosen",
+    "financeUi.file.tooLarge": "The file is too large ({size}). The maximum is {max}.",
+    "financeUi.file.wrongType": "This file type is not supported. Allowed: {types}.",
+    "financeUi.file.size.b": "{n} B",
+    "financeUi.file.size.kb": "{n} KB",
+    "financeUi.file.size.mb": "{n} MB",
+  },
+};
+
+export type FinanceUiT = (key: string, params?: TranslateParams) => string;
+
+/** Переклад: ключ цього модуля → загальні словники → сам ключ (як `translate`). */
+export function translateFinanceUi(locale: Locale, key: string, params?: TranslateParams): string {
+  const own = financeUiMessages[locale][key] ?? financeUiMessages.uk[key];
+  if (own === undefined) return translate(locale, key, params);
+  const plural = applyPlurals(own, financeUiMessages[locale][key] === undefined ? "uk" : locale, params);
+  if (!params) return plural;
+  return plural.replace(/\{(\w+)\}/g, (match, name: string) => {
+    const v = params[name];
+    return v === undefined || v === null ? match : String(v);
+  });
+}
+
+export function makeFinanceUiT(locale: Locale): FinanceUiT {
+  return (key, params) => translateFinanceUi(locale, key, params);
+}
+
+/** Перекладач компонентів фінансів для мови з кореневого loader. */
+export function useFinanceUiT(): FinanceUiT {
+  const locale = useLocale();
+  return makeFinanceUiT(locale);
+}

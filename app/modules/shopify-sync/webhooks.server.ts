@@ -6,9 +6,10 @@ import type { Db } from "~/db/client.server";
 import { enqueueJob } from "~/modules/jobs/queue.server";
 import { inventoryItemGidFromLevelPayload } from "~/integrations/shopify/inventory-graphql";
 import { claimWebhook, completeWebhook } from "~/modules/webhooks/dedupe.server";
+import { enqueueFinanceOrderSync } from "~/modules/finance-sync/schedule.server";
 import { scheduleCollectionSync } from "./collections.server";
-import { gidFromPayload } from "./mappers";
-import { JOB } from "./sync.server";
+import { gidFromPayload, orderGidFromOrderEditPayload, orderGidFromRefundPayload } from "./mappers";
+import { JOB, orderSyncDedupeKey } from "./jobs";
 
 /** Теми webhook, на які застосунок підписується (shop-specific, реєструються після встановлення). */
 export const WEBHOOK_TOPICS = [
@@ -25,6 +26,10 @@ export const WEBHOOK_TOPICS = [
   "COLLECTIONS_CREATE",
   "COLLECTIONS_UPDATE",
   "COLLECTIONS_DELETE",
+  // Етап 6 (docs/stage6-design.md §16.4, read_orders): нове повернення коштів і правка замовлення — фінансові факти
+  // (угоди продажу, повернення) перечитуються. Зміна переліку перереєстровує підписки автоматично (webhooksConfigKey).
+  "REFUNDS_CREATE",
+  "ORDERS_EDITED",
 ] as const;
 
 export function normalizeTopic(topic: string): string {
@@ -44,7 +49,17 @@ export async function handleShopifyWebhook(db: Db, event: IncomingWebhook): Prom
   try {
     let queued = false;
     const shop = event.shop;
-    if (topic.startsWith("ORDERS_")) {
+    if (topic === "REFUNDS_CREATE" || topic === "ORDERS_EDITED") {
+      // Етап 6: id замовлення — з order_id (повернення) / order_edit.order_id (правка), а не з admin_graphql_api_id; до
+      // загального правила ORDERS_* (корінь orders/edited — правка, не замовлення). Обидва: синхронізація замовлення
+      // (позиції, current_quantity) і фінансів (угоди, повернення).
+      const orderGid = topic === "REFUNDS_CREATE" ? orderGidFromRefundPayload(event.payload) : orderGidFromOrderEditPayload(event.payload);
+      if (orderGid) {
+        await enqueueOrQueued(db, JOB.syncOrder, { shop, orderGid, mode: "live" }, orderSyncDedupeKey(orderGid));
+        await enqueueFinanceOrderSync(db, { shop, orderGid });
+        queued = true;
+      }
+    } else if (topic.startsWith("ORDERS_")) {
       const orderGid = gidFromPayload(event.payload, "Order");
       if (orderGid) queued = await enqueueOrQueued(db, JOB.syncOrder, { shop, orderGid, mode: "live" }, `order:${orderGid}`);
     } else if (topic === "PRODUCTS_DELETE") {

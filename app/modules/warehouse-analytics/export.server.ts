@@ -31,8 +31,7 @@ import {
   type ShopifySyncState,
   type StockItemKind,
 } from "~/db/schema";
-import { can, requirePermission } from "~/domain/permissions";
-import { fromMinor, toMinor } from "~/lib/money";
+import { requirePermission } from "~/domain/permissions";
 import { writeAudit } from "~/modules/audit/audit.server";
 import { getBalances } from "~/modules/inventory/ledger.server";
 import { getDefaultWarehouse } from "~/modules/inventory/warehouse.server";
@@ -40,6 +39,8 @@ import { batchCostSummary, billedQuantity, lineRemaining, type CostSummary, type
 import { displayVariantTitle } from "~/modules/warehouse/constants";
 import { businessDate, businessDayEnd, businessDayStart } from "~/modules/warehouse/dates";
 import type { ServiceContext } from "~/server/types";
+import { loadPoolValues, type PoolValue } from "~/modules/costing/pool-read.server";
+import { canFinance } from "~/modules/finance/core/access.server";
 import { resolvePeriod, roundTo, type ResolvedPeriod } from "./calc";
 import { buildCsv, csvAmount, csvDecimal, csvFileName, type CsvColumn, type CsvSeparatorKey } from "./csv";
 import { MAX_EXPORT_MOVEMENTS } from "./export-contract";
@@ -48,7 +49,6 @@ import {
   computeWarehouseAnalytics,
   hasAnalyticsFilters,
   listAllStock,
-  loadLatestProductionUnitCosts,
   type AnalyticsFilters,
   type VariantAnalytics,
 } from "./queries.server";
@@ -107,16 +107,31 @@ interface StockCsvRow {
   tracking: string | null;
   shopifyAvailable: number | null;
   cost: { unitCost: string; currency: string } | null;
-  costSource: "production_receipt" | "material" | null;
+  /** Етап 6: valuation — рушій оцінки (середня пулу, вартість відомих одиниць); material — лише каталожна ціна. */
+  costSource: "valuation" | "material" | null;
+  /** Вартість відомих одиниць пулу (рушій оцінки); null — немає відомих одиниць (не 0). */
+  value: string | null;
+  unitsWithoutCost: number | null;
+}
+
+function poolCost(p: PoolValue | undefined): Pick<StockCsvRow, "cost" | "costSource" | "value" | "unitsWithoutCost"> {
+  if (!p) return { cost: null, costSource: null, value: null, unitsWithoutCost: null };
+  const known = p.knownQty > 0 && p.averageUnit !== null;
+  return {
+    cost: known ? { unitCost: p.averageUnit!, currency: p.currency } : null,
+    costSource: known ? "valuation" : null,
+    value: known ? p.knownValue : null,
+    unitsWithoutCost: p.unknownQty,
+  };
 }
 
 async function stockRows(ctx: ServiceContext, filters: AnalyticsFilters, withCosts: boolean): Promise<StockCsvRow[]> {
-  const [variants, costs] = await Promise.all([
+  const [variants, pools] = await Promise.all([
     listAllStock(ctx.db, filters),
-    withCosts ? loadLatestProductionUnitCosts(ctx.db) : Promise.resolve(new Map()),
+    withCosts ? loadPoolValues(ctx.db) : Promise.resolve(new Map<string, PoolValue>()),
   ]);
   const rows: StockCsvRow[] = variants.map((v) => {
-    const c = withCosts && v.stockItemId ? costs.get(v.stockItemId) : undefined;
+    const c = withCosts && v.stockItemId ? poolCost(pools.get(v.stockItemId)) : poolCost(undefined);
     return {
       kind: "product",
       sku: v.sku,
@@ -135,8 +150,7 @@ async function stockRows(ctx: ServiceContext, filters: AnalyticsFilters, withCos
       status: v.status,
       tracking: v.tracking,
       shopifyAvailable: v.shopifyAvailable,
-      cost: c ? { unitCost: c.unitCost, currency: c.currency } : null,
-      costSource: c ? "production_receipt" : null,
+      ...c,
     };
   });
   // Матеріали — лише без фільтрів товарів (фільтри модель/колір/товар стосуються товарів).
@@ -157,7 +171,11 @@ async function stockRows(ctx: ServiceContext, filters: AnalyticsFilters, withCos
     for (const r of costRows) if (r.unitCost && r.currency) materialCosts.set(r.id, { unitCost: r.unitCost, currency: r.currency });
   }
   for (const m of materials) {
-    const c = withCosts && m.materialId ? materialCosts.get(m.materialId) : undefined;
+    const catalogue = withCosts && m.materialId ? materialCosts.get(m.materialId) : undefined;
+    const fromPool = withCosts && m.stockItemId ? poolCost(pools.get(m.stockItemId)) : poolCost(undefined);
+    const c: Pick<StockCsvRow, "cost" | "costSource" | "value" | "unitsWithoutCost"> = fromPool.cost
+      ? fromPool
+      : { ...fromPool, cost: catalogue ?? null, costSource: catalogue ? "material" : null };
     rows.push({
       kind: "material",
       sku: m.sku,
@@ -176,16 +194,15 @@ async function stockRows(ctx: ServiceContext, filters: AnalyticsFilters, withCos
       status: m.status,
       tracking: null,
       shopifyAvailable: null,
-      cost: c ?? null,
-      costSource: c ? "material" : null,
+      ...c,
     });
   }
   return rows;
 }
 
+/** Вартість запасу рядка — з рушія оцінки (відомі одиниці пулу); без відомих — порожньо, не 0. */
 function stockValue(r: StockCsvRow): string | null {
-  if (!r.cost || r.onHand <= 0) return null;
-  return fromMinor(toMinor(r.cost.unitCost) * BigInt(r.onHand));
+  return r.value;
 }
 
 /** Залишки (товари + матеріали) на зараз. */
@@ -194,7 +211,7 @@ export async function exportStockCsv(
   opts: { separator?: CsvSeparatorKey; filters?: AnalyticsFilters } = {},
 ): Promise<CsvExport> {
   requirePermission(ctx.actor, "warehouse.view");
-  const withCosts = can(ctx.actor, "finance.view");
+  const withCosts = canFinance(ctx.actor, "view");
   const rows = await stockRows(ctx, opts.filters ?? {}, withCosts);
   const today = businessDate(ctx.now());
   const warehouse = await getDefaultWarehouse(ctx.db);
@@ -219,7 +236,12 @@ export async function exportStockCsv(
     { header: "tracking", value: (r) => r.tracking },
     { header: "shopify_available", value: (r) => r.shopifyAvailable },
     ...costColumns<StockCsvRow>(withCosts, (r) => r.cost, stockValue),
-    ...(withCosts ? [{ header: "cost_source", value: (r: StockCsvRow) => r.costSource } as CsvColumn<StockCsvRow>] : []),
+    ...(withCosts
+      ? [
+          { header: "cost_source", value: (r: StockCsvRow) => r.costSource } as CsvColumn<StockCsvRow>,
+          { header: "units_without_cost", value: (r: StockCsvRow) => r.unitsWithoutCost } as CsvColumn<StockCsvRow>,
+        ]
+      : []),
   ];
   const result: CsvExport = {
     dataset: "stock",
@@ -269,7 +291,7 @@ export async function exportMovementsCsv(
   } = {},
 ): Promise<CsvExport> {
   requirePermission(ctx.actor, "warehouse.view");
-  const withCosts = can(ctx.actor, "finance.view");
+  const withCosts = canFinance(ctx.actor, "view");
   const today = businessDate(ctx.now());
   const period = opts.period ?? resolvePeriod({ today });
   const filters = opts.filters ?? {};
@@ -375,7 +397,7 @@ export async function exportSalesCsv(
   opts: { separator?: CsvSeparatorKey; period?: ResolvedPeriod; filters?: AnalyticsFilters } = {},
 ): Promise<CsvExport> {
   requirePermission(ctx.actor, "warehouse.view");
-  const withCosts = can(ctx.actor, "finance.view");
+  const withCosts = canFinance(ctx.actor, "view");
   const today = businessDate(ctx.now());
   const period = opts.period ?? resolvePeriod({ today });
   const data = await computeWarehouseAnalytics(ctx.db, { today, period, filters: opts.filters, includeCosts: withCosts });

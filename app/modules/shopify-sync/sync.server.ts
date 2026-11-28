@@ -15,6 +15,7 @@ import { loadOrderRow, shippingAddressOf, type OrderRow } from "~/modules/orders
 import { VALIDATABLE_STATUSES, validateOrderInTx } from "~/modules/orders/workflow.server";
 import { cancelOrder, processPaidOrder } from "~/modules/shipments/waybill.server";
 import { syncOrderReservations } from "~/modules/inventory/reservations.server";
+import { enqueueFinanceOrderSync } from "~/modules/finance-sync/schedule.server";
 import { scheduleReconcileForInventoryWebhook } from "~/modules/inventory-sync/schedule.server";
 import { ShopifyApiError, type AdminGraphql } from "~/integrations/shopify/admin-client.server";
 import type { ShopifyGateway, ShopifySyncResult } from "~/integrations/shopify/types";
@@ -331,6 +332,7 @@ type StoredLine = {
   currentQuantity: number | null;
   shopifyAddedAt: Date | null;
   discountedUnitPrice: string | null;
+  requiresShipping: boolean | null;
   position: number;
 };
 
@@ -346,6 +348,7 @@ async function loadStoredLines(tx: DbOrTx, orderId: string): Promise<StoredLine[
       currentQuantity: orderLineItems.currentQuantity,
       shopifyAddedAt: orderLineItems.shopifyAddedAt,
       discountedUnitPrice: orderLineItems.discountedUnitPrice,
+      requiresShipping: orderLineItems.requiresShipping,
       position: orderLineItems.position,
     })
     .from(orderLineItems)
@@ -390,6 +393,7 @@ async function replaceLineItems(tx: DbOrTx, orderId: string, m: MappedOrder, opt
       currentQuantity: l.currentQuantity,
       unitPrice: l.unitPrice,
       discountedUnitPrice: l.discountedUnitPrice,
+      requiresShipping: l.requiresShipping,
       currency: l.currency,
       imageUrl: l.imageUrl,
       position,
@@ -430,12 +434,38 @@ async function backfillLineDetails(tx: DbOrTx, stored: readonly StoredLine[], m:
   for (const e of stored) {
     const l = e.gid ? byGid.get(e.gid) : undefined;
     if (!l) continue;
-    const patch: { currentQuantity?: number; shopifyAddedAt?: Date; discountedUnitPrice?: string } = {};
+    const patch: { currentQuantity?: number; shopifyAddedAt?: Date; discountedUnitPrice?: string; requiresShipping?: boolean } = {};
     if (e.currentQuantity === null && l.currentQuantity === e.quantity) patch.currentQuantity = l.currentQuantity;
+    if (l.requiresShipping !== null && e.requiresShipping !== l.requiresShipping) patch.requiresShipping = l.requiresShipping;
     if (e.shopifyAddedAt === null && l.shopifyCreatedAt) patch.shopifyAddedAt = l.shopifyCreatedAt;
     if (l.discountedUnitPrice !== null && e.discountedUnitPrice !== l.discountedUnitPrice) patch.discountedUnitPrice = l.discountedUnitPrice;
     if (Object.keys(patch).length > 0) await tx.update(orderLineItems).set(patch).where(eq(orderLineItems.id, e.id));
   }
+}
+
+/**
+ * Етап 6 (docs/stage6-design.md §14.3 п. 6, §17.7): ВІДВАНТАЖЕНЕ замовлення (SHIPPED_STATUSES) — після повернення в
+ * Shopify оновлюється ЛИШЕ current_quantity наявних позицій (зіставлення за shopifyLineItemId, та сама замовлена
+ * кількість): без заміни позицій, без історії змін позицій і без зміни резервів (списане — раз назавжди,
+ * planReservationChanges списані позиції пропускає). Так звірка повернень етапу 5 (inventory-sync/returns.server.ts) і
+ * статистика повернень бачать повернення після відправлення. Також тихо — requires_shipping (факт Shopify, складу не
+ * змінює). Позиції, яких немає в застосунку (додані правкою після відправлення), не додаються. Повертає кількість позицій
+ * зі зміненою current_quantity.
+ */
+async function updateShippedLineFacts(tx: DbOrTx, orderId: string, m: MappedOrder): Promise<number> {
+  const stored = await loadStoredLines(tx, orderId);
+  const byGid = new Map(m.lineItems.map((l) => [l.shopifyLineItemId, l]));
+  let changed = 0;
+  for (const e of stored) {
+    const l = e.gid ? byGid.get(e.gid) : undefined;
+    if (!l) continue;
+    const patch: { currentQuantity?: number; requiresShipping?: boolean } = {};
+    if (l.quantity === e.quantity && (e.currentQuantity ?? e.quantity) !== l.currentQuantity) patch.currentQuantity = l.currentQuantity;
+    if (l.requiresShipping !== null && e.requiresShipping !== l.requiresShipping) patch.requiresShipping = l.requiresShipping;
+    if (patch.currentQuantity !== undefined) changed++;
+    if (Object.keys(patch).length > 0) await tx.update(orderLineItems).set(patch).where(eq(orderLineItems.id, e.id));
+  }
+  return changed;
 }
 
 /** Рядок позиції для історії змін (без персональних даних): «SKU×кількість; …». */
@@ -609,6 +639,8 @@ async function applyOrderInTx(tx: Tx, ctx: ServiceContext, m: MappedOrder, mode:
     shopifyUpdatedAt: m.shopifyUpdatedAt,
     // Що повідомив Shopify (і за якими значеннями наступне читання визначає зміни в Shopify — fieldsUnchangedInShopify).
     shopifyContactSnapshot: contactSnapshotOf(m),
+    // Етап 6: Order.test (уже отримуване) — тестові замовлення фінанси не враховують без includeTestOrders (§2.5).
+    shopifyTest: m.test,
   };
 
   if (!existing) {
@@ -658,6 +690,9 @@ async function applyOrderInTx(tx: Tx, ctx: ServiceContext, m: MappedOrder, mode:
     return { result: "stale" as const, orderId: existing.id, process: false };
   }
   await tx.update(orders).set({ ...common, updatedAt: new Date() }).where(eq(orders.id, existing.id));
+  // Етап 6: повернення після відправлення — лише current_quantity (до правила скасування: скасоване після відправлення
+  // замовлення теж може мати повернення).
+  const shippedQtyApplied = isShipped(existing.status) ? await updateShippedLineFacts(tx, existing.id, m) : 0;
 
   if (m.cancelledAt && existing.status !== "cancelled") {
     return { result: "cancelled" as const, orderId: existing.id, process: false, cancel: true };
@@ -690,7 +725,7 @@ async function applyOrderInTx(tx: Tx, ctx: ServiceContext, m: MappedOrder, mode:
   if (!lineDiff.changed) await backfillLineDetails(tx, lineDiff.stored, m);
   if (changes.length === 0 && !lineDiff.changed && !fulfilledOutside) {
     // Позиції Shopify знову збігаються зі збереженими — неперенесених змін позицій більше немає.
-    if (!pendingBefore) return { result: "unchanged" as const, orderId: existing.id, process: false };
+    if (!pendingBefore) return { result: shippedQtyApplied > 0 ? ("updated" as const) : ("unchanged" as const), orderId: existing.id, process: false };
     await setLinesPending(tx, existing.id, null);
     await settleShopifyChangedIssue(tx, existing.id, ["lineItems"]);
     return { result: "updated" as const, orderId: existing.id, process: false };
@@ -747,7 +782,11 @@ async function applyOrderInTx(tx: Tx, ctx: ServiceContext, m: MappedOrder, mode:
   // Якщо замовлення вже перевірялося — перевіряємо повторно з новими даними.
   if (history.length > 0 && existing.status !== "paid") await validateOrderInTx(tx, { ...ctx, actor: SYSTEM_ACTOR }, existing.id, "after_edit");
   if (reported.length > 0 || fulfilledOutside) return { result: "conflict_reported" as const, orderId: existing.id, process: false };
-  return { result: history.length > 0 || linesSettled ? ("updated" as const) : ("unchanged" as const), orderId: existing.id, process: false };
+  return {
+    result: history.length > 0 || linesSettled || shippedQtyApplied > 0 ? ("updated" as const) : ("unchanged" as const),
+    orderId: existing.id,
+    process: false,
+  };
 }
 
 async function setLinesPending(tx: DbOrTx, orderId: string, at: Date | null) {
@@ -849,17 +888,32 @@ export async function syncOrder(
   return applyOrder(ctx, admin, await readAllLineItems(admin, data.order), mode === "refresh" ? "live" : mode);
 }
 
+/**
+ * Етап 6 (docs/stage6-design.md §16.3): після успішного збереження ЗБЕРЕЖЕНОГО замовлення (неоплачені не зберігаються)
+ * — фінансова синхронізація finance.sync_order (dedupe finance-order:<gid>, +30 с). Без встановленого магазину й у демо —
+ * нічого. Збій постановки не зриває синхронізацію замовлення: замовлення підхопить звірка фінансів (finance.reconcile).
+ */
+async function queueFinanceSync(ctx: ServiceContext, r: { result: OrderSyncResult; orderId: string | null }, orderGid: string, shop?: string) {
+  if (ctx.mode === "demo" || !r.orderId || r.result === "stale" || r.result === "skipped_unpaid") return;
+  try {
+    const s = shop ?? (await currentShop(ctx.db))?.shop;
+    if (s) await enqueueFinanceOrderSync(ctx.db, { shop: s, orderGid });
+  } catch (e) {
+    logger.warn("finance.sync_order_enqueue_failed", { error: e });
+  }
+}
+
 /** Замовлення зі сторінки списку (імпорт): позиції, що не вмістилися, — повторне читання замовлення й сторінки позицій. */
-async function applyListedOrder(ctx: ServiceContext, admin: AdminGraphql, order: GqlOrder, mode: "live" | "import") {
-  if (!order.lineItems.pageInfo?.hasNextPage) return applyOrder(ctx, admin, order, mode);
+async function applyListedOrder(ctx: ServiceContext, admin: AdminGraphql, order: GqlOrder, mode: "live" | "import", shop?: string) {
+  if (!order.lineItems.pageInfo?.hasNextPage) return applyOrder(ctx, admin, order, mode, shop);
   // Свіжий знімок замовлення (updatedAt, з яким звіряються наступні сторінки позицій).
   const full = await admin<{ order: GqlOrder | null }>(ORDER_QUERY, { id: order.id });
   if (!full.order) return { result: "unchanged" as const, orderId: null };
-  return applyOrder(ctx, admin, await readAllLineItems(admin, full.order), mode);
+  return applyOrder(ctx, admin, await readAllLineItems(admin, full.order), mode, shop);
 }
 
 /** order — з УСІМА позиціями (readAllLineItems). */
-async function applyOrder(ctx: ServiceContext, admin: AdminGraphql, order: GqlOrder, mode: "live" | "import") {
+async function applyOrder(ctx: ServiceContext, admin: AdminGraphql, order: GqlOrder, mode: "live" | "import", shop?: string) {
   if (order.lineItems.pageInfo?.hasNextPage) throw new ShopifyApiError("Order line items were not read completely", false, "INCOMPLETE_LINE_ITEMS");
   const m = mapOrder(order);
   const known = await resolveVariantIds(ctx.db, m);
@@ -867,7 +921,9 @@ async function applyOrder(ctx: ServiceContext, admin: AdminGraphql, order: GqlOr
     m.lineItems.filter((l) => l.shopifyVariantId && !known.has(l.shopifyVariantId) && l.shopifyProductId).map((l) => l.shopifyProductId!),
   );
   for (const gid of missingProducts) await syncProduct(ctx.db, admin, gid, m.currency);
-  return upsertOrder(ctx, m, mode);
+  const result = await upsertOrder(ctx, m, mode);
+  await queueFinanceSync(ctx, result, order.id, shop);
+  return result;
 }
 
 /** Сторінка імпорту старих замовлень (з дати `since`). Прогрес — у shop_installations.import_state. */
@@ -888,7 +944,7 @@ export async function importOrdersPage(
   for (const order of data.orders.nodes) {
     // Помилка одного замовлення не зупиняє імпорт: воно повторюється окремим завданням.
     try {
-      const r = await applyListedOrder(ctx, admin, order, "import");
+      const r = await applyListedOrder(ctx, admin, order, "import", payload.shop);
       if (r.result === "created") imported++;
       else if (r.result === "skipped_unpaid") skipped++;
       else updated++;

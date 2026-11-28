@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { gidFromPayload, initialStatus, isPaid, mapOrder, mapProduct, normalizeAmount, weightToGrams } from "~/modules/shopify-sync/mappers";
-import { normalizeTopic } from "~/modules/shopify-sync/webhooks.server";
+import {
+  gidFromPayload,
+  initialStatus,
+  isPaid,
+  mapOrder,
+  mapProduct,
+  normalizeAmount,
+  orderGidFromOrderEditPayload,
+  orderGidFromRefundPayload,
+  weightToGrams,
+} from "~/modules/shopify-sync/mappers";
+import { WEBHOOK_TOPICS, normalizeTopic } from "~/modules/shopify-sync/webhooks.server";
 import { buildOrderUpdateInput } from "~/modules/shopify-sync/sync.server";
 import { gqlOrder, gqlProduct } from "./fixtures";
 
@@ -82,5 +92,34 @@ describe("Shopify mappers", () => {
     );
     expect(input.shippingAddress.provinceCode).toBe("TX");
     expect(input.phone).toBe("+491701234567");
+  });
+
+  it("stage 6: maps LineItem.requiresShipping and Order.test without inventing values", () => {
+    const base = gqlOrder();
+    const line = base.lineItems.nodes[0]!;
+    expect(mapOrder(gqlOrder(1, { test: false, lineItems: { nodes: [{ ...line, requiresShipping: false }] } }))).toMatchObject({
+      test: false,
+      lineItems: [{ requiresShipping: false }],
+    });
+    expect(mapOrder(gqlOrder(1, { lineItems: { nodes: [{ ...line, requiresShipping: true }] } })).lineItems[0]?.requiresShipping).toBe(true);
+    // Немає поля в даних — null (фінанси вважають «потребує доставки»), а не false.
+    expect(mapOrder(base).lineItems[0]?.requiresShipping).toBeNull();
+    expect(mapOrder(base).test).toBe(true);
+  });
+
+  it("stage 6: refund and order-edit webhooks give the ORDER gid (safe integers only)", () => {
+    expect(orderGidFromRefundPayload({ id: 9, order_id: 820982911946154, admin_graphql_api_id: "gid://shopify/Refund/9" })).toBe(
+      "gid://shopify/Order/820982911946154",
+    );
+    expect(orderGidFromRefundPayload({ order_id: "450789469" })).toBe("gid://shopify/Order/450789469");
+    expect(orderGidFromRefundPayload({ order_id: 2 ** 60 })).toBeNull();
+    expect(orderGidFromRefundPayload({ order_id: "12a" })).toBeNull();
+    expect(orderGidFromRefundPayload({ admin_graphql_api_id: "gid://shopify/Refund/9" })).toBeNull();
+    expect(orderGidFromOrderEditPayload({ order_edit: { id: 1, order_id: 450789469 } })).toBe("gid://shopify/Order/450789469");
+    expect(orderGidFromOrderEditPayload({ id: 450789469 })).toBeNull();
+    expect(orderGidFromOrderEditPayload({ order_edit: null })).toBeNull();
+    expect(WEBHOOK_TOPICS).toEqual(expect.arrayContaining(["REFUNDS_CREATE", "ORDERS_EDITED"]));
+    expect(normalizeTopic("refunds/create")).toBe("REFUNDS_CREATE");
+    expect(normalizeTopic("orders/edited")).toBe("ORDERS_EDITED");
   });
 });

@@ -1,0 +1,41 @@
+[
+{ 
+"exchangedate":"18.11.2026","r030":978,"cc":"EUR","txt":"Євро","enname":"Euro","rate":49.8561,"units":1,"rate_per_unit":49.8561,"group":"1","calcdate":"17.11.2026","special":null
+ }
+,{ 
+"exchangedate":"19.11.2026","r030":978,"cc":"EUR","txt":"Євро","enname":"Euro","rate":49.5717,"units":1,"rate_per_unit":49.5717,"group":"1","calcdate":"18.11.2026","special":null
+ }
+,{ 
+"exchangedate":"20.11.2026","r030":978,"cc":"EUR","txt":"Євро","enname":"Euro","rate":49.5335,"units":1,"rate_per_unit":49.5335,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"21.11.2026","r030":978,"cc":"EUR","txt":"Євро","enname":"Euro","rate":49.5335,"units":1,"rate_per_unit":49.5335,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"22.11.2026","r030":978,"cc":"EUR","txt":"Євро","enname":"Euro","rate":49.5335,"units":1,"rate_per_unit":49.5335,"group":"1","calcdate":"19.11.2026","special":null
+ }
+,{ 
+"exchangedate":"23.11.2026","r030":978,"cc":"EUR","txt":"Євро","enname":"Euro","rate":49.2763,"units":1,"rate_per_unit":49.2763,"group":"1","calcdate":"20.11.2026","special":null
+ }
+,{ 
+"exchangedate":"24.11.2026","r030":978,"cc":"EUR","txt":"Євро","enname":"Euro","rate":49.455,"units":1,"rate_per_unit":49.455,"group":"1","calcdate":"23.11.2026","special":null
+ }
+,{ 
+"exchangedate":"25.11.2026","r030":978,"cc":"EUR","txt":"Євро","enname":"Euro","rate":49.606,"units":1,"rate_per_unit":49.606,"group":"1","calcdate":"24.11.2026","special":null
+ }
+,{ 
+"exchangedate":"26.11.2026","r030":978,"cc":"EUR","txt":"Євро","enname":"Euro","rate":49.5346,"units":1,"rate_per_unit":49.5346,"group":"1","calcdate":"25.11.2026","special":null
+ }
+,{ 
+"exchangedate":"27.11.2026","r030":978,"cc":"EUR","txt":"Євро","enname":"Euro","rate":49.4942,"units":1,"rate_per_unit":49.4942,"group":"1","calcdate":"26.11.2026","special":null
+ }
+,{ 
+"exchangedate":"28.11.2026","r030":978,"cc":"EUR","txt":"Євро","enname":"Euro","rate":49.4942,"units":1,"rate_per_unit":49.4942,"group":"1","calcdate":"26.11.2026","special":null
+ }
+,{ 
+"exchangedate":"29.11.2026","r030":978,"cc":"EUR","txt":"Євро","enname":"Euro","rate":49.4942,"units":1,"rate_per_unit":49.4942,"group":"1","calcdate":"26.11.2026","special":null
+ }
+,{ 
+"exchangedate":"30.11.2026","r030":978,"cc":"EUR","txt":"Євро","enname":"Euro","rate":49.3532,"units":1,"rate_per_unit":49.3532,"group":"1","calcdate":"27.11.2026","special":null
+ }
+]

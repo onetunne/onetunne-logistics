@@ -263,24 +263,27 @@ describe("«Create batch» prefill link", () => {
 });
 
 describe("inventory value (owner)", () => {
-  it("Σ on hand × unit cost per currency with exact money arithmetic; items without cost are counted separately", () => {
+  // Етап 6 (WP2): вартість запасу — з рушія оцінки (пули ковзної середньої), а не «залишок × остання ціна надходження».
+  it("Σ known value of the costing pools (exact money); unknown units and negative stock are counted separately, never as 0", () => {
+    const pool = (knownQty: number, knownValue: string, unknownQty = 0, deficitQty = 0, currency = "UAH") => ({ knownQty, knownValue, unknownQty, deficitQty, currency });
     const v = inventoryValueOf([
-      { onHand: 20, cost: { unitCost: "14.00", currency: "UAH" } },
-      { onHand: 3, cost: { unitCost: "0.10", currency: "UAH" } },
-      { onHand: 7, cost: { unitCost: "2.35", currency: "EUR" } },
-      { onHand: 5, cost: null },
-      { onHand: -2, cost: { unitCost: "10.00", currency: "UAH" } }, // від'ємний залишок не оцінюється
-      { onHand: 0, cost: null },
+      { onHand: 20, pool: pool(20, "265.00") },
+      { onHand: 3, pool: pool(3, "0.30") },
+      { onHand: 7, pool: pool(5, "16.45", 2, 0, "EUR") },
+      { onHand: 5, pool: null }, // позиція без стану оцінки — увесь залишок без собівартості
+      { onHand: -2, pool: pool(0, "0.00", 0, 2) }, // від'ємний залишок не оцінюється
+      { onHand: 0, pool: null },
     ]);
     expect(v).toEqual({
       totals: [
         { currency: "EUR", amount: "16.45" },
-        { currency: "UAH", amount: "280.30" },
+        { currency: "UAH", amount: "265.30" },
       ],
       itemsValued: 3,
-      unitsValued: 30,
-      itemsWithoutCost: 1,
-      unitsWithoutCost: 5,
+      unitsValued: 28,
+      itemsWithoutCost: 2,
+      unitsWithoutCost: 7,
+      negativeUnits: 2,
     });
   });
 });

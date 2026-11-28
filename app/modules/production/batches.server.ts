@@ -31,6 +31,8 @@ import {
 import { can, ForbiddenError, requirePermission, type Actor } from "~/domain/permissions";
 import { ConflictError, DomainError, NotFoundError } from "~/lib/errors";
 import { writeAudit } from "~/modules/audit/audit.server";
+import { revalueBatchLines, revalueBatchLinesInternal } from "~/modules/costing/revalue.server";
+import { writeFinanceChange } from "~/modules/finance/core/change-log.server";
 import { inventoryKeys } from "~/modules/inventory/keys";
 import { applyMovements, ensureStockItemsForVariants, movementOptionsFor, type MovementInput } from "~/modules/inventory/ledger.server";
 import { getDefaultWarehouse } from "~/modules/inventory/warehouse.server";
@@ -470,8 +472,27 @@ export async function updateBatchCosts(ctx: ServiceContext, batchId: string, exp
       const costCurrency = unitCost === null ? null : currency;
       if (unitCost === l.unitCost && costCurrency === l.costCurrency) continue;
       await tx.update(productionBatchLines).set({ unitCost, costCurrency }).where(eq(productionBatchLines.id, l.id));
+      // Етап 6 (§6.7, §14.4): історія змін собівартості — значення до → після (не лише кількість).
+      await writeFinanceChange(tx, ctx.actor, {
+        entityType: "batch_cost",
+        entityId: batch.id,
+        action: "update",
+        before: { batchId: batch.id, batchLineId: l.id, unitCost: l.unitCost, currency: l.costCurrency, version: batch.version },
+        after: { batchId: batch.id, batchLineId: l.id, unitCost, currency: costCurrency, version: batch.version + 1 },
+      });
+    }
+    if (extraCost !== batch.extraCost || currency !== batch.costCurrency) {
+      await writeFinanceChange(tx, ctx.actor, {
+        entityType: "batch_cost",
+        entityId: batch.id,
+        action: "update",
+        before: { batchId: batch.id, batchLineId: null, extraCost: batch.extraCost, currency: batch.costCurrency, version: batch.version },
+        after: { batchId: batch.id, batchLineId: null, extraCost, currency, version: batch.version + 1 },
+      });
     }
     const updated = await bumpBatch(tx, batch, { extraCost, costCurrency: currency }, ctx.now());
+    // Етап 6 (§6.7): переоцінка вже отриманих одиниць (до залишку / до продажів / до втрат), датою зміни.
+    await revalueBatchLinesInternal(tx, ctx.actor, batch.id, { changeActor: ctx.actor, now: ctx.now() });
     await writeAudit(tx, ctx.actor, "production.costs_updated", { type: "production_batch", id: batch.id }, { lines: lineCosts.size });
     return { version: updated.version };
   });
@@ -544,6 +565,9 @@ export async function closeBatch(ctx: ServiceContext, batchId: string, expectedV
       );
     }
     await bumpBatch(tx, batch, { status: "closed" }, ctx.now());
+    // Етап 6 (§6.7): після закриття оплачується лише виготовлене — ціль рядків змінюється (внутрішня функція, без
+    // перевірки фінансового доступу: закриття — делегований production.manage).
+    await revalueBatchLines(tx, ctx.actor, batch.id);
     const closedUnits = open.reduce((s, l) => s + lineRemaining(q(l)), 0);
     await writeAudit(tx, ctx.actor, "production.batch_closed", { type: "production_batch", id: batch.id }, { lines: open.length, closedUnits });
     return { lines: open.length, closedUnits };
@@ -588,6 +612,7 @@ export async function cancelBatch(ctx: ServiceContext, batchId: string, expected
       releasedUnits = open.reduce((s, l) => s + lineRemaining(q(l)), 0);
     }
     await bumpBatch(tx, batch, { status: "cancelled" }, ctx.now());
+    await revalueBatchLines(tx, ctx.actor, batch.id);
     await writeAudit(tx, ctx.actor, "production.batch_cancelled", { type: "production_batch", id: batch.id }, {
       from: batch.status,
       releasedUnits,
