@@ -57,6 +57,8 @@ import {
   type MovementType,
 } from "./movement-types";
 import { getDefaultWarehouse } from "./warehouse.server";
+import { valueInsertedMovements } from "~/modules/costing/hook.server";
+import type { InsertedMovement } from "~/modules/finance/core/contracts";
 
 export { MOVEMENT_TYPES, isMovementType, type MovementType } from "./movement-types";
 
@@ -300,6 +302,7 @@ export async function applyMovements(
     }
 
     const applied: AppliedMovement[] = [];
+    const inserted: InsertedMovement[] = [];
     const skipped: ApplyMovementsResult["skipped"] = [];
     const sums = new Map<string, MovementDeltas>();
     const decreasingTypes = new Map<string, Set<MovementType>>();
@@ -333,11 +336,33 @@ export async function applyMovements(
           shopifySyncState: syncState,
         })
         .onConflictDoNothing({ target: inventoryMovements.idempotencyKey })
-        .returning({ id: inventoryMovements.id, createdAt: inventoryMovements.createdAt });
+        .returning({ id: inventoryMovements.id, createdAt: inventoryMovements.createdAt, seq: inventoryMovements.seq });
       if (!row) {
         skipped.push({ idempotencyKey: m.idempotencyKey, stockItemId: m.stockItemId, warehouseId: m.warehouseId });
         continue;
       }
+      inserted.push({
+        id: row.id,
+        seq: row.seq,
+        warehouseId: m.warehouseId,
+        stockItemId: m.stockItemId,
+        type: m.type,
+        idempotencyKey: m.idempotencyKey,
+        onHandDelta: m.deltas.onHand,
+        reservedDelta: m.deltas.reserved,
+        defectiveDelta: m.deltas.defective,
+        inProductionDelta: m.deltas.inProduction,
+        orderId: m.orderId ?? null,
+        orderLineItemId: m.orderLineItemId ?? null,
+        productionBatchId: m.productionBatchId ?? null,
+        packingId: m.packingId ?? null,
+        unitCost: m.unitCost ?? null,
+        costCurrency: m.unitCost != null ? (m.costCurrency ?? null) : null,
+        reason: m.reason ?? null,
+        shopifySyncState: syncState,
+        createdAt: row.createdAt,
+        actorId: actor.id,
+      });
       applied.push({
         id: row.id,
         idempotencyKey: m.idempotencyKey,
@@ -402,6 +427,10 @@ export async function applyMovements(
         .returning();
       balances.set(pk, toBalanceState(row!, b.kind));
     }
+
+    // Етап 6 (точка підключення, docs/stage6-design.md §6.4): оцінка собівартості щойно вставлених рухів — у тій самій
+    // точці збереження, після балансів (порядок блокувань: баланси → стан собівартості → фінанси замовлення).
+    if (inserted.length > 0) await valueInsertedMovements(sp, inserted);
 
     let openedAlerts: OpenedAlert[] = [];
     if (opts.evaluateAlerts !== false && sums.size > 0) {

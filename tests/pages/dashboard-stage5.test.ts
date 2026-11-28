@@ -177,18 +177,26 @@ describe("main menu «Аналітика» (gap-16)", () => {
     const planned = await import("~/pages/planned");
     return planned.loader({ request: new Request(`http://localhost/demo/${section}`), params: { section }, context: {} } as never);
   };
+  const loadAnalytics = async () => {
+    const analytics = await import("~/pages/analytics");
+    return analytics.loader({ request: new Request("http://localhost/demo/analytics"), params: {}, context: {} } as never);
+  };
 
-  it("the planned analytics page points to Warehouse → Analytics for users with warehouse.view", async () => {
+  // Етап 6 (WP0, docs/stage6-design.md §14.2, §18.1): «Аналітика» реалізована (finance.view, fallbackToRelated) — сторінка
+  // «Заплановано» її більше не обслуговує; працівника з warehouse.view пряма адреса веде на аналітику складу, без нього — 403.
+  it("staff with warehouse.view is sent to Warehouse → Analytics; the planned page no longer serves «Аналітика»", async () => {
     setContext(STAFF);
-    expect(await loadPlanned("analytics")).toMatchObject({
-      key: "analytics",
-      related: { path: "warehouse/analytics", labelKey: "warehouseAnalytics.planned.link" },
-    });
+    const redirected = await loadAnalytics().catch((e: unknown) => e);
+    expect(redirected).toBeInstanceOf(Response);
+    expect((redirected as Response).status).toBe(302);
+    expect((redirected as Response).headers.get("Location")).toBe("/demo/warehouse/analytics");
     setContext(NO_WAREHOUSE);
-    expect((await loadPlanned("analytics")).related).toBeNull();
-    // Інші заплановані розділи — без посилання.
+    expect(((await loadAnalytics().catch((e: unknown) => e)) as Response).status).toBe(403);
     setContext(OWNER);
-    expect((await loadPlanned("returns")).related).toBeNull();
+    expect(await loadAnalytics()).toMatchObject({ demo: true });
+    for (const section of ["analytics", "returns", "finance"]) {
+      expect(((await loadPlanned(section).catch((e: unknown) => e)) as Response).status, section).toBe(404);
+    }
     for (const l of ["uk", "en"] as const) {
       expect(DICTIONARIES[l]["warehouseAnalytics.planned.link"]).toBeTruthy();
       expect(DICTIONARIES[l]["warehouseAnalytics.planned.description"]).toBeTruthy();

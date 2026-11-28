@@ -37,6 +37,28 @@ const pages = (prefix: "demo" | "app") => [
   route("warehouse/shopify", "pages/inventory-sync.tsx", { id: `${prefix}-inventory-sync` }),
   route("warehouse/analytics", "pages/warehouse-analytics.tsx", { id: `${prefix}-warehouse-analytics` }),
   route("warehouse/export", "pages/warehouse-export.tsx", { id: `${prefix}-warehouse-export` }),
+  // Етап 6: фінанси (лише власник), аналітика, повернення (docs/stage6-design.md §18.2). Сторінки-заглушки ядра (WP0) з
+  // остаточною перевіркою доступу; далі — пакети §21.3. Ресурсні маршрути (без компонента): finance/export,
+  // finance/shipping/sample.
+  route("finance", "pages/finance.tsx", { id: `${prefix}-finance` }),
+  route("finance/pnl", "pages/finance-pnl.tsx", { id: `${prefix}-finance-pnl` }),
+  route("finance/orders", "pages/finance-orders.tsx", { id: `${prefix}-finance-orders` }),
+  route("finance/shipping", "pages/finance-shipping.tsx", { id: `${prefix}-finance-shipping` }),
+  route("finance/shipping/import", "pages/finance-shipping-import.tsx", { id: `${prefix}-finance-shipping-import` }),
+  route("finance/shipping/invoices/:invoiceId", "pages/finance-shipping-invoice.tsx", { id: `${prefix}-finance-shipping-invoice` }),
+  route("finance/expenses", "pages/finance-expenses.tsx", { id: `${prefix}-finance-expenses` }),
+  route("finance/partners", "pages/finance-partners.tsx", { id: `${prefix}-finance-partners` }),
+  route("finance/partners/:partnerId", "pages/finance-partner.tsx", { id: `${prefix}-finance-partner` }),
+  route("finance/costs", "pages/finance-costs.tsx", { id: `${prefix}-finance-costs` }),
+  route("finance/rates", "pages/finance-rates.tsx", { id: `${prefix}-finance-rates` }),
+  route("finance/reports", "pages/finance-reports.tsx", { id: `${prefix}-finance-reports` }),
+  route("finance/periods", "pages/finance-periods.tsx", { id: `${prefix}-finance-periods` }),
+  route("finance/settings", "pages/finance-settings.tsx", { id: `${prefix}-finance-settings` }),
+  route("finance/shipping/sample", "pages/finance-shipping-sample.tsx", { id: `${prefix}-finance-shipping-sample` }),
+  route("finance/export", "pages/finance-export.tsx", { id: `${prefix}-finance-export` }),
+  route("analytics", "pages/analytics.tsx", { id: `${prefix}-analytics` }),
+  route("returns", "pages/returns.tsx", { id: `${prefix}-returns` }),
+  route("returns/:returnId", "pages/return-detail.tsx", { id: `${prefix}-return` }),
   route(":section", "pages/planned.tsx", { id: `${prefix}-planned` }),
 ];
 

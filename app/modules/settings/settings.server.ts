@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import type { DbOrTx } from "~/db/client.server";
 import { settings, settingsHistory } from "~/db/schema";
-import { requirePermission, type Actor, type Permission } from "~/domain/permissions";
+import { ForbiddenError, requirePermission, type Actor, type Permission } from "~/domain/permissions";
 import { ConflictError } from "~/lib/errors";
 import { logger } from "~/lib/logger.server";
 import { writeAudit } from "~/modules/audit/audit.server";
@@ -25,7 +25,24 @@ const PERMISSION_FOR_KEY: Record<SettingsKey, Permission> = {
   tracking: "settings.manage",
   // Етап 5: пороги, передача в Shopify, політика розбіжностей — критичні налаштування власника.
   warehouse: "settings.manage",
+  // Етап 6: фінанси — лише власник (finance.manage + роль owner; docs/stage6-design.md §5.2, §14.1).
+  finance: "finance.manage",
 };
+
+/** Ключі, які змінює лише роль «Власник» (навіть якщо дозвіл якось опинився в працівника — підроблений актор). */
+const OWNER_ROLE_KEYS: ReadonlySet<SettingsKey> = new Set<SettingsKey>(["finance"]);
+
+/**
+ * Ключі з ВЛАСНИМ сервісом збереження — updateSetting їх не змінює (інакше зміна обійшла б гарантії предметної
+ * області). finance → saveFinanceSettings (modules/finance/core/settings.server.ts): finance_change_log у тій самій
+ * транзакції й блокування валюти оцінки (docs/stage6-design.md §5.2, §5.6, §14.4).
+ */
+const DEDICATED_SAVE_KEYS: ReadonlySet<SettingsKey> = new Set<SettingsKey>(["finance"]);
+
+/** Дозвіл, потрібний для зміни ключа налаштувань. */
+export function permissionForSettingsKey(key: SettingsKey): Permission {
+  return PERMISSION_FOR_KEY[key];
+}
 
 export interface VersionedSettings {
   values: AllSettings;
@@ -68,9 +85,14 @@ export type UpdateSettingResult<K extends SettingsKey> =
   | { ok: true; value: SettingsValue<K>; version: number }
   | { ok: false; fieldErrors: Record<string, string> };
 
+function assertMayWrite(actor: Actor, key: SettingsKey): void {
+  requirePermission(actor, PERMISSION_FOR_KEY[key]);
+  if (OWNER_ROLE_KEYS.has(key) && actor.role !== "owner") throw new ForbiddenError(PERMISSION_FOR_KEY[key]);
+}
+
 /**
  * Оновлює налаштування з перевіркою прав, валідацією, оптимістичним блокуванням,
- * історією версій і записом у журнал.
+ * історією версій і записом у журнал. Ключі з власним сервісом (DEDICATED_SAVE_KEYS: finance) — відмова.
  */
 export async function updateSetting<K extends SettingsKey>(
   db: DbOrTx,
@@ -79,7 +101,34 @@ export async function updateSetting<K extends SettingsKey>(
   input: unknown,
   expectedVersion?: number,
 ): Promise<UpdateSettingResult<K>> {
-  requirePermission(actor, PERMISSION_FOR_KEY[key]);
+  assertMayWrite(actor, key);
+  if (DEDICATED_SAVE_KEYS.has(key)) {
+    throw new Error(`settings key "${key}" is saved only by its dedicated service (finance: saveFinanceSettings)`);
+  }
+  return writeSetting(db, actor, key, input, expectedVersion);
+}
+
+/**
+ * ЛИШЕ для saveFinanceSettings (modules/finance/core/settings.server.ts, у його транзакції разом із finance_change_log і
+ * перевіркою валюти оцінки). Інші модулі цю функцію не імпортують — тест tests/stage6/core/settings-routes.test.ts.
+ */
+export async function writeFinanceSettingsVersion(
+  tx: DbOrTx,
+  actor: Actor,
+  input: unknown,
+  expectedVersion?: number,
+): Promise<UpdateSettingResult<"finance">> {
+  assertMayWrite(actor, "finance");
+  return writeSetting(tx, actor, "finance", input, expectedVersion);
+}
+
+async function writeSetting<K extends SettingsKey>(
+  db: DbOrTx,
+  actor: Actor,
+  key: K,
+  input: unknown,
+  expectedVersion?: number,
+): Promise<UpdateSettingResult<K>> {
   const parsed = settingsSchemas[key].safeParse(input);
   if (!parsed.success) {
     const fieldErrors: Record<string, string> = {};

@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { EXPORT_REASONS, INCOTERMS } from "~/integrations/carriers/types";
 import { NOVA_POST_DELIVERY_TYPES } from "~/integrations/carriers/nova-post/mapping";
+import { FX_RATE_DATE_POLICIES } from "~/domain/finance";
+import { currencyMinorDigits, isSupportedCurrency } from "~/lib/decimal";
 
 /**
  * Схеми налаштувань (зберігаються у таблиці settings, версіонуються у settings_history).
@@ -223,6 +225,140 @@ export const warehouseSchema = z.object({
   allowNegativeOnHand: z.boolean().default(true),
 });
 
+/**
+ * Етап 6: фінанси (docs/stage6-design.md §5.2). Усі поля мають .default() — збережені раніше значення лишаються дійсними.
+ * Дозвіл зміни — finance.manage (лише власник) + роль owner (PERMISSION_FOR_KEY, saveFinanceSettings у
+ * modules/finance/core/settings.server.ts; кожна зміна — settings_history + finance_change_log). Сторінка «Налаштування»
+ * (pages/settings.tsx) НІКОЛИ не повертає ключ finance (settings.view делегується працівникам) — лише /finance/settings.
+ */
+const financeCurrency = z
+  .string()
+  .trim()
+  .toUpperCase()
+  .regex(/^[A-Z]{3}$/, "currency")
+  .refine(isSupportedCurrency, "currency");
+const financeAmount = z.string().trim().regex(/^\d{1,12}(\.\d{1,2})?$/, "amount");
+
+/**
+ * §5.1: сума з ненульовими сотими у валюті з 0 знаками (JPY, KRW…) — помилка розбору, не округлення. Повідомлення —
+ * код finance.error.amountWholeUnits.
+ */
+function hasFractionForZeroDecimal(amount: string | undefined, currency: string | undefined): boolean {
+  if (amount === undefined || currency === undefined || !isSupportedCurrency(currency)) return false;
+  if (currencyMinorDigits(currency) !== 0) return false;
+  const frac = amount.trim().split(".")[1] ?? "";
+  return /[1-9]/.test(frac);
+}
+const WHOLE_UNITS = "amountWholeUnits";
+
+export const financeFxSchema = z.object({
+  /** ОДИН вимикач кожного запиту до НБУ (розклад, кнопка, історія). Типово вимкнено (D-4). */
+  nbuEnabled: z.boolean().default(false),
+  /** Лише розклад (коли вимикач увімкнено). */
+  autoFetch: z.boolean().default(true),
+  /** Запасний курс — до N днів назад, із позначкою (D-17). */
+  fallbackDays: z.number().int().min(0).max(31).default(7),
+  /** Дата курсу виручки й комісій передоплачених замовлень (D-25). */
+  rateDatePolicy: z.enum(FX_RATE_DATE_POLICIES).default("payment_date"),
+});
+
+export const financeShippingVarianceSchema = z
+  .object({
+    /** Поріг розбіжності «факт vs прогноз»: max(percent % прогнозу, minAmount) (D-18). */
+    percent: z.number().int().min(0).max(1000).default(15),
+    minAmount: financeAmount.default("50.00"),
+    currency: financeCurrency.default("UAH"),
+    /** Поріг ваги: max(weightPercent %, weightMinGrams г). */
+    weightPercent: z.number().int().min(0).max(1000).default(10),
+    weightMinGrams: z.number().int().min(0).max(100000).default(100),
+    /** Збиткова доставка: факт − сплачено покупцем > lossMinAmount (у currency). */
+    lossMinAmount: financeAmount.default("50.00"),
+  })
+  .superRefine((v, ctx) => {
+    for (const field of ["minAmount", "lossMinAmount"] as const) {
+      if (hasFractionForZeroDecimal(v[field], v.currency)) ctx.addIssue({ code: "custom", path: [field], message: WHOLE_UNITS });
+    }
+  });
+
+export const financeShippingForecastRowSchema = z
+  .object({
+    country: z.string().trim().toUpperCase().regex(/^[A-Z]{2}$/, "country"),
+    amount: financeAmount,
+    currency: financeCurrency,
+  })
+  .superRefine((row, ctx) => {
+    if (hasFractionForZeroDecimal(row.amount, row.currency)) ctx.addIssue({ code: "custom", path: ["amount"], message: WHOLE_UNITS });
+  });
+
+export const financeShippingForecastSchema = z.object({
+  historyDays: z.number().int().min(7).max(730).default(90),
+  minSamples: z.number().int().min(1).max(1000).default(3),
+  /** Таблиця власника (прогноз №3), одна сума на країну. */
+  byCountry: z
+    .array(financeShippingForecastRowSchema)
+    .max(250)
+    .default([])
+    .refine((rows) => new Set(rows.map((r) => r.country)).size === rows.length, "duplicateCountry"),
+});
+
+export const financePartnersSchema = z.object({
+  defaultRateBp: z.number().int().min(0).max(10000).default(1000),
+  holdDays: z.number().int().min(0).max(365).default(30),
+});
+
+export const financeReportsSchema = z.object({
+  /** Робочий режим: знімки завершених періодів за розкладом. */
+  scheduledSnapshots: z.boolean().default(true),
+});
+
+export const financeSchema = z.object({
+  reportingCurrency: financeCurrency.default("UAH"),
+  /** Валюта оцінки запасів; блокується після першого запису оцінки (finance.error.valuationCurrencyLocked). */
+  valuationCurrency: financeCurrency.default("UAH"),
+  displayCurrencies: z
+    .array(financeCurrency)
+    .min(1)
+    .max(10)
+    .default(["UAH", "EUR", "USD", "GBP", "PLN"])
+    .refine((list) => new Set(list).size === list.length, "duplicateCurrency"),
+  fx: financeFxSchema.default(financeFxSchema.parse({})),
+  /** Платник ПДВ: витрати перевізника без ПДВ (ПДВ довідково); ні — з ПДВ (D-16). */
+  vatPayer: z.boolean().default(false),
+  /** Лише для перевірки на тестовому магазині (D-27); увімкнене — банер на кожній фінансовій сторінці. */
+  includeTestOrders: z.boolean().default(false),
+  shippingVariance: financeShippingVarianceSchema.default(financeShippingVarianceSchema.parse({})),
+  shippingForecast: financeShippingForecastSchema.default(financeShippingForecastSchema.parse({})),
+  partners: financePartnersSchema.default(financePartnersSchema.parse({})),
+  reports: financeReportsSchema.default(financeReportsSchema.parse({})),
+});
+export type FinanceSettings = z.infer<typeof financeSchema>;
+
+/** Поля фінансових налаштувань (шляхи) — підписи й підказки i18n finance.settings.<шлях>.label / .help. */
+export const FINANCE_SETTINGS_FIELDS = [
+  "reportingCurrency",
+  "valuationCurrency",
+  "displayCurrencies",
+  "fx.nbuEnabled",
+  "fx.autoFetch",
+  "fx.fallbackDays",
+  "fx.rateDatePolicy",
+  "vatPayer",
+  "includeTestOrders",
+  "shippingVariance.percent",
+  "shippingVariance.minAmount",
+  "shippingVariance.currency",
+  "shippingVariance.weightPercent",
+  "shippingVariance.weightMinGrams",
+  "shippingVariance.lossMinAmount",
+  "shippingForecast.historyDays",
+  "shippingForecast.minSamples",
+  "shippingForecast.byCountry",
+  "partners.defaultRateBp",
+  "partners.holdDays",
+  "reports.scheduledSnapshots",
+] as const;
+export type FinanceSettingsField = (typeof FINANCE_SETTINGS_FIELDS)[number];
+
 export const settingsSchemas = {
   automation: automationSchema,
   shipper: shipperSchema,
@@ -233,6 +369,7 @@ export const settingsSchemas = {
   checkoutRates: checkoutRatesSchema,
   tracking: trackingSchema,
   warehouse: warehouseSchema,
+  finance: financeSchema,
 } as const;
 
 export type SettingsKey = keyof typeof settingsSchemas;
@@ -283,6 +420,7 @@ export const DEFAULT_SETTINGS: AllSettings = {
     externalShopifyChanges: "review",
     allowNegativeOnHand: true,
   },
+  finance: financeSchema.parse({}),
 };
 
 /** Перелік обов'язкових полів відправника для створення накладної. */

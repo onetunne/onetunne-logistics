@@ -42,6 +42,7 @@ import { inventoryKeys } from "./keys";
 import { applyMovements, type MovementActor, type MovementInput } from "./ledger.server";
 import { effectiveLineQuantity } from "./quantities";
 import { getDefaultWarehouse, lockWarehouseForTracking } from "./warehouse.server";
+import { syncOrderFinance } from "~/modules/order-finance/sync.server";
 
 /** SQL-аналог effectiveLineQuantity (для сум у запитах: початковий залишок, аналітика продажів). */
 export const effectiveLineQuantitySql = sql<number>`greatest(coalesce(${orderLineItems.currentQuantity}, ${orderLineItems.quantity}), 0)`;
@@ -300,6 +301,15 @@ export function lineInSnapshot(placedAt: Date, shopifyAddedAt: Date | null, snap
 }
 
 export async function syncOrderReservations(tx: Tx, orderId: string, actor: MovementActor): Promise<ReservationSyncResult> {
+  const result = await syncOrderReservationsInner(tx, orderId, actor);
+  // Етап 6 (точка підключення, docs/stage6-design.md §17.7): фінанси замовлення — на кожному шляху (накладна, передача,
+  // відстеження, «відправлено поза застосунком», синхронізація Shopify, відкриття обліку, демо), у тій самій транзакції,
+  // після складу (порядок блокувань F10). Внутрішня функція: без перевірки актора, нічого не повертає.
+  await syncOrderFinance(tx, actor, orderId);
+  return result;
+}
+
+async function syncOrderReservationsInner(tx: Tx, orderId: string, actor: MovementActor): Promise<ReservationSyncResult> {
   const [order] = await tx
     .select({
       id: orders.id,

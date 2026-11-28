@@ -1,4 +1,4 @@
-import { SECTIONS, navLink } from "~/domain/navigation";
+import { SECTIONS, navLink, sectionVisible } from "~/domain/navigation";
 import { can } from "~/domain/permissions";
 import { countOpenIssues } from "~/modules/orders/repository.server";
 import { getSetting } from "~/modules/settings/settings.server";
@@ -17,7 +17,8 @@ export async function buildShellData(ctx: RequestContext): Promise<ShellData> {
       role: ctx.actor.role,
       permissions: [...ctx.actor.permissions],
     },
-    nav: SECTIONS.filter((s) => !s.permission || can(ctx.actor, s.permission)).map((s) => ({
+    // Етап 6: видимість — sectionVisible (розділ із fallbackToRelated, напр. «Аналітика» для працівника з warehouse.view).
+    nav: SECTIONS.filter((s) => sectionVisible(s, (p) => can(ctx.actor, p))).map((s) => ({
       key: s.key,
       // Одне правило з макетом (layout.tsx): «Аналітика» з warehouse.view веде на аналітику складу — так її бачить
       // і вбудоване меню Shopify Admin (app-layout.tsx: NavMenu з пунктів без planned).

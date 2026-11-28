@@ -494,9 +494,10 @@ try {
   await step("analytics (fresh demo): velocity, days of stock, risks, recommendations, prefilled batch", D, p, async (ck) => {
     const res = await go(p, "/demo/warehouse/analytics");
     ck(res?.status() === 200, `analytics 200 (${res?.status()})`);
-    // Головне меню: «Аналітика» — звичайний пункт основної групи, веде на аналітику складу.
-    const menu = p.locator('nav.ot-nav > ul.ot-nav__list a[href="/demo/warehouse/analytics"]');
-    ck((await menu.count()) === 1 && (await menu.innerText()).includes("Аналітика"), "main menu «Аналітика» → /demo/warehouse/analytics (main group)");
+    // Головне меню: «Аналітика» — звичайний пункт основної групи. Етап 6: власник (finance.view) — аналітика бізнесу
+    // (/demo/analytics); працівник із warehouse.view — аналітика складу (крок меню працівника нижче).
+    const menu = p.locator('nav.ot-nav > ul.ot-nav__list a[href="/demo/analytics"]');
+    ck((await menu.count()) === 1 && (await menu.innerText()).includes("Аналітика"), "main menu «Аналітика» → /demo/analytics (owner, main group)");
     ck((await p.locator('nav.ot-nav .ot-nav__group a[href="/demo/analytics"]').count()) === 0, "«Аналітика» not in the planned group");
     const txt = await mainText(p);
     const risk = txt.match(/Під ризиком З них немає в наявності: (\d+) (\d+)/);
@@ -1499,6 +1500,14 @@ try {
     await go(s, "/demo/warehouse");
     const pressed = await s.locator('button[value=staff][aria-pressed=true]').count();
     ck(pressed > 0, "staff role active");
+  });
+
+  await step("staff: main menu «Аналітика» leads to warehouse analytics (stage 6: business analytics is owner-only)", S, s, async (ck) => {
+    await go(s, "/demo");
+    const menu = s.locator('nav.ot-nav > ul.ot-nav__list a[href="/demo/warehouse/analytics"]');
+    ck((await menu.count()) === 1 && (await menu.innerText()).includes("Аналітика"), "staff menu «Аналітика» → /demo/warehouse/analytics");
+    ck((await s.locator('nav.ot-nav a[href="/demo/analytics"]').count()) === 0, "no link to business analytics for staff");
+    ck((await s.locator('nav.ot-nav a[href="/demo/finance"]').count()) === 0, "no «Фінанси» for staff");
   });
 
   await step("staff: no costs on production list/batch, movements, item, materials", S, s, async (ck) => {

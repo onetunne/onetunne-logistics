@@ -66,6 +66,15 @@ const SIZES: Record<string, Record<string, unknown>> = {
   OtCarrierServiceCreate: { input: {} },
   OtCarrierServiceUpdate: { input: {} },
   OtCarrierServiceDelete: { id: GID },
+  // Етап 6 (docs/stage6-design.md §16.2; ядро WP0): розміри сторінок вбудовано в документи з констант
+  // integrations/shopify/finance-graphql.ts і cost-graphql.ts; змінні — лише id, курсори й рядок пошуку. Точні формули —
+  // у тестах пакетів-власників документів (WP3, WP2).
+  OtOrderFinance: { id: GID },
+  OtOrderAgreements: { id: GID, after: "c1" },
+  OtAgreementSales: { id: GID, agreementQuery: "id:1", after: "c1" },
+  OtOrderRefunds: { id: GID },
+  OtOrdersUpdatedSince: { query: "updated_at:>='2026-11-01T00:00:00Z'", after: null },
+  OtVariantCosts: { after: null },
 };
 
 const modules = import.meta.glob("/app/integrations/shopify/*.ts", { eager: true }) as Record<string, Record<string, unknown>>;

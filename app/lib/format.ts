@@ -125,3 +125,67 @@ export function countryName(code: string | null | undefined, locale: Locale): st
     return code;
   }
 }
+
+/**
+ * Етап 6: відсоток із десяткового рядка («56.8» → uk «56,8 %», en «56.8%»); null / некоректне → «—».
+ * Рядок, а не number: рентабельність рахується точно (app/lib/decimal.ts marginPercent).
+ */
+export function formatPercent(value: string | null | undefined, locale: Locale): string {
+  const m = /^(-)?(\d+)(?:\.(\d+))?$/.exec((value ?? "").trim());
+  if (!m) return "—";
+  const { group, decimal } = SEPARATORS[locale];
+  const body = `${groupDigits(m[2]!, group)}${m[3] ? `${decimal}${m[3]}` : ""}`;
+  const sign = m[1] && /[1-9]/.test(body) ? "-" : "";
+  return locale === "uk" ? `${sign}${body}${NBSP}%` : `${sign}${body}%`;
+}
+
+/** Одиниці від меншої до більшої (вибір — за ОКРУГЛЕНИМ значенням). */
+const COMPACT_UNITS: Readonly<Record<Locale, ReadonlyArray<{ exp: number; suffix: string }>>> = {
+  uk: [
+    { exp: 3, suffix: "тис." },
+    { exp: 6, suffix: "млн" },
+    { exp: 9, suffix: "млрд" },
+  ],
+  en: [
+    { exp: 3, suffix: "k" },
+    { exp: 6, suffix: "m" },
+    { exp: 9, suffix: "bn" },
+  ],
+};
+
+/**
+ * Етап 6: коротка сума для підписів осей графіків («12,3 тис. грн» / «€12.3k»): 1 знак, половина від нуля, BigInt
+ * (детерміновано для SSR). Менше 1 000 (після округлення) — ціле. Одиниця обирається за округленим значенням:
+ * 999,50 → «1 тис.», 999 950 → «1 млн» (не «1 000 тис.»). Відсутнє → «—».
+ */
+export function formatCompactMoney(amount: string | null | undefined, currency: string | null | undefined, locale: Locale): string {
+  const m = /^(-)?(\d+)(?:\.(\d{1,2}))?$/.exec((amount ?? "").trim());
+  if (!m || !currency) return "—";
+  const negative = Boolean(m[1]);
+  const minor = BigInt(m[2]!) * 100n + BigInt((m[3] ?? "").padEnd(2, "0"));
+  const { group, decimal } = SEPARATORS[locale];
+  const roundDiv = (den: bigint) => (minor * 2n + den) / (2n * den); // половина від нуля (minor ≥ 0)
+  let number: string;
+  const whole = roundDiv(100n);
+  if (whole < 1000n) {
+    number = groupDigits(whole.toString(), group);
+  } else {
+    const units = COMPACT_UNITS[locale];
+    let chosen = units[units.length - 1]!;
+    let tenths = 0n;
+    for (const u of units) {
+      // десяті частки одиниці виміру (з мінорних одиниць); «1 000,0 одиниці» → наступна одиниця
+      tenths = roundDiv(10n ** BigInt(u.exp + 1));
+      chosen = u;
+      if (tenths < 10_000n) break;
+    }
+    const int = groupDigits((tenths / 10n).toString(), group);
+    const frac = (tenths % 10n).toString();
+    number = `${int}${frac === "0" ? "" : `${decimal}${frac}`}${locale === "uk" ? `${NBSP}${chosen.suffix}` : chosen.suffix}`;
+  }
+  const sign = negative && /[1-9]/.test(number) ? "-" : "";
+  const code = currency.trim().toUpperCase();
+  if (locale === "uk") return `${sign}${number}${NBSP}${code === "UAH" ? "грн" : code}`;
+  const prefix = ({ EUR: "€", GBP: "£", USD: "US$" } as Record<string, string>)[code];
+  return prefix ? `${sign}${prefix}${number}` : `${sign}${code}${NBSP}${number}`;
+}

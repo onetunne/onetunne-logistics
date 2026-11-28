@@ -21,6 +21,13 @@ export interface SectionDef {
    * прямим шляхом (опис решти розділу); без дозволу — звичайний запланований пункт.
    */
   navToRelated?: boolean;
+  /**
+   * Етап 6: реалізований розділ із дозволом `permission`; користувач БЕЗ нього, але з related.permission бачить пункт меню,
+   * що веде на `related` (звичайний, не запланований пункт). Напр. «Аналітика»: власник (finance.view) — аналітика
+   * бізнесу; працівник із warehouse.view — аналітика складу (як в етапі 5); без обох — пункту немає (sectionVisible).
+   * Прямий шлях розділу для такого користувача — переадресація на related або 403 (сторінка розділу).
+   */
+  fallbackToRelated?: boolean;
 }
 
 export const SECTIONS: readonly SectionDef[] = [
@@ -32,23 +39,26 @@ export const SECTIONS: readonly SectionDef[] = [
   { key: "picking", path: "picking", implemented: true, stage: 5, permission: "packing.perform" },
   { key: "tracking", path: "tracking", implemented: false, stage: 3 },
   { key: "problems", path: "problems", implemented: true, stage: 4, permission: "problems.view" },
-  { key: "returns", path: "returns", implemented: false, stage: 6 },
+  // Етап 6: «Повернення» — orders.view (суми — лише власнику, finance.view).
+  { key: "returns", path: "returns", implemented: true, stage: 6, permission: "orders.view" },
   { key: "warehouse", path: "warehouse", implemented: true, stage: 5, permission: "warehouse.view" },
   { key: "production", path: "production", implemented: true, stage: 5, permission: "warehouse.view" },
-  { key: "finance", path: "finance", implemented: false, stage: 6, permission: "finance.view" },
+  // Етап 6: «Фінанси» — лише власник (finance.view; сервіси — ще й роль owner).
+  { key: "finance", path: "finance", implemented: true, stage: 6, permission: "finance.view" },
   {
     key: "analytics",
     path: "analytics",
-    implemented: false,
+    implemented: true,
     stage: 6,
+    // Етап 6: аналітика бізнесу — лише власник; працівник із warehouse.view — аналітика складу (fallbackToRelated).
+    permission: "finance.view",
     related: {
       path: "warehouse/analytics",
       labelKey: "warehouseAnalytics.planned.link",
       descriptionKey: "warehouseAnalytics.planned.description",
       permission: "warehouse.view",
     },
-    // Аналітика складу (етап 5) готова — пункт меню веде туди; фінансова аналітика (етап 6) — на сторінці «Заплановано».
-    navToRelated: true,
+    fallbackToRelated: true,
   },
   { key: "assistant", path: "assistant", implemented: false, stage: 7 },
   { key: "development", path: "development", implemented: false, stage: 9 },
@@ -76,10 +86,24 @@ export interface NavTarget {
 
 export function navTarget(section: SectionDef, can: (permission: Permission) => boolean): NavTarget {
   const related = section.related;
-  if (!section.implemented && section.navToRelated && related && (!related.permission || can(related.permission))) {
-    return { path: related.path, planned: false };
+  const relatedAllowed = Boolean(related && (!related.permission || can(related.permission)));
+  if (section.fallbackToRelated && section.permission && !can(section.permission) && relatedAllowed) {
+    return { path: related!.path, planned: false };
+  }
+  if (!section.implemented && section.navToRelated && relatedAllowed) {
+    return { path: related!.path, planned: false };
   }
   return { path: section.path, planned: !section.implemented };
+}
+
+/**
+ * Чи бачить користувач пункт меню розділу: без `permission` — так; з ним — за дозволом; розділ із fallbackToRelated —
+ * також із дозволом related (пункт веде на related, navTarget). Одне правило для даних оболонки (server/shell.server.ts).
+ */
+export function sectionVisible(section: SectionDef, can: (permission: Permission) => boolean): boolean {
+  if (!section.permission || can(section.permission)) return true;
+  const related = section.related;
+  return Boolean(section.fallbackToRelated && related && (!related.permission || can(related.permission)));
 }
 
 /**

@@ -30,11 +30,13 @@ export function LayoutBody({ embedded }: { embedded: boolean }) {
       embedded={embedded}
       currentPath={location.pathname}
       nav={shell.nav.map((n) => {
-        // Запланований розділ із готовою частиною (navToRelated, напр. «Аналітика» → аналітика складу) — звичайний пункт,
+        // Розділ, що веде на іншу частину (navToRelated — запланований із готовою частиною; fallbackToRelated — етап 6,
+        // «Аналітика» працівника → аналітика складу) — звичайний пункт,
         // що веде туди, для користувачів з її дозволом (navLink; ті самі дозволи перевіряє сервер на сторінці). Правило
         // те саме, що в даних оболонки для меню Shopify Admin, тож уже обчислений пункт не змінюється.
         const section = SECTIONS.find((s) => s.key === n.key);
-        const link = section?.navToRelated ? navLink(shell.basePath, section, (p) => shell.actor.permissions.includes(p)) : null;
+        const link =
+          section?.navToRelated || section?.fallbackToRelated ? navLink(shell.basePath, section, (p) => shell.actor.permissions.includes(p)) : null;
         const planned = link ? link.planned : n.planned;
         return {
           key: n.key,

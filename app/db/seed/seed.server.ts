@@ -2,8 +2,52 @@ import { count, eq, inArray, sql } from "drizzle-orm";
 import type { Db, DbOrTx } from "~/db/client.server";
 import {
   auditLog,
+  carrierImportProfiles,
+  carrierInvoiceLines,
+  carrierInvoices,
   collections,
   countryRules,
+  countryRulesHistory,
+  financeChangeLog,
+  financeDiscrepancies,
+  financeEntries,
+  financeExpenseAllocations,
+  financeExpenses,
+  financeFeeRules,
+  financePeriods,
+  financeReportSnapshots,
+  financeState,
+  fxConversions,
+  fxRates,
+  inventoryCostLayers,
+  inventoryCostState,
+  inventoryValuationCompletions,
+  inventoryValuations,
+  orderDisputes,
+  orderExternalWaybills,
+  orderFinance,
+  orderFinanceForecasts,
+  orderRefundLines,
+  orderRefunds,
+  orderReturnLines,
+  orderReturns,
+  orderSales,
+  orderShopifyFinance,
+  orderTransactionFees,
+  orderTransactions,
+  partnerAttributions,
+  partnerCodes,
+  partnerCommissionEvents,
+  partnerPayouts,
+  partnerRates,
+  partners,
+  shipmentCostEstimates,
+  shippingForecastSnapshots,
+  shopInstallations,
+  shopifySessions,
+  staffMembers,
+  stockItemCosts,
+  stores,
   inventoryBalances,
   inventoryConflicts,
   inventoryMovements,
@@ -61,6 +105,9 @@ import {
 } from "./demo-data";
 import { isDemoWarehouseSeeded, seedDemoWarehouse, upgradeDemoWarehouseForCollections } from "./demo-warehouse.server";
 import { seedDemoWarehouseHistory } from "./demo-history.server";
+import { seedDemoFinance } from "./demo-finance.server";
+import { ensureValuationBackfill } from "~/modules/costing/backfill.server";
+import { getDefaultStore, resetStoresForDemo } from "~/modules/finance/core/store.server";
 
 /** Довідкові дані, потрібні в обох режимах (ідемпотентно; наявні записи не перезаписуються). */
 export async function seedReferenceData(db: Db, settingsOverrides: Partial<AllSettings> = {}): Promise<void> {
@@ -85,6 +132,9 @@ export async function seedReferenceData(db: Db, settingsOverrides: Partial<AllSe
   await ensureDefaultSettings(db, settingsOverrides);
   // Етап 5: склад за замовчуванням «Основний склад» (один; ідемпотентно).
   await ensureDefaultWarehouse(db);
+  // Етап 6 (точки підключення): магазин 'default' (getDefaultStore) і довантаження оцінки складу позицій без стану.
+  await getDefaultStore(db);
+  await ensureValuationBackfill(db);
 }
 
 export const DEMO_SETTINGS: Partial<AllSettings> = {
@@ -248,6 +298,9 @@ export async function seedDemoData(ctx: ServiceContext): Promise<void> {
   // Етап 5: вигадана історія виробництва (90 днів) і витрати матеріалів (30 днів) — після складу (облік уже відкрито);
   // окремо ідемпотентно — і для демо-баз зі складом, заповнених до її появи (один раз). Кінцеві залишки не змінюються.
   await seedDemoWarehouseHistory(ctx);
+  // Етап 6 (точка підключення): вигадані фінансові дані (курси, факти Shopify, витрати, партнери, рахунок доставки,
+  // місяці, знімки) — після складу й історії; окремо ідемпотентно (WP11).
+  await seedDemoFinance(ctx);
 }
 
 /**
@@ -327,48 +380,106 @@ export async function seedDemoSalesHistory(ctx: ServiceContext): Promise<number>
   return created;
 }
 
+/**
+ * Етап 6: фінансові таблиці для скидання демо — діти перед батьками (docs/stage6-design.md §17.7, §19). Тест
+ * tests/stage6/core/demo-reset.test.ts вимагає, щоб КОЖНА таблиця схеми була тут, у DEMO_RESET_TABLES або серед
+ * задокументованих винятків (DEMO_RESET_KEPT_TABLES).
+ */
+export const FINANCE_DEMO_RESET_TABLES = [
+  financeChangeLog,
+  financeEntries,
+  orderFinanceForecasts,
+  orderFinance,
+  financeDiscrepancies,
+  financeReportSnapshots,
+  financePeriods,
+  fxConversions,
+  fxRates,
+  orderTransactionFees,
+  orderTransactions,
+  orderRefundLines,
+  orderRefunds,
+  orderSales,
+  orderDisputes,
+  orderShopifyFinance,
+  inventoryValuationCompletions,
+  inventoryCostLayers,
+  inventoryValuations,
+  inventoryCostState,
+  stockItemCosts,
+  shipmentCostEstimates,
+  shippingForecastSnapshots,
+  orderExternalWaybills,
+  carrierInvoiceLines,
+  carrierInvoices,
+  carrierImportProfiles,
+  financeExpenseAllocations,
+  financeExpenses,
+  financeFeeRules,
+  partnerPayouts,
+  partnerCommissionEvents,
+  partnerAttributions,
+  partnerRates,
+  partnerCodes,
+  partners,
+  orderReturnLines,
+  orderReturns,
+] as const;
+
+/** Таблиці етапів 1–5 для скидання демо (спершу — ті, що посилаються на замовлення, товари й матеріали). */
+export const DEMO_RESET_TABLES = [
+  inventoryMovements,
+  stockReservations,
+  stockAlerts,
+  inventoryConflicts,
+  inventoryBalances,
+  productionReceiptLines,
+  productionReceipts,
+  productionBatchLines,
+  productionBatches,
+  orderPacking,
+  kitTemplateProducts,
+  kitTemplateCollections,
+  kitTemplateLines,
+  kitTemplates,
+  productCollections,
+  collections,
+  stockItems,
+  shipmentTrackingEvents,
+  shipmentEvents,
+  shipments,
+  sandboxCarrierShipments,
+  issues,
+  orderChanges,
+  orderLineItems,
+  orders,
+  packagingMaterials,
+  productVariants,
+  products,
+  warehouses,
+  legalEntities,
+  settingsHistory,
+  settings,
+  auditLog,
+  webhookEvents,
+  jobs,
+] as const;
+
+/**
+ * Не очищаються скиданням демо (свідомо): довідник країн та його історія (seedReferenceData не перезаписує правки),
+ * працівники, сесії й встановлення Shopify (у демо порожні), магазин 'default' і стан фінансів (resetStoresForDemo
+ * повертає їх до значень міграції — на 'default' посилаються всі фінансові таблиці).
+ */
+export const DEMO_RESET_KEPT_TABLES = [countryRules, countryRulesHistory, staffMembers, shopifySessions, shopInstallations, stores, financeState] as const;
+
 /** Повне скидання демо-даних (лише демо-режим, лише власник — перевіряється у маршруті). */
 export async function resetDemoData(ctx: ServiceContext): Promise<void> {
   const db = ctx.db;
   await db.transaction(async (tx) => {
-    for (const table of [
-      // Етап 5 (спершу — таблиці, що посилаються на замовлення, товари й матеріали).
-      inventoryMovements,
-      stockReservations,
-      stockAlerts,
-      inventoryConflicts,
-      inventoryBalances,
-      productionReceiptLines,
-      productionReceipts,
-      productionBatchLines,
-      productionBatches,
-      orderPacking,
-      kitTemplateProducts,
-      kitTemplateCollections,
-      kitTemplateLines,
-      kitTemplates,
-      productCollections,
-      collections,
-      stockItems,
-      shipmentTrackingEvents,
-      shipmentEvents,
-      shipments,
-      sandboxCarrierShipments,
-      issues,
-      orderChanges,
-      orderLineItems,
-      orders,
-      packagingMaterials,
-      productVariants,
-      products,
-      warehouses,
-      legalEntities,
-      settingsHistory,
-      settings,
-      auditLog,
-      webhookEvents,
-      jobs,
-    ]) {
+    // Етап 6: спершу фінансові таблиці (посилаються на замовлення, відправлення, склад, партії), потім магазин.
+    for (const table of FINANCE_DEMO_RESET_TABLES) await tx.delete(table);
+    await resetStoresForDemo(tx);
+    for (const table of DEMO_RESET_TABLES) {
       await tx.delete(table);
     }
   });

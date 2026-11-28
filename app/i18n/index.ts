@@ -26,6 +26,19 @@ import packing from "./messages/packing";
 import warehouseAnalytics from "./messages/warehouse-analytics";
 import warehouseInsights from "./messages/warehouse-insights";
 import staff from "./messages/staff";
+// Етап 6: спільний модуль фінансів (ядро) і модулі пакетів (docs/stage6-design.md §18.10).
+import finance from "./messages/finance";
+import financeDashboard from "./messages/finance-dashboard";
+import financeOrders from "./messages/finance-orders";
+import financeShipping from "./messages/finance-shipping";
+import financeCosts from "./messages/finance-costs";
+import financeFx from "./messages/finance-fx";
+import financeExpenses from "./messages/finance-expenses";
+import partners from "./messages/partners";
+import analytics from "./messages/analytics";
+import returns from "./messages/returns";
+import financeReports from "./messages/finance-reports";
+import financeCommands from "./messages/finance-commands";
 
 export * from "./types";
 
@@ -56,6 +69,18 @@ export const MESSAGE_MODULES: Record<string, MessageModule> = {
   warehouseAnalytics,
   warehouseInsights,
   staff,
+  finance,
+  financeDashboard,
+  financeOrders,
+  financeShipping,
+  financeCosts,
+  financeFx,
+  financeExpenses,
+  partners,
+  analytics,
+  returns,
+  financeReports,
+  financeCommands,
 };
 
 function merge(locale: Locale): Messages {

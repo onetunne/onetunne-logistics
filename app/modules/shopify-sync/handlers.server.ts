@@ -6,6 +6,7 @@ import type { JobHandlers } from "~/modules/jobs/worker.server";
 import type { ServiceContext } from "~/server/types";
 import { runTrackingPollJob } from "~/modules/tracking/tracking.server";
 import { createInventorySyncHandlers } from "~/modules/inventory-sync/handlers.server";
+import { createFinanceJobHandlers } from "~/modules/finance/jobs.server";
 import { logger } from "~/lib/logger.server";
 import {
   markCollectionDeleted,
@@ -202,6 +203,9 @@ export function createSyncHandlers(deps: SyncDeps): JobHandlers {
     },
     // Етап 5: передача внутрішніх рухів у Shopify (inventory.push) і звірка залишків (inventory.reconcile).
     ...createInventorySyncHandlers({ db: deps.db, admin: deps.admin }),
+    // Етап 6 (точка підключення): фінансові завдання пакетів (FX, собівартість, синхронізація фінансів, знімки) —
+    // статичний реєстр modules/finance/jobs.server.ts.
+    ...createFinanceJobHandlers({ db: deps.db, serviceContext: deps.serviceContext, admin: deps.admin }),
   };
 }
 

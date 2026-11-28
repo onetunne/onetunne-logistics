@@ -14,6 +14,9 @@ export const PERMISSIONS = [
   "settings.manage",
   "automation.manage",
   "finance.view",
+  // Етап 6: керування фінансами — витрати, курси, обміни, партнери, імпорт рахунків, ручна собівартість, закриття
+  // місяця, знімки, фінансові налаштування (docs/stage6-design.md §14.1). Лише власник (OWNER_ONLY_PERMISSIONS).
+  "finance.manage",
   "staff.manage",
   "demo.reset",
   // Етап 5: склад, виробництво, пакування
@@ -44,10 +47,12 @@ const STAFF_PERMISSIONS: readonly Permission[] = [
 
 /**
  * Дозволи, які НІКОЛИ не можна надати працівнику через гнучкі права.
- * finance.view також відкриває поля собівартості складу/виробництва/матеріалів (етап 5).
+ * finance.view також відкриває поля собівартості складу/виробництва/матеріалів (етап 5); finance.manage — керування
+ * фінансами (етап 6). Сервіси фінансів додатково перевіряють роль owner (requireFinance, modules/finance/core).
  */
 export const OWNER_ONLY_PERMISSIONS: readonly Permission[] = [
   "finance.view",
+  "finance.manage",
   "settings.manage",
   "automation.manage",
   "staff.manage",

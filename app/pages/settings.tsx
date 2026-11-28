@@ -162,6 +162,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
   } catch {
     throw new Response("Forbidden", { status: 403 });
   }
+  // Етап 6 (docs/stage6-design.md §5.2, §14.3 п. 2): фіксований перелік розділів нижче НІКОЛИ не містить ключа finance —
+  // settings.view делегується працівникам; фінансові налаштування — лише /finance/settings (власник). Тест:
+  // tests/stage6/core/settings-routes.test.ts.
   const { values, versions } = await loadSettings(ctx.db);
   const isDemo = ctx.mode === "demo";
   const defaultCarrierCode = ctx.carriers.getDefault()?.code ?? null;

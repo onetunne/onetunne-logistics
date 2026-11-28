@@ -19,6 +19,7 @@
  * subunits — НЕ ЗАДОКУМЕНТОВАНО, а помилка у 10 разів означала б заниження ціни.
  */
 import type { Money } from "~/integrations/carriers/types";
+import { currencyMinorDigits } from "~/lib/decimal";
 import { fromMinor } from "~/lib/money";
 import type { SettingsValue } from "~/modules/settings/schema";
 
@@ -36,22 +37,9 @@ const CENTS = 100n;
 const BASIS_POINTS = 10_000n;
 
 /**
- * Кількість знаків після коми за ISO 4217 (лише ті, що відрізняються від 2).
- * Shopify на сторінках CarrierService власного списку не наводить — беремо стандарт ISO 4217.
+ * Кількість знаків після коми за ISO 4217 — перенесено в app/lib/decimal.ts (етап 6); тут реекспорт без зміни поведінки.
  */
-const ZERO_DECIMAL_CURRENCIES = new Set([
-  "BIF", "CLP", "DJF", "GNF", "ISK", "JPY", "KMF", "KRW", "PYG", "RWF", "UGX", "UYI", "VND", "VUV", "XAF", "XOF", "XPF",
-]);
-const THREE_DECIMAL_CURRENCIES = new Set(["BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND"]);
-const FOUR_DECIMAL_CURRENCIES = new Set(["CLF", "UYW"]);
-
-export function currencyMinorDigits(currency: string): number {
-  const c = currency.trim().toUpperCase();
-  if (ZERO_DECIMAL_CURRENCIES.has(c)) return 0;
-  if (THREE_DECIMAL_CURRENCIES.has(c)) return 3;
-  if (FOUR_DECIMAL_CURRENCIES.has(c)) return 4;
-  return 2;
-}
+export { currencyMinorDigits } from "~/lib/decimal";
 
 const CURRENCY_RE = /^[A-Z]{3}$/;
 

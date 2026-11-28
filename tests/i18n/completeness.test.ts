@@ -5,6 +5,32 @@ import { DICTIONARIES, MESSAGE_MODULES } from "~/i18n";
 import { ORDER_STATUSES } from "~/domain/order-status";
 import { SECTIONS } from "~/domain/navigation";
 import { ISSUE_CODES, AUTO_FIX_RULES } from "~/modules/validation/types";
+import { COMPONENT_STATES, DISCREPANCY_CODES, FINANCE_CATEGORIES, FINANCE_TABS, REVIEW_REASONS } from "~/domain/finance";
+import { financeLabelKeys } from "~/modules/finance/core/labels";
+
+/**
+ * Модулі «без зайвих ключів»: етап 5 + етап 6 (спільний finance і модулі пакетів, docs/stage6-design.md §18.10).
+ * Кожен пакет етапу 6 додає ключі лише у свій модуль — і кожен ключ має використовуватися.
+ */
+const STRICT_MODULES = [
+  "warehouse",
+  "production",
+  "warehouseAnalytics",
+  "dashboard",
+  "staff",
+  "finance",
+  "financeDashboard",
+  "financeOrders",
+  "financeShipping",
+  "financeCosts",
+  "financeFx",
+  "financeExpenses",
+  "partners",
+  "analytics",
+  "returns",
+  "financeReports",
+  "financeCommands",
+] as const;
 
 function walk(dir: string): string[] {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
@@ -47,13 +73,13 @@ describe("i18n completeness", () => {
     expect(missing).toEqual([]);
   });
 
-  it("stage-5 modules have no unused keys (literal use or a dynamic `prefix.${…}` family in app code)", () => {
+  it("stage-5 and stage-6 modules have no unused keys (literal use or a dynamic `prefix.${…}` family in app code)", () => {
     const files = walk(path.resolve("app")).filter((f) => !f.includes(`${path.sep}i18n${path.sep}messages${path.sep}`));
     const src = files.map((f) => fs.readFileSync(f, "utf8")).join("\n");
     // Динамічні родини: `warehouse.reason.${code}`, "packing.tab." + key тощо.
     const prefixes = [...src.matchAll(/[`"']([a-zA-Z0-9_.]+\.)(?:\$\{|["'`]\s*\+)/g)].map((m) => m[1]!);
     const unused: string[] = [];
-    for (const name of ["warehouse", "production", "warehouseAnalytics", "dashboard", "staff"]) {
+    for (const name of [...STRICT_MODULES]) {
       const mod = MESSAGE_MODULES[name];
       expect(mod, name).toBeDefined();
       for (const k of Object.keys(mod!.uk)) {
@@ -76,6 +102,12 @@ describe("i18n completeness", () => {
       ...["validation", "status", "automation_paused", "shipper_incomplete", "no_carrier", "carrier_not_configured", "in_progress"].map(
         (k) => `result.waybill.blocked.${k}`,
       ),
+      // Етап 6: спільні родини фінансів (повний перелік — tests/stage6/core/enumerations.test.ts).
+      ...FINANCE_CATEGORIES.map(financeLabelKeys.category),
+      ...COMPONENT_STATES.map(financeLabelKeys.state),
+      ...DISCREPANCY_CODES.map(financeLabelKeys.discrepancy),
+      ...REVIEW_REASONS.map(financeLabelKeys.review),
+      ...FINANCE_TABS.map((t) => financeLabelKeys.tab(t.key)),
     ];
     expect(keys.filter((k) => !(k in DICTIONARIES.uk) || !(k in DICTIONARIES.en))).toEqual([]);
   });

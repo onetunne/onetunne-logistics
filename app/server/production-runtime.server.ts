@@ -20,6 +20,7 @@ import { SCHEDULED_RECONCILE_FIRST_DELAY_MS } from "~/modules/inventory-sync/job
 import { SCHEDULED_COLLECTIONS_SYNC_FIRST_DELAY_MS, scheduleCollectionsSyncCheck } from "~/modules/shopify-sync/collections.server";
 import { enqueueWebhookSubscriptionCheck, webhookConfigKey } from "~/modules/shopify-sync/webhook-subscriptions.server";
 import { FULFILLMENT_REFRESH_FIRST_DELAY_MS, scheduleFulfillmentRefreshCheck } from "~/modules/shopify-sync/fulfillment-refresh.server";
+import { ensureFinanceSchedules } from "~/modules/finance/jobs.server";
 
 /**
  * Робоче середовище: PostgreSQL (DATABASE_URL). Тестовий перевізник тут НЕ реєструється —
@@ -103,6 +104,9 @@ export async function ensureJobWorker(): Promise<void> {
     await scheduleCollectionsSyncCheck(runtime.handle.db, { delayMs: SCHEDULED_COLLECTIONS_SYNC_FIRST_DELAY_MS });
     // Застарілий статус виконання відправлених замовлень (загублений webhook) → повторне читання; лише читання Shopify.
     await scheduleFulfillmentRefreshCheck(runtime.handle.db, { delayMs: FULFILLMENT_REFRESH_FIRST_DELAY_MS });
+    // Етап 6 (точка підключення): ланцюжки фінансів (FX — лише з fx.nbuEnabled, звірка, початкове заповнення, знімки,
+    // очікувані оцінки) — один виклик статичного реєстру modules/finance/jobs.server.ts.
+    await ensureFinanceSchedules(runtime.handle.db);
   } catch (e) {
     workerStarted = false;
     logger.error("job.worker_start_failed", { error: e });

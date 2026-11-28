@@ -1,8 +1,8 @@
 /**
- * Головне меню: «Аналітика» (S5-NAV). Розділ «Аналітика» ще заплановано (фінансова частина — етап 6), але аналітика
- * складу (етап 5) готова: користувач із warehouse.view переходить з меню одразу на «Склад» → «Аналітика» (пункт серед
- * реалізованих розділів, без позначки «Заплановано»). Без дозволу — звичайний запланований пункт; сторінка
- * «Заплановано» лишається за прямим шляхом.
+ * Головне меню: «Аналітика» (S5-NAV; етап 6 — docs/stage6-design.md §14.3 п. 1, §18.1). Розділ реалізовано з дозволом
+ * finance.view і fallbackToRelated: власник переходить на аналітику бізнесу (/analytics); працівник із warehouse.view —
+ * на «Склад» → «Аналітика» (як в етапі 5, звичайний пункт); без обох дозволів пункту немає. «Повернення» (етап 6) —
+ * реалізований розділ з orders.view.
  */
 import { createElement as h } from "react";
 import { renderToString } from "react-dom/server";
@@ -10,7 +10,7 @@ import { StaticRouterProvider, createStaticHandler, createStaticRouter } from "r
 import { describe, expect, it } from "vitest";
 import { LayoutBody } from "~/components/layout";
 import type { ShellData } from "~/components/shell-types";
-import { SECTIONS, navLink, navTarget, sectionByPath, sectionHref } from "~/domain/navigation";
+import { SECTIONS, navLink, navTarget, sectionByPath, sectionHref, sectionVisible } from "~/domain/navigation";
 import { can, makeActor, type Actor } from "~/domain/permissions";
 import { DICTIONARIES } from "~/i18n";
 import { OWNER, STAFF } from "../helpers";
@@ -28,7 +28,7 @@ function shellFor(actor: Actor, opts: { withNavLink?: boolean; basePath?: "/demo
     mode: basePath === "/app" ? "production" : "demo",
     basePath,
     actor: { id: actor.id, displayName: actor.displayName, role: actor.role, permissions: [...actor.permissions] },
-    nav: SECTIONS.filter((s) => !s.permission || can(actor, s.permission)).map((s) => ({
+    nav: SECTIONS.filter((s) => sectionVisible(s, (p) => can(actor, p))).map((s) => ({
       key: s.key,
       ...(opts.withNavLink ? navLink(basePath, s, (p) => can(actor, p)) : { href: sectionHref(basePath, s), planned: !s.implemented }),
       stage: s.stage,
@@ -77,11 +77,19 @@ function link(part: string, label: string): { href: string; current: boolean } |
 }
 
 describe("navTarget", () => {
-  it("only «Аналітика» leads to its ready part, and only with warehouse.view", () => {
+  it("only «Аналітика» falls back to its related part: owner → business analytics, staff with warehouse.view → warehouse analytics", () => {
     const analytics = sectionByPath("analytics")!;
-    expect(analytics).toMatchObject({ implemented: false, navToRelated: true, related: { path: "warehouse/analytics", permission: "warehouse.view" } });
+    expect(analytics).toMatchObject({
+      implemented: true,
+      permission: "finance.view",
+      fallbackToRelated: true,
+      related: { path: "warehouse/analytics", permission: "warehouse.view" },
+    });
+    expect(navTarget(analytics, (p) => can(OWNER, p))).toEqual({ path: "analytics", planned: false });
     expect(navTarget(analytics, (p) => can(STAFF, p))).toEqual({ path: "warehouse/analytics", planned: false });
-    expect(navTarget(analytics, (p) => can(NO_WAREHOUSE, p))).toEqual({ path: "analytics", planned: true });
+    // Без finance.view і warehouse.view пункту немає взагалі (sectionVisible).
+    expect(sectionVisible(analytics, (p) => can(NO_WAREHOUSE, p))).toBe(false);
+    expect(sectionVisible(analytics, (p) => can(STAFF, p))).toBe(true);
     for (const s of SECTIONS.filter((x) => x.key !== "analytics")) {
       expect(navTarget(s, () => true), s.key).toEqual({ path: s.path, planned: !s.implemented });
     }
@@ -91,41 +99,53 @@ describe("navTarget", () => {
   it("navLink: the same rule with basePath for the shell data (Shopify Admin menu) and the layout", () => {
     const analytics = sectionByPath("analytics")!;
     for (const base of ["/demo", "/app"] as const) {
-      expect(navLink(base, analytics, (p) => can(OWNER, p))).toEqual({ href: `${base}/warehouse/analytics`, planned: false });
-      expect(navLink(base, analytics, (p) => can(NO_WAREHOUSE, p))).toEqual({ href: `${base}/analytics`, planned: true });
+      expect(navLink(base, analytics, (p) => can(OWNER, p))).toEqual({ href: `${base}/analytics`, planned: false });
+      expect(navLink(base, analytics, (p) => can(STAFF, p))).toEqual({ href: `${base}/warehouse/analytics`, planned: false });
       for (const s of SECTIONS.filter((x) => x.key !== "analytics")) {
         expect(navLink(base, s, () => true), s.key).toEqual({ href: sectionHref(base, s), planned: !s.implemented });
       }
     }
-    // Вбудоване меню (routes/app-layout.tsx) показує пункти shell.nav без planned: з navLink у даних оболонки
-    // «Аналітика» потрапляє туди й веде на аналітику складу; без warehouse.view — ні.
+    // Вбудоване меню (routes/app-layout.tsx) показує пункти shell.nav без planned.
     const embeddedMenu = (actor: Actor) =>
       shellFor(actor, { withNavLink: true, basePath: "/app" })
         .nav.filter((n) => n.key !== "dashboard" && !n.planned)
         .map((n) => n.href);
-    expect(embeddedMenu(OWNER)).toContain("/app/warehouse/analytics");
+    expect(embeddedMenu(OWNER)).toContain("/app/analytics");
+    expect(embeddedMenu(OWNER)).toContain("/app/finance");
+    expect(embeddedMenu(OWNER)).toContain("/app/returns");
     expect(embeddedMenu(STAFF)).toContain("/app/warehouse/analytics");
+    expect(embeddedMenu(STAFF)).not.toContain("/app/analytics");
+    expect(embeddedMenu(STAFF)).not.toContain("/app/finance");
+    expect(embeddedMenu(STAFF)).toContain("/app/returns");
     expect(embeddedMenu(NO_WAREHOUSE)).not.toContain("/app/warehouse/analytics");
     expect(embeddedMenu(NO_WAREHOUSE)).not.toContain("/app/analytics");
   });
 });
 
-describe("main menu «Аналітика» (S5-NAV)", () => {
-  it("owner and staff with warehouse.view: a regular item that opens Warehouse → Analytics", async () => {
-    for (const actor of [OWNER, STAFF]) {
-      const { main, planned } = await renderNav(actor, "/demo");
-      expect(link(main, uk("nav.analytics")), actor.role).toEqual({ href: "/demo/warehouse/analytics", current: false });
-      expect(link(planned, uk("nav.analytics")), actor.role).toBeNull();
-      // Інші заплановані розділи — як і раніше.
-      expect(link(planned, uk("nav.returns"))?.href).toBe("/demo/returns");
+describe("main menu «Аналітика» (S5-NAV, stage 6)", () => {
+  it("owner: a regular item that opens business analytics; staff with warehouse.view: Warehouse → Analytics", async () => {
+    const owner = await renderNav(OWNER, "/demo");
+    expect(link(owner.main, uk("nav.analytics"))).toEqual({ href: "/demo/analytics", current: false });
+    const staff = await renderNav(STAFF, "/demo");
+    expect(link(staff.main, uk("nav.analytics"))).toEqual({ href: "/demo/warehouse/analytics", current: false });
+    for (const { main, planned } of [owner, staff]) {
+      expect(link(planned, uk("nav.analytics"))).toBeNull();
+      // «Повернення» (етап 6) — реалізований розділ (orders.view), серед основних пунктів.
+      expect(link(main, uk("nav.returns"))?.href).toBe("/demo/returns");
+      expect(link(planned, uk("nav.returns"))).toBeNull();
     }
+    expect(link(owner.main, uk("nav.finance"))?.href).toBe("/demo/finance");
+    expect(link(staff.main, uk("nav.finance"))).toBeNull();
+    expect(link(staff.planned, uk("nav.finance"))).toBeNull();
   });
 
-  it("is the current item on the warehouse analytics page; «Склад» stays current on other warehouse pages", async () => {
-    const onAnalytics = await renderNav(OWNER, "/demo/warehouse/analytics");
+  it("is the current item on its page; «Склад» stays current on other warehouse pages", async () => {
+    const onBusiness = await renderNav(OWNER, "/demo/analytics");
+    expect(link(onBusiness.main, uk("nav.analytics"))?.current).toBe(true);
+    const onAnalytics = await renderNav(STAFF, "/demo/warehouse/analytics");
     expect(link(onAnalytics.main, uk("nav.analytics"))?.current).toBe(true);
     expect(link(onAnalytics.main, uk("nav.warehouse"))?.current).toBe(false);
-    const onStock = await renderNav(OWNER, "/demo/warehouse/movements");
+    const onStock = await renderNav(STAFF, "/demo/warehouse/movements");
     expect(link(onStock.main, uk("nav.warehouse"))?.current).toBe(true);
     expect(link(onStock.main, uk("nav.analytics"))?.current).toBe(false);
   });
@@ -138,10 +158,9 @@ describe("main menu «Аналітика» (S5-NAV)", () => {
     }
   });
 
-  it("without warehouse.view: still the planned item with the planned page", async () => {
+  it("without warehouse.view (and without finance.view): no «Аналітика» item at all", async () => {
     const { main, planned } = await renderNav(NO_WAREHOUSE, "/demo");
     expect(link(main, uk("nav.analytics"))).toBeNull();
-    expect(link(planned, uk("nav.analytics"))?.href).toBe("/demo/analytics");
-    expect(planned).toContain(uk("common.planned"));
+    expect(link(planned, uk("nav.analytics"))).toBeNull();
   });
 });
